@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session
 
 from app.services.auth_service.models import UserAuth
+from app.services.auth_service.services.login_service import InvalidCredentialsError, login_user
 from app.services.auth_service.services.register_service import (
     DuplicateEmailError,
     DuplicateUsernameError,
@@ -10,7 +11,7 @@ from app.services.auth_service.services.register_service import (
 
 from ..deps_auth import get_current_user
 from ..dependencies import get_db
-from ..schemas import AuthProfileResponse, RegisterRequest, RegisterResponse
+from ..schemas import AuthProfileResponse, LoginRequest, LoginResponse, RegisterRequest, RegisterResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -39,6 +40,26 @@ def register(body: RegisterRequest, session: Session = Depends(get_db)) -> Regis
         username=user.username,
         email=user.email,
         created_at=user.created_at,
+    )
+
+
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Log in and receive access + refresh tokens",
+)
+def login(body: LoginRequest, session: Session = Depends(get_db)) -> LoginResponse:
+    try:
+        tokens = login_user(session, username=body.username, password=body.password)
+    except InvalidCredentialsError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+        ) from None
+    return LoginResponse(
+        access_token=tokens.access_token,
+        refresh_token=tokens.refresh_token,
     )
 
 
