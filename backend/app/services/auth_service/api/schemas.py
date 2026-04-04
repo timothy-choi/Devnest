@@ -14,3 +14,12 @@ class RegisterResponse(BaseModel):
     username: str
     email: str
     created_at: datetime
+
+
+class AuthProfileResponse(BaseModel):
+    """Public auth record for the authenticated user (GET /auth)."""
+
+    user_auth_id: int
+    username: str
+    email: str
+    created_at: datetime
