@@ -3,6 +3,7 @@ from sqlmodel import Session
 
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.login_service import InvalidCredentialsError, login_user
+from app.services.auth_service.services.logout_service import UnknownRefreshTokenError, logout_refresh_token
 from app.services.auth_service.services.register_service import (
     DuplicateEmailError,
     DuplicateUsernameError,
@@ -11,7 +12,15 @@ from app.services.auth_service.services.register_service import (
 
 from ..deps_auth import get_current_user
 from ..dependencies import get_db
-from ..schemas import AuthProfileResponse, LoginRequest, LoginResponse, RegisterRequest, RegisterResponse
+from ..schemas import (
+    AuthProfileResponse,
+    LoginRequest,
+    LoginResponse,
+    LogoutRequest,
+    LogoutResponse,
+    RegisterRequest,
+    RegisterResponse,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -61,6 +70,23 @@ def login(body: LoginRequest, session: Session = Depends(get_db)) -> LoginRespon
         access_token=tokens.access_token,
         refresh_token=tokens.refresh_token,
     )
+
+
+@router.post(
+    "/logout",
+    response_model=LogoutResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Revoke a refresh token (logout this session)",
+)
+def logout(body: LogoutRequest, session: Session = Depends(get_db)) -> LogoutResponse:
+    try:
+        logout_refresh_token(session, refresh_token=body.refresh_token)
+    except UnknownRefreshTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unknown or already revoked refresh token",
+        ) from None
+    return LogoutResponse()
 
 
 @router.get(
