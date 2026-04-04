@@ -4,6 +4,7 @@ from sqlmodel import Session
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.login_service import InvalidCredentialsError, login_user
 from app.services.auth_service.services.logout_service import UnknownRefreshTokenError, logout_refresh_token
+from app.services.auth_service.services.password_service import InvalidCurrentPasswordError, change_password
 from app.services.auth_service.services.register_service import (
     DuplicateEmailError,
     DuplicateUsernameError,
@@ -14,6 +15,8 @@ from ..deps_auth import get_current_user
 from ..dependencies import get_db
 from ..schemas import (
     AuthProfileResponse,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
     LoginRequest,
     LoginResponse,
     LogoutRequest,
@@ -87,6 +90,32 @@ def logout(body: LogoutRequest, session: Session = Depends(get_db)) -> LogoutRes
             detail="Unknown or already revoked refresh token",
         ) from None
     return LogoutResponse()
+
+
+@router.put(
+    "/password",
+    response_model=ChangePasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Change password for the authenticated user",
+)
+def change_password_endpoint(
+    body: ChangePasswordRequest,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> ChangePasswordResponse:
+    try:
+        change_password(
+            session,
+            user=current,
+            current_password=body.current_password,
+            new_password=body.new_password,
+        )
+    except InvalidCurrentPasswordError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect",
+        ) from None
+    return ChangePasswordResponse()
 
 
 @router.get(

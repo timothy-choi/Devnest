@@ -42,3 +42,12 @@ class LogoutRequest(BaseModel):
 
 class LogoutResponse(BaseModel):
     message: str = "Logged out"
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class ChangePasswordResponse(BaseModel):
+    message: str = "Password updated"

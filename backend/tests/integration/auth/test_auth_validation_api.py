@@ -228,6 +228,82 @@ def test_logout_rejects_null_refresh_token(client):
     _assert_unprocessable(client.post("/auth/logout", json={"refresh_token": None}))
 
 
+def test_change_password_rejects_new_password_too_short(client):
+    client.post(
+        "/auth/register",
+        json={
+            "username": "valpw",
+            "email": "valpw@example.com",
+            "password": "12345678",
+        },
+    )
+    login_r = client.post(
+        "/auth/login",
+        json={"username": "valpw", "password": "12345678"},
+    )
+    access = login_r.json()["access_token"]
+    _assert_unprocessable(
+        client.put(
+            "/auth/password",
+            headers={"Authorization": f"Bearer {access}"},
+            json={"current_password": "12345678", "new_password": "short7"},
+        )
+    )
+
+
+def test_change_password_rejects_missing_fields(client):
+    client.post(
+        "/auth/register",
+        json={
+            "username": "valpw2",
+            "email": "valpw2@example.com",
+            "password": "12345678",
+        },
+    )
+    login_r = client.post(
+        "/auth/login",
+        json={"username": "valpw2", "password": "12345678"},
+    )
+    access = login_r.json()["access_token"]
+    _assert_unprocessable(
+        client.put(
+            "/auth/password",
+            headers={"Authorization": f"Bearer {access}"},
+            json={"current_password": "12345678"},
+        )
+    )
+    _assert_unprocessable(
+        client.put(
+            "/auth/password",
+            headers={"Authorization": f"Bearer {access}"},
+            json={"new_password": "12345678"},
+        )
+    )
+
+
+def test_change_password_rejects_new_password_over_max_length(client):
+    client.post(
+        "/auth/register",
+        json={
+            "username": "valpw3",
+            "email": "valpw3@example.com",
+            "password": "12345678",
+        },
+    )
+    login_r = client.post(
+        "/auth/login",
+        json={"username": "valpw3", "password": "12345678"},
+    )
+    access = login_r.json()["access_token"]
+    _assert_unprocessable(
+        client.put(
+            "/auth/password",
+            headers={"Authorization": f"Bearer {access}"},
+            json={"current_password": "12345678", "new_password": "x" * 257},
+        )
+    )
+
+
 def test_access_token_remains_valid_after_refresh_logout(client):
     """Logout revokes refresh only; access JWT is unchanged until it expires."""
     client.post(
