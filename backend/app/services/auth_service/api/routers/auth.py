@@ -1,8 +1,11 @@
-import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlmodel import Session, select
+from sqlmodel import Session
 
-from app.services.auth_service.models import UserAuth
+from app.services.auth_service.services.register_service import (
+    DuplicateEmailError,
+    DuplicateUsernameError,
+    register_user,
+)
 
 from ..dependencies import get_db
 from ..schemas import RegisterRequest, RegisterResponse
@@ -17,16 +20,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
     summary="Register a new user",
 )
 def register(body: RegisterRequest, session: Session = Depends(get_db)) -> RegisterResponse:
-    if session.exec(select(UserAuth).where(UserAuth.username == body.username)).first():
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already registered")
-    if session.exec(select(UserAuth).where(UserAuth.email == str(body.email))).first():
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
-
-    password_hash = bcrypt.hashpw(body.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    user = UserAuth(username=body.username, email=str(body.email), password_hash=password_hash)
-    session.add(user)
-    session.commit()
-    session.refresh(user)
+    try:
+        user = register_user(
+            session,
+            username=body.username,
+            email=str(body.email),
+            password=body.password,
+        )
+    except DuplicateUsernameError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already registered") from None
+    except DuplicateEmailError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered") from None
     assert user.user_auth_id is not None
     return RegisterResponse(
         user_auth_id=user.user_auth_id,
