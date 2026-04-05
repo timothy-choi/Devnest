@@ -1,6 +1,7 @@
 import os
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +31,23 @@ class Settings(BaseSettings):
 
     # Service-to-service: required for POST /internal/notifications (header X-Internal-API-Key).
     internal_api_key: str = ""
+
+    # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_address: str = ""
+    smtp_use_tls: bool = True
+
+    @field_validator("smtp_use_tls", mode="before")
+    @classmethod
+    def _parse_smtp_use_tls(cls, v):  # noqa: ANN001 — pydantic coerces env strings
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
 
 
 @lru_cache
