@@ -1,1 +1,1 @@
-"""Notification HTTP layer (routers added later)."""
+"""Notification HTTP layer (routers, dependencies)."""

@@ -10,6 +10,17 @@ from sqlmodel import Session, SQLModel
 from app.libs.db.database import init_db
 
 
+@pytest.fixture(autouse=True)
+def _integration_internal_api_key(monkeypatch):
+    """Internal notification routes require X-Internal-API-Key."""
+    monkeypatch.setenv("INTERNAL_API_KEY", "integration-test-internal-key")
+    from app.libs.common.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture(scope="session")
 def test_engine():
     from app.libs.db.database import get_engine

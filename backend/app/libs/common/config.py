@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     oauth_google_client_id: str = ""
     oauth_google_client_secret: str = ""
 
+    # Service-to-service: required for POST /internal/notifications (header X-Internal-API-Key).
+    internal_api_key: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

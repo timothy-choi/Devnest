@@ -48,3 +48,15 @@ class NotificationDetailResponse(BaseModel):
     read_at: datetime | None
     dismissed_at: datetime | None
     created_at: datetime
+
+
+class InternalCreateNotificationResponse(BaseModel):
+    notification_id: int
+    status: str
+
+
+class DeliveryRetryResponse(BaseModel):
+    delivery_id: int
+    status: str
+    attempt_count: int
+    last_error_message: str | None = None
