@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
+    password_reset_token_expire_minutes: int = 60
+    # If true, PUT /auth/forgot-password includes reset_token in JSON (local/testing only; use email in production).
+    password_reset_return_token: bool = False
 
     # OAuth redirect bases (no trailing slash). Env may be host:port only; code prepends http:// if needed.
     github_oauth_public_base_url: str = ""

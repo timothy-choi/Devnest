@@ -69,3 +69,26 @@ class OAuthCallbackResponse(BaseModel):
 
     access_token: str
     token_type: str = "bearer"
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    """
+    Generic success message. If PASSWORD_RESET_RETURN_TOKEN=true, reset_token is set for local testing
+    (replace with email delivery in production).
+    """
+
+    message: str = "If an account exists for this email, you will receive password reset instructions."
+    reset_token: str | None = None
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=2048)
+    new_password: str = Field(min_length=8, max_length=256)
+
+
+class ResetPasswordResponse(BaseModel):
+    message: str = "Password has been reset"

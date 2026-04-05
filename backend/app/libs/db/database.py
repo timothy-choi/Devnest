@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session, SQLModel, create_engine
 
 from ..common.config import get_settings
-from ...services.auth_service.models import OAuth, Token, UserAuth  # noqa: F401 — register metadata
+from ...services.auth_service.models import OAuth, PasswordResetToken, Token, UserAuth  # noqa: F401 — register metadata
 
 _engine = None
 _session_factory = None

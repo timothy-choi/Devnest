@@ -6,6 +6,11 @@ from app.libs.common.config import get_settings
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.login_service import InvalidCredentialsError, login_user
 from app.services.auth_service.services.logout_service import UnknownRefreshTokenError, logout_refresh_token
+from app.services.auth_service.services.password_reset_service import (
+    InvalidResetTokenError,
+    request_password_reset,
+    reset_password_with_token,
+)
 from app.services.auth_service.services.password_service import InvalidCurrentPasswordError, change_password
 from app.services.auth_service.services.refresh_token_service import InvalidRefreshTokenError, refresh_access_token
 from app.services.auth_service.services.register_service import (
@@ -27,6 +32,8 @@ from ..schemas import (
     AuthProfileResponse,
     ChangePasswordRequest,
     ChangePasswordResponse,
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     LoginResponse,
     LogoutRequest,
@@ -36,6 +43,8 @@ from ..schemas import (
     RefreshAccessResponse,
     RegisterRequest,
     RegisterResponse,
+    ResetPasswordRequest,
+    ResetPasswordResponse,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -170,6 +179,37 @@ def logout(body: LogoutRequest, session: Session = Depends(get_db)) -> LogoutRes
             detail="Unknown or already revoked refresh token",
         ) from None
     return LogoutResponse()
+
+
+@router.put(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Request password reset (same response whether or not the email is registered)",
+)
+def forgot_password(body: ForgotPasswordRequest, session: Session = Depends(get_db)) -> ForgotPasswordResponse:
+    raw = request_password_reset(session, email=str(body.email))
+    s = get_settings()
+    if s.password_reset_return_token and raw is not None:
+        return ForgotPasswordResponse(reset_token=raw)
+    return ForgotPasswordResponse()
+
+
+@router.put(
+    "/reset-password",
+    response_model=ResetPasswordResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Set a new password using a reset token from the forgot-password flow",
+)
+def reset_password_endpoint(body: ResetPasswordRequest, session: Session = Depends(get_db)) -> ResetPasswordResponse:
+    try:
+        reset_password_with_token(session, token=body.token, new_password=body.new_password)
+    except InvalidResetTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token",
+        ) from None
+    return ResetPasswordResponse()
 
 
 @router.put(
