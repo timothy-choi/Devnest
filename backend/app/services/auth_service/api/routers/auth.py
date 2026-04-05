@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
+from app.libs.common.config import get_settings
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.login_service import InvalidCredentialsError, login_user
 from app.services.auth_service.services.logout_service import UnknownRefreshTokenError, logout_refresh_token
@@ -11,6 +13,13 @@ from app.services.auth_service.services.register_service import (
     DuplicateUsernameError,
     register_user,
 )
+from app.services.auth_service.services.oauth_client import OAuthProviderError
+from app.services.auth_service.services.oauth_service import (
+    UnsupportedOAuthProviderError,
+    complete_oauth,
+    start_oauth_authorization_url,
+)
+from app.services.auth_service.services.oauth_state import OAuthStateError
 
 from ..deps_auth import get_current_user
 from ..dependencies import get_db
@@ -22,12 +31,81 @@ from ..schemas import (
     LoginResponse,
     LogoutRequest,
     LogoutResponse,
+    OAuthCallbackResponse,
+    OAuthStartResponse,
     RefreshAccessResponse,
     RegisterRequest,
     RegisterResponse,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post(
+    "/oauth/{oauth_provider}",
+    response_model=OAuthStartResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Start OAuth: returns provider authorization URL (GitHub or Google)",
+)
+def oauth_start(oauth_provider: str) -> OAuthStartResponse:
+    try:
+        url = start_oauth_authorization_url(provider=oauth_provider)
+    except UnsupportedOAuthProviderError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported OAuth provider",
+        ) from None
+    except OAuthProviderError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(e),
+        ) from e
+    return OAuthStartResponse(authorization_url=url)
+
+
+@router.get(
+    "/oauth/{oauth_provider}/callback",
+    response_model=OAuthCallbackResponse,
+    status_code=status.HTTP_200_OK,
+    summary="OAuth callback: exchange code, create/link user, return access JWT + refresh cookie",
+)
+def oauth_callback(
+    oauth_provider: str,
+    session: Session = Depends(get_db),
+    code: str = Query(..., min_length=1),
+    state: str = Query(..., min_length=1),
+) -> JSONResponse:
+    try:
+        tokens = complete_oauth(session, provider=oauth_provider, code=code, state=state)
+    except UnsupportedOAuthProviderError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported OAuth provider",
+        ) from None
+    except OAuthStateError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OAuth state",
+        ) from None
+    except OAuthProviderError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
+        ) from e
+
+    s = get_settings()
+    max_age = s.refresh_token_expire_days * 86400
+    body = OAuthCallbackResponse(access_token=tokens.access_token).model_dump()
+    resp = JSONResponse(status_code=status.HTTP_200_OK, content=body)
+    resp.set_cookie(
+        key="refresh_token",
+        value=tokens.refresh_token,
+        httponly=True,
+        max_age=max_age,
+        samesite="lax",
+        path="/",
+    )
+    return resp
 
 
 @router.post(

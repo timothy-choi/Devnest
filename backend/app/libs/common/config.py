@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
 
+    # OAuth redirect bases (no trailing slash). Env may be host:port only; code prepends http:// if needed.
+    github_oauth_public_base_url: str = ""
+    gcloud_oauth_public_base_url: str = ""
+    oauth_github_client_id: str = ""
+    oauth_github_client_secret: str = ""
+    oauth_google_client_id: str = ""
+    oauth_google_client_secret: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

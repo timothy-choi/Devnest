@@ -56,3 +56,16 @@ class ChangePasswordResponse(BaseModel):
 class RefreshAccessResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class OAuthStartResponse(BaseModel):
+    """Authorization URL to redirect the user to (GitHub or Google)."""
+
+    authorization_url: str
+
+
+class OAuthCallbackResponse(BaseModel):
+    """Access token in body; refresh token is also set as HttpOnly cookie refresh_token."""
+
+    access_token: str
+    token_type: str = "bearer"
