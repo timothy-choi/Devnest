@@ -1,24 +1,59 @@
-"""PostgreSQL engine and session factory (imports auth_service models for metadata)."""
+"""SQLAlchemy engine and session factory. Connection string from DATABASE_URL only."""
 
 from collections.abc import Generator
 
+from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session, SQLModel, create_engine
 
 from ..common.config import get_settings
 from ...services.auth_service.models import OAuth, Token, UserAuth  # noqa: F401 — register metadata
 
-_settings = get_settings()
-engine = create_engine(
-    _settings.database_url,
-    echo=False,
-    pool_pre_ping=True,
-)
+_engine = None
+_session_factory = None
+
+
+def reset_engine() -> None:
+    """Dispose engine and clear factories (for tests when DATABASE_URL changes)."""
+    global _engine, _session_factory
+    if _engine is not None:
+        _engine.dispose()
+    _engine = None
+    _session_factory = None
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            get_settings().database_url,
+            echo=False,
+            pool_pre_ping=True,
+        )
+    return _engine
+
+
+def _session_factory_fn():
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = sessionmaker(
+            bind=get_engine(),
+            class_=Session,
+            expire_on_commit=False,
+            autocommit=False,
+            autoflush=False,
+        )
+    return _session_factory
+
+
+def get_db() -> Generator[Session, None, None]:
+    """FastAPI dependency: one session per request, always closed."""
+    factory = _session_factory_fn()
+    db = factory()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 def init_db() -> None:
-    SQLModel.metadata.create_all(engine)
-
-
-def get_session() -> Generator[Session, None, None]:
-    with Session(engine) as session:
-        yield session
+    SQLModel.metadata.create_all(get_engine())

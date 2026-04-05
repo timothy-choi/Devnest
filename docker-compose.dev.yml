@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: devnest
+      POSTGRES_PASSWORD: devnest
+      POSTGRES_DB: devnest_dev
+    volumes:
+      - devnest_pg_data:/var/lib/postgresql/data
+
+volumes:
+  devnest_pg_data:
