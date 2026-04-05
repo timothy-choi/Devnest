@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, status
 from sqlmodel import Session
 
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.login_service import InvalidCredentialsError, login_user
 from app.services.auth_service.services.logout_service import UnknownRefreshTokenError, logout_refresh_token
 from app.services.auth_service.services.password_service import InvalidCurrentPasswordError, change_password
+from app.services.auth_service.services.refresh_token_service import InvalidRefreshTokenError, refresh_access_token
 from app.services.auth_service.services.register_service import (
     DuplicateEmailError,
     DuplicateUsernameError,
@@ -21,6 +22,7 @@ from ..schemas import (
     LoginResponse,
     LogoutRequest,
     LogoutResponse,
+    RefreshAccessResponse,
     RegisterRequest,
     RegisterResponse,
 )
@@ -116,6 +118,37 @@ def change_password_endpoint(
             detail="Current password is incorrect",
         ) from None
     return ChangePasswordResponse()
+
+
+@router.get(
+    "/refresh_token",
+    response_model=RefreshAccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Issue a new access JWT using a refresh token",
+)
+def refresh_token_endpoint(
+    session: Session = Depends(get_db),
+    refresh_token: str | None = Query(
+        default=None,
+        description="Refresh token (prefer header or cookie in production)",
+    ),
+    x_refresh_token: str | None = Header(default=None, alias="X-Refresh-Token"),
+    refresh_cookie: str | None = Cookie(default=None, alias="refresh_token"),
+) -> RefreshAccessResponse:
+    raw = refresh_token or x_refresh_token or refresh_cookie
+    if not raw:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing refresh token (query refresh_token, header X-Refresh-Token, or cookie refresh_token)",
+        )
+    try:
+        access = refresh_access_token(session, refresh_token_plain=raw)
+    except InvalidRefreshTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+        ) from None
+    return RefreshAccessResponse(access_token=access)
 
 
 @router.get(

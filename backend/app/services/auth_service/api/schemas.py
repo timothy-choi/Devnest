@@ -51,3 +51,8 @@ class ChangePasswordRequest(BaseModel):
 
 class ChangePasswordResponse(BaseModel):
     message: str = "Password updated"
+
+
+class RefreshAccessResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
