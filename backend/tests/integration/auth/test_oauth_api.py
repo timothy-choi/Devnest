@@ -9,6 +9,7 @@ from fastapi import status
 
 from app.libs.common.config import get_settings
 from app.services.auth_service.models import OAuth, UserAuth
+from app.services.user_service.models import UserProfile
 from sqlmodel import select
 
 
@@ -155,6 +156,10 @@ def test_oauth_google_callback_creates_user(client, db_session, monkeypatch) -> 
     assert cb.status_code == status.HTTP_200_OK
     row = db_session.exec(select(UserAuth).where(UserAuth.email == "oauth_g@example.com")).first()
     assert row is not None
+
+    db_session.expire_all()
+    prof = db_session.exec(select(UserProfile).where(UserProfile.user_id == row.user_auth_id)).first()
+    assert prof is not None
 
 
 def test_oauth_callback_bad_state_400(client, monkeypatch) -> None:

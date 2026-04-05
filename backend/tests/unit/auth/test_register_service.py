@@ -25,7 +25,8 @@ def _exec_result(first_value):
     return r
 
 
-def test_register_user_success_assigns_id_and_persists(mock_session: MagicMock) -> None:
+@patch("app.services.auth_service.services.register_service.user_profile_repo.create_profile")
+def test_register_user_success_assigns_id_and_persists(mock_create_profile: MagicMock, mock_session: MagicMock) -> None:
     mock_session.exec.side_effect = [
         _exec_result(None),
         _exec_result(None),
@@ -58,6 +59,7 @@ def test_register_user_success_assigns_id_and_persists(mock_session: MagicMock) 
     mock_session.commit.assert_called_once()
     mock_session.refresh.assert_called_once_with(user)
     assert mock_session.exec.call_count == 2
+    mock_create_profile.assert_called_once_with(mock_session, user_id=42)
 
 
 def test_register_user_duplicate_username_raises(mock_session: MagicMock) -> None:
@@ -96,11 +98,13 @@ def test_register_user_duplicate_email_raises(mock_session: MagicMock) -> None:
     mock_session.commit.assert_not_called()
 
 
+@patch("app.services.auth_service.services.register_service.user_profile_repo.create_profile")
 @patch("app.services.auth_service.services.register_service.bcrypt.gensalt", return_value=b"fake_salt")
 @patch("app.services.auth_service.services.register_service.bcrypt.hashpw")
 def test_register_user_hashes_password_before_add(
     mock_hashpw: MagicMock,
     mock_gensalt: MagicMock,
+    mock_create_profile: MagicMock,
     mock_session: MagicMock,
 ) -> None:
     mock_hashpw.return_value = b"hashed_secret"

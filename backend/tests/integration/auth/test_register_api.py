@@ -3,6 +3,7 @@ from fastapi import status
 from sqlmodel import select
 
 from app.services.auth_service.models import UserAuth
+from app.services.user_service.models import UserProfile
 
 
 def test_register_success_creates_user(client, db_session):
@@ -24,6 +25,11 @@ def test_register_success_creates_user(client, db_session):
     assert row is not None
     assert row.email == payload["email"]
     assert row.user_auth_id == data["user_auth_id"]
+
+    db_session.expire_all()
+    prof = db_session.exec(select(UserProfile).where(UserProfile.user_id == data["user_auth_id"])).first()
+    assert prof is not None
+    assert prof.display_name == ""
 
 
 def test_register_duplicate_email_rejected(client):

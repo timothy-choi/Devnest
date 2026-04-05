@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 from app.services.auth_service.models import OAuth, Token, UserAuth
+from app.services.user_service.repositories import user_profile_repo
 from app.services.auth_service.services.auth_token import create_access_token
 from app.services.auth_service.services.login_service import LoginTokens
 from app.services.auth_service.services.oauth_client import (
@@ -132,6 +133,7 @@ def complete_oauth(
     session.commit()
     session.refresh(user)
     assert user.user_auth_id is not None
+    user_profile_repo.create_profile(session, user_id=user.user_auth_id)
     session.add(
         OAuth(
             user_id=user.user_auth_id,

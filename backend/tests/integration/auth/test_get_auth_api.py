@@ -4,6 +4,7 @@ from fastapi import status
 from sqlmodel import select
 
 from app.services.auth_service.models import UserAuth
+from app.services.user_service.models import UserProfile
 from app.services.auth_service.services.auth_token import create_access_token
 
 
@@ -54,6 +55,12 @@ def test_get_auth_user_removed_returns_401(client, db_session):
 
     row = db_session.exec(select(UserAuth).where(UserAuth.user_auth_id == uid)).first()
     assert row is not None
+    # Registration commits in another session; read profile from DB before deleting FK children.
+    db_session.expire_all()
+    prof = db_session.exec(select(UserProfile).where(UserProfile.user_id == uid)).first()
+    if prof is not None:
+        db_session.delete(prof)
+        db_session.commit()
     db_session.delete(row)
     db_session.commit()
 

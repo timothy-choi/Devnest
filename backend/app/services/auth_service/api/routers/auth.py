@@ -25,11 +25,14 @@ from app.services.auth_service.services.oauth_service import (
     start_oauth_authorization_url,
 )
 from app.services.auth_service.services.oauth_state import OAuthStateError
+from app.services.auth_service.services.delete_account_service import InvalidAccountPasswordError, delete_account_for_current_user
 
 from ..dependencies import get_current_user, get_db
 from ..schemas import (
     AuthProfileResponse,
     ChangePasswordRequest,
+    DeleteAccountRequest,
+    DeleteAccountResponse,
     ChangePasswordResponse,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
@@ -266,6 +269,27 @@ def refresh_token_endpoint(
             detail="Invalid or expired refresh token",
         ) from None
     return RefreshAccessResponse(access_token=access)
+
+
+@router.delete(
+    "/account",
+    response_model=DeleteAccountResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Delete the current account (auth, profile, tokens, and related data)",
+)
+def delete_account(
+    body: DeleteAccountRequest,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> DeleteAccountResponse:
+    try:
+        delete_account_for_current_user(session, current, password=body.password)
+    except InvalidAccountPasswordError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Password required or invalid",
+        ) from None
+    return DeleteAccountResponse()
 
 
 @router.get(

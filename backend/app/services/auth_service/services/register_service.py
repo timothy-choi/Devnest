@@ -4,6 +4,7 @@ import bcrypt
 from sqlmodel import Session, select
 
 from app.services.auth_service.models import UserAuth
+from app.services.user_service.repositories import user_profile_repo
 
 
 class DuplicateUsernameError(Exception):
@@ -31,4 +32,6 @@ def register_user(
     session.add(user)
     session.commit()
     session.refresh(user)
+    assert user.user_auth_id is not None
+    user_profile_repo.create_profile(session, user_id=user.user_auth_id)
     return user

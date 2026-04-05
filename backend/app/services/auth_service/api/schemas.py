@@ -98,3 +98,15 @@ class ResetPasswordRequest(BaseModel):
 
 class ResetPasswordResponse(BaseModel):
     message: str = "Password has been reset"
+
+
+class DeleteAccountRequest(BaseModel):
+    """
+    Local accounts must send the current password. Accounts linked to OAuth may omit it.
+    """
+
+    password: str | None = Field(default=None, max_length=256)
+
+
+class DeleteAccountResponse(BaseModel):
+    message: str = "Account deleted"
