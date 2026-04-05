@@ -21,18 +21,21 @@ class RuntimeAdapter(ABC):
         self,
         *,
         name: str,
-        image: str,
+        image: str | None = None,
         cpu_limit: float | None = None,
         memory_limit_bytes: int | None = None,
         env: Mapping[str, str] | None = None,
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
+        workspace_host_path: str | None = None,
     ) -> RuntimeEnsureResult:
         """
         Idempotently ensure a container exists and matches the given spec.
 
         ``ports`` entries are ``(host_port, container_port)`` publish pairs.
         ``labels`` are engine labels (orchestrator may pass correlation ids without this type knowing workspace rules).
+        ``image`` may be omitted; Docker adapter uses the DevNest workspace image default.
+        ``workspace_host_path`` is required when creating a new workspace container (Docker: bind to ``/home/coder/project``).
         """
 
     @abstractmethod

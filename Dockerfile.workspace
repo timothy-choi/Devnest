@@ -1,0 +1,62 @@
+# DevNest workspace base image — code-server + Git + common CLI tooling.
+# Runtime Adapter / orchestrator should reference this image by tag (no secrets here).
+#
+# Build:  docker build -f Dockerfile.workspace -t devnest/workspace:latest .
+# Run:    docker run -p 8080:8080 devnest/workspace:latest
+
+FROM codercom/code-server:latest
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Core CLI, Git (required), archives, JSON, shells, C build chain, Python + venv
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        git \
+        curl \
+        wget \
+        unzip \
+        zip \
+        jq \
+        zsh \
+        build-essential \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js LTS + npm (NodeSource; aligns with current LTS major)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (optional but requested)
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Workspace mount / open folder (orchestrator can bind-mount over this)
+RUN mkdir -p /home/coder/project \
+    && chown -R coder:coder /home/coder/project
+
+USER coder
+WORKDIR /home/coder/project
+
+# Preinstall extensions (Open VSX / marketplace as configured in code-server)
+RUN code-server --install-extension ms-python.python \
+    && code-server --install-extension ms-toolsai.jupyter \
+    && code-server --install-extension dbaeumer.vscode-eslint \
+    && code-server --install-extension esbenp.prettier-vscode \
+    && code-server --install-extension github.vscode-github-actions
+
+EXPOSE 8080
+
+# Listen on all interfaces for container/K8s networking; open project folder in the IDE
+CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "/home/coder/project"]
