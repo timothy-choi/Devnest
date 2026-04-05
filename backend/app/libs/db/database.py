@@ -14,6 +14,7 @@ from ...services.notification_service.models import (  # noqa: F401 — register
     NotificationRecipient,
     PushSubscription,
 )
+from ...services.user_service.models import UserProfile, UserSettings  # noqa: F401 — register metadata
 
 _engine = None
 _session_factory = None
