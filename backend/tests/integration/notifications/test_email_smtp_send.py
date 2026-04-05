@@ -78,11 +78,12 @@ class _RecordingSmtpServer(threading.Thread):
         self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(8)
         self.port = self._sock.getsockname()[1]
-        self._stop = threading.Event()
+        # Do not use ``_stop``: threading.Thread reserves it (callable) in recent CPython.
+        self._halt = threading.Event()
 
     def run(self) -> None:
         self._sock.settimeout(0.5)
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 conn, _ = self._sock.accept()
             except socket.timeout:
@@ -95,7 +96,7 @@ class _RecordingSmtpServer(threading.Thread):
                 conn.close()
 
     def shutdown(self) -> None:
-        self._stop.set()
+        self._halt.set()
         try:
             self._sock.close()
         except OSError:
