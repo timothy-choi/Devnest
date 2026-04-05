@@ -4,12 +4,28 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import status
 from sqlmodel import select
 
+from app.libs.common.config import get_settings
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.auth_token import create_access_token
 from app.services.user_service.models import UserProfile
+
+
+@pytest.fixture(autouse=True)
+def _oauth_env_for_github_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Match ``test_oauth_api`` so POST /auth/oauth/github returns an authorization URL in CI."""
+    monkeypatch.setenv("GITHUB_OAUTH_PUBLIC_BASE_URL", "http://testserver")
+    monkeypatch.setenv("GCLOUD_OAUTH_PUBLIC_BASE_URL", "http://testserver")
+    monkeypatch.setenv("OAUTH_GITHUB_CLIENT_ID", "gh_test_id")
+    monkeypatch.setenv("OAUTH_GITHUB_CLIENT_SECRET", "gh_test_secret")
+    monkeypatch.setenv("OAUTH_GOOGLE_CLIENT_ID", "g_test_id")
+    monkeypatch.setenv("OAUTH_GOOGLE_CLIENT_SECRET", "g_test_secret")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_delete_account_local_user_with_password_removes_auth_and_profile(client, db_session):
