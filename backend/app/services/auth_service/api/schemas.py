@@ -1,3 +1,9 @@
+"""Pydantic request/response models for auth HTTP API.
+
+When this module grows, consider splitting into ``schemas/auth_requests.py`` and
+``schemas/auth_responses.py`` (re-export from ``schemas/__init__.py``).
+"""
+
 from datetime import datetime
 
 from pydantic import BaseModel, EmailStr, Field

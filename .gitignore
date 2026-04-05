@@ -1,4 +1,21 @@
-__pycache__
-.pytest_cache
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Testing / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local env (secrets)
 .env
 /backend/.env
+
+# OS / editor
+.DS_Store

@@ -26,8 +26,7 @@ from app.services.auth_service.services.oauth_service import (
 )
 from app.services.auth_service.services.oauth_state import OAuthStateError
 
-from ..deps_auth import get_current_user
-from ..dependencies import get_db
+from ..dependencies import get_current_user, get_db
 from ..schemas import (
     AuthProfileResponse,
     ChangePasswordRequest,

@@ -39,8 +39,8 @@ def db_session(test_engine):
 
 @pytest.fixture
 def client(test_engine):
+    from app.main import app
     from app.services.auth_service.api.dependencies import get_db
-    from app.services.auth_service.api.main import app
 
     def override_get_db():
         db = Session(test_engine)

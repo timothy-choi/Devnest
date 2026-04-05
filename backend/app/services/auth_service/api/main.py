@@ -1,17 +1,5 @@
-from contextlib import asynccontextmanager
+"""Compatibility shim for older ``uvicorn app.services.auth_service.api.main:app`` invocations."""
 
-from fastapi import FastAPI
+from app.main import app
 
-from app.libs.db.database import init_db
-
-from .routers.auth import router as auth_router
-
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    init_db()
-    yield
-
-
-app = FastAPI(title="Auth Service", lifespan=lifespan)
-app.include_router(auth_router)
+__all__ = ["app"]
