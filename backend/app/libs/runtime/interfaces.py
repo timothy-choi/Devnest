@@ -64,23 +64,28 @@ class RuntimeAdapter(ABC):
         ``ports`` entries are optional host-publish pairs ``(host_port, container_port)``.
         Omit ``ports`` (or pass an empty sequence) to create **without** publishing any container
         port to the host—multiple workspaces then do not consume host ports; the in-container
-        IDE still listens on ``WORKSPACE_IDE_CONTAINER_PORT`` inside the container. Use a positive
-        ``host_port`` to pin a host port, or ``host_port <= 0`` with an explicit pair such as
-        ``(0, WORKSPACE_IDE_CONTAINER_PORT)`` to request an engine-assigned ephemeral host port.
-        If the same ``container_port`` appears more than once, the last pair wins.
+        IDE still listens on ``WORKSPACE_IDE_CONTAINER_PORT`` inside the container. For shared hosts,
+        prefer ``host_port <= 0`` (e.g. ``(0, WORKSPACE_IDE_CONTAINER_PORT)``) for an engine-assigned
+        ephemeral host port per container, or assign a **unique** positive host port per workspace;
+        nothing defaults to host port 8080. If the same ``container_port`` appears more than once,
+        the last pair wins.
 
         ``image`` may be omitted; the Docker adapter uses ``DEVNEST_WORKSPACE_IMAGE`` (or its
         built-in default) for the workspace/code-server image in that case.
 
         **Project storage (required on create):** pass ``project_mount`` (preferred) and/or
         ``workspace_host_path`` (legacy alias for the same host directory). The Docker adapter
-        bind-mounts that host path to ``WORKSPACE_PROJECT_CONTAINER_PATH`` (``/home/coder/project``).
-        If both are set, they must match. ``project_mount.read_only`` selects ``:ro`` vs ``:rw``.
+        bind-mounts that **absolute** host directory to ``WORKSPACE_PROJECT_CONTAINER_PATH``
+        (``/home/coder/project``) so IDE/terminal files persist on the host. If both are set, paths
+        must match. ``project_mount.read_only`` selects ``:ro`` vs ``:rw``; if only
+        ``workspace_host_path`` is set, the project mount is read-write.
 
-        **Optional code-server / state mounts:** ``extra_bind_mounts`` is a sequence of
-        ``WorkspaceExtraBindMountSpec`` (host directory → absolute container path, e.g.
-        ``CODE_SERVER_CONFIG_CONTAINER_PATH`` / ``CODE_SERVER_DATA_CONTAINER_PATH`` in ``models``).
-        Omitted or empty means no extra binds. Must not duplicate the project mount destination.
+        **Optional code-server persistence:** ``extra_bind_mounts`` is a sequence of
+        ``WorkspaceExtraBindMountSpec`` (absolute host dir → absolute container path). Typical
+        targets are ``CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS`` in ``models`` (config dir
+        + data dir; the data dir holds extensions and most editor/workspace state per upstream
+        layout). Fully optional—omit for ephemeral IDE state. Must not duplicate the project mount
+        destination or repeat the same ``container_path`` twice.
 
         **Reuse note:** When an existing container is returned, create-only arguments above are
         ignored; ``RuntimeEnsureResult`` reflects the running container (ports, project bind from

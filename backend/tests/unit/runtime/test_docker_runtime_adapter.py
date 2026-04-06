@@ -12,6 +12,10 @@ from app.libs.runtime.models import (
     BindMountInfo,
     CODE_SERVER_CONFIG_CONTAINER_PATH,
     CODE_SERVER_DATA_CONTAINER_PATH,
+    CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS,
+    ContainerInspectionResult,
+    RuntimeActionResult,
+    RuntimeEnsureResult,
     WORKSPACE_IDE_CONTAINER_PORT,
     WORKSPACE_PROJECT_CONTAINER_PATH,
     WorkspaceExtraBindMountSpec,
@@ -24,6 +28,7 @@ from app.libs.runtime.errors import (
     ContainerStartError,
     ContainerStopError,
     NetnsRefError,
+    RuntimeAdapterError,
 )
 
 
@@ -59,6 +64,7 @@ def _sample_attrs(
                 "Source": "/host/ws",
                 "Destination": "/home/coder/project",
                 "RW": True,
+                "Propagation": "rprivate",
             },
         ],
     }
@@ -117,7 +123,12 @@ class TestInspectContainerNormalization:
         assert r.ports == ((18080, WORKSPACE_IDE_CONTAINER_PORT),)
         assert r.mounts == ("/host/ws:/home/coder/project",)
         assert r.bind_mounts == (
-            BindMountInfo(host_path="/host/ws", container_path="/home/coder/project", read_only=False),
+            BindMountInfo(
+                host_path="/host/ws",
+                container_path="/home/coder/project",
+                read_only=False,
+                propagation="rprivate",
+            ),
         )
         assert r.workspace_project_mount == r.bind_mounts[0]
         assert r.health_status == "healthy"
@@ -175,7 +186,7 @@ class TestInspectContainerNormalization:
     def test_host_port_with_whitespace_is_accepted(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
         ctr.attrs = _sample_attrs(
-            ports={"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": " 18080 "}]},
+            ports={f"{WORKSPACE_IDE_CONTAINER_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": " 18080 "}]},
         )
         mock_client.containers.get.return_value = ctr
 
@@ -193,7 +204,9 @@ class TestInspectContainerNormalization:
         r = adapter.inspect_container(container_id="x")
 
         assert r.mounts == ("/a:/b",)
-        assert r.bind_mounts == (BindMountInfo(host_path="/a", container_path="/b", read_only=False),)
+        assert r.bind_mounts == (
+            BindMountInfo(host_path="/a", container_path="/b", read_only=False, propagation=None),
+        )
 
     def test_destination_only_mount_when_no_source(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
@@ -297,7 +310,10 @@ class TestEnsureContainer:
         assert r.container_state == "exited"
         assert r.workspace_ide_container_port == WORKSPACE_IDE_CONTAINER_PORT
         assert r.workspace_project_mount == BindMountInfo(
-            host_path="/host/ws", container_path=WORKSPACE_PROJECT_CONTAINER_PATH, read_only=False
+            host_path="/host/ws",
+            container_path=WORKSPACE_PROJECT_CONTAINER_PATH,
+            read_only=False,
+            propagation="rprivate",
         )
         mock_client.api.create_container.assert_not_called()
 
@@ -553,6 +569,15 @@ class TestEnsureContainer:
         assert r.workspace_project_mount is not None
         assert r.workspace_project_mount.read_only is True
 
+    def test_code_server_optional_persistence_paths_tuple(
+        self,
+    ) -> None:
+        """Contract: documented optional bind targets for code-server (config + data state/extensions)."""
+        assert CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS == (
+            CODE_SERVER_CONFIG_CONTAINER_PATH,
+            CODE_SERVER_DATA_CONTAINER_PATH,
+        )
+
     def test_create_extra_bind_mounts_code_server_paths(
         self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
     ) -> None:
@@ -667,6 +692,14 @@ class TestEnsureContainer:
 
         mock_client.api.create_container.assert_not_called()
 
+    def test_create_rejects_relative_project_host_path(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        with pytest.raises(ContainerCreateError, match="absolute"):
+            adapter.ensure_container(name="ws", workspace_host_path="relative/path")
+
+        mock_client.api.create_container.assert_not_called()
+
     def test_create_rejects_blank_container_name(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         for bad in ("", "   ", "\t"):
             with pytest.raises(ContainerCreateError, match="non-empty"):
@@ -765,6 +798,24 @@ class TestStartContainer:
         assert r.success is True
         assert r.container_state == "running"
 
+    def test_start_skips_engine_start_when_running_after_reload(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="created", pid=0)
+
+        def reload_fn():
+            ctr.attrs = _sample_attrs(status="running", pid=1)
+
+        ctr.reload.side_effect = reload_fn
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.start_container(container_id="cid")
+
+        ctr.start.assert_not_called()
+        assert r.success is True
+        assert r.container_state == "running"
+
     def test_missing_raises_container_not_found(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         mock_client.containers.get.side_effect = docker.errors.NotFound("missing")
 
@@ -816,6 +867,24 @@ class TestStopContainer:
         assert r.success is True
         assert r.container_state == "exited"
         ctr.stop.assert_not_called()
+
+    def test_stop_skips_engine_stop_when_inactive_after_reload(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+
+        def reload_fn():
+            ctr.attrs = _sample_attrs(status="exited", pid=0)
+
+        ctr.reload.side_effect = reload_fn
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.stop_container(container_id="cid")
+
+        ctr.stop.assert_not_called()
+        assert r.success is True
+        assert r.container_state == "exited"
 
     def test_running_stops_then_reinspect_exited(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
@@ -973,6 +1042,35 @@ class TestDeleteContainer:
         assert r.container_state == "missing"
         assert r.container_id == "deadbeef"
 
+    def test_delete_skips_stop_when_inactive_after_reload(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+
+        def reload_fn():
+            ctr.attrs = _sample_attrs(status="exited", pid=0)
+
+        ctr.reload.side_effect = reload_fn
+
+        n = 0
+
+        def get_side_effect(cid: str, *a, **kw):
+            nonlocal n
+            n += 1
+            if n <= 2:
+                return ctr
+            raise docker.errors.NotFound("gone")
+
+        mock_client.containers.get.side_effect = get_side_effect
+
+        r = adapter.delete_container(container_id="cid")
+
+        ctr.stop.assert_not_called()
+        ctr.remove.assert_called_once_with()
+        assert r.success is True
+        assert r.container_state == "missing"
+
     def test_running_stops_then_removes(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
         ctr.attrs = _sample_attrs(status="running", pid=1)
@@ -1077,6 +1175,146 @@ class TestGetContainerNetnsRef:
 
         with pytest.raises(NetnsRefError, match="not found"):
             adapter.get_container_netns_ref(container_id="by-name")
+
+
+class TestLifecycleResultAndErrorConsistency:
+    """Normalized dataclasses, exception hierarchy, and cross-method expectations."""
+
+    def test_runtime_adapter_errors_subclass_base(
+        self,
+    ) -> None:
+        assert issubclass(ContainerNotFoundError, RuntimeAdapterError)
+        assert issubclass(ContainerCreateError, RuntimeAdapterError)
+        assert issubclass(ContainerStartError, RuntimeAdapterError)
+        assert issubclass(ContainerStopError, RuntimeAdapterError)
+        assert issubclass(ContainerDeleteError, RuntimeAdapterError)
+        assert issubclass(NetnsRefError, RuntimeAdapterError)
+
+    def test_missing_container_start_restart_raise_not_found_delete_stop_return_results(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        with pytest.raises(ContainerNotFoundError):
+            adapter.start_container(container_id="x")
+        with pytest.raises(ContainerNotFoundError):
+            adapter.restart_container(container_id="x")
+
+        stopped = adapter.stop_container(container_id="x")
+        assert isinstance(stopped, RuntimeActionResult)
+        assert stopped.success and stopped.container_state == "missing"
+
+        deleted = adapter.delete_container(container_id="x")
+        assert isinstance(deleted, RuntimeActionResult)
+        assert deleted.success and deleted.container_state == "missing"
+
+    def test_inspect_missing_returns_snapshot_not_exception(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        r = adapter.inspect_container(container_id="x")
+
+        assert isinstance(r, ContainerInspectionResult)
+        assert r.exists is False
+
+    def test_ensure_create_returns_runtime_ensure_result_shape(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="shape", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-shape":
+                raise docker.errors.NotFound("nope")
+            if container_id == "shapefull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "shapefull"}
+
+        r = adapter.ensure_container(name="ws-shape", workspace_host_path="/abs/ws")
+
+        assert isinstance(r, RuntimeEnsureResult)
+        assert r.exists is True
+        assert r.created_new is True
+        assert r.node_id is None
+        assert r.workspace_ide_container_port == WORKSPACE_IDE_CONTAINER_PORT
+        assert isinstance(r.resolved_ports, tuple)
+
+    def test_restart_raises_not_found_after_restart_when_inspect_gone(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+        seq = [ctr, ctr, docker.errors.NotFound("gone")]
+
+        def get_side_effect(cid: str, *a, **kw):
+            x = seq.pop(0)
+            if isinstance(x, BaseException):
+                raise x
+            return x
+
+        mock_client.containers.get.side_effect = get_side_effect
+        ctr.restart.return_value = None
+
+        with pytest.raises(ContainerNotFoundError, match="not found after restart"):
+            adapter.restart_container(container_id="cid")
+
+
+class TestProjectMountNormalization:
+    def test_workspace_project_mount_matches_destination_with_trailing_slash(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        attrs = _sample_attrs(
+            mounts=[
+                {
+                    "Type": "bind",
+                    "Source": "/host/p",
+                    "Destination": f"{WORKSPACE_PROJECT_CONTAINER_PATH}/",
+                    "RW": True,
+                },
+            ],
+        )
+        ctr.attrs = attrs
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.inspect_container(container_id="c")
+
+        assert r.workspace_project_mount is not None
+        assert r.workspace_project_mount.host_path == "/host/p"
+        assert r.workspace_project_mount.container_path == f"{WORKSPACE_PROJECT_CONTAINER_PATH}/"
+
+
+class TestOptionalCodeServerBindOrdering:
+    def test_extra_bind_mounts_match_optional_persistence_tuple_order(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="ord", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-ord":
+                raise docker.errors.NotFound("nope")
+            if container_id == "ordfull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "ordfull"}
+
+        specs = [
+            WorkspaceExtraBindMountSpec(host_path=f"/h/{i}", container_path=dest)
+            for i, dest in enumerate(CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS)
+        ]
+        adapter.ensure_container(name="ws-ord", workspace_host_path="/proj", extra_bind_mounts=specs)
+
+        binds = mock_client.api.create_host_config.call_args.kwargs["binds"]
+        assert binds[0] == f"/proj:{WORKSPACE_PROJECT_CONTAINER_PATH}:rw"
+        assert binds[1] == f"/h/0:{CODE_SERVER_CONFIG_CONTAINER_PATH}:rw"
+        assert binds[2] == f"/h/1:{CODE_SERVER_DATA_CONTAINER_PATH}:rw"
 
 
 class TestDefaultImageFromEnv:

@@ -3,8 +3,8 @@ System tests: ``DockerRuntimeAdapter`` against the real built workspace image (c
 
 Uses the same ``built_workspace_image`` session fixture as other workspace system tests.
 Slower than ``nginx:alpine`` lifecycle tests in ``tests/system/runtime/``; run with the
-``workspace_image`` marker when you want to validate mounts + ephemeral host publish on the
-actual DevNest workspace image.
+``workspace_image`` marker. Validates ephemeral host publish, mounts, and **code-server HTTP**
+response on the assigned host port (no fixed host 8080 requirement).
 """
 
 from __future__ import annotations
@@ -25,8 +25,11 @@ from app.libs.runtime.models import (
 )
 
 from tests.system.conftest import _remove_container_force
+from tests.system.workspace.test_workspace_image_system import _wait_for_code_server_http
 
 pytestmark = [pytest.mark.system, pytest.mark.workspace_image]
+
+_WORKSPACE_HTTP_TIMEOUT_S = float(os.environ.get("DEVNEST_WORKSPACE_TEST_STARTUP_TIMEOUT", "240"))
 
 
 def test_adapter_workspace_image_ephemeral_port_project_and_code_server_mounts_persist(
@@ -60,7 +63,16 @@ def test_adapter_workspace_image_ephemeral_port_project_and_code_server_mounts_p
 
         ins = adapter.inspect_container(container_id=ensured.container_id)
         assert ins.ports
-        assert ins.ports[0][1] == WORKSPACE_IDE_CONTAINER_PORT
+        host_port, container_port = ins.ports[0]
+        assert container_port == WORKSPACE_IDE_CONTAINER_PORT
+        assert isinstance(host_port, int) and host_port > 0
+
+        status, _body = _wait_for_code_server_http(
+            "127.0.0.1",
+            host_port,
+            timeout_s=_WORKSPACE_HTTP_TIMEOUT_S,
+        )
+        assert status in (200, 301, 302, 303, 307, 308, 401, 403)
 
         ctr = docker_client.containers.get(ensured.container_id)
         # Image runs as ``coder``; host bind mounts are owned by the test user/CI UID, so default

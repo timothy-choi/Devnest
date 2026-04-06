@@ -139,7 +139,20 @@ def _normalize_bind_mount_infos(attrs: dict) -> tuple[BindMountInfo, ...]:
         if not dest:
             continue
         read_only = m.get("RW") is False
-        out.append(BindMountInfo(host_path=src, container_path=dest, read_only=read_only))
+        prop_raw = m.get("Propagation")
+        propagation: str | None
+        if prop_raw is None or str(prop_raw).strip() == "":
+            propagation = None
+        else:
+            propagation = str(prop_raw).strip()
+        out.append(
+            BindMountInfo(
+                host_path=src,
+                container_path=dest,
+                read_only=read_only,
+                propagation=propagation,
+            ),
+        )
     return tuple(out)
 
 
@@ -171,6 +184,11 @@ def _resolve_project_host_path_for_create(
             "project_mount or workspace_host_path is required to create a workspace container "
             f"(bind-mount host directory to {WORKSPACE_PROJECT_CONTAINER_PATH})",
         )
+    if not os.path.isabs(chosen):
+        raise ContainerCreateError(
+            "project workspace host path must be absolute (Docker bind source); "
+            f"sync storage layout before ensure_container, got {chosen!r}",
+        )
     read_only = bool(project_mount.read_only) if project_mount is not None else False
     return chosen, read_only
 
@@ -178,7 +196,13 @@ def _resolve_project_host_path_for_create(
 def _extra_bind_strings(
     extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None,
 ) -> list[str]:
-    """Docker ``HostConfig`` bind strings for optional mounts; project mount is handled separately."""
+    """
+    Docker ``HostConfig`` bind strings for optional mounts; project mount is handled separately.
+
+    Order is preserved: callers usually list config before data
+    (``CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS``). Any absolute ``container_path`` is
+    allowed; dup destinations and the project path are rejected.
+    """
     if not extra_bind_mounts:
         return []
     project_norm = WORKSPACE_PROJECT_CONTAINER_PATH.rstrip("/")
@@ -244,8 +268,10 @@ def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[st
     still listens on ``WORKSPACE_IDE_CONTAINER_PORT`` inside the container network namespace).
 
     When ``ports`` is provided, each entry is ``(host_port, container_port)``: use a positive
-    ``host_port`` to pin, or ``<= 0`` for an engine-assigned ephemeral host port for that
-    container port. Duplicate container ports: last binding wins.
+    ``host_port`` to pin a **distinct** free port per workspace on shared hosts, or ``<= 0`` for an
+    engine-assigned ephemeral host port (recommended when many workspaces run on one host). There
+    is **no** implicit host publish; pinning e.g. host 8080 is opt-in only and must not be assumed.
+    Duplicate container ports in one spec: last binding wins.
     """
     bindings: dict[str, int | None] = {}
     if ports:
@@ -260,7 +286,7 @@ def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[st
 
 
 def _resolved_ports_tuple(bindings: dict[str, int | None]) -> tuple[tuple[int, int], ...]:
-    """Pairs where host port is known from spec (ephemeral ``None`` entries are omitted)."""
+    """Pairs where host port is known from the create spec only (ephemeral ``None`` entries omitted)."""
     out: list[tuple[int, int]] = []
     for spec, hp in bindings.items():
         if hp is None:
@@ -335,10 +361,17 @@ class DockerRuntimeAdapter(RuntimeAdapter):
 
         **Create:** ``_resolve_image`` selects ``image`` or ``DEVNEST_WORKSPACE_IMAGE`` /
         ``devnest/workspace:latest``. Binds are ``[project, *extra_bind_mounts]`` to
-        ``WORKSPACE_PROJECT_CONTAINER_PATH`` then optional code-server paths. Host publishes come
-        only from ``ports`` (never an implicit default host publish). ``workspace_ide_container_port`` on
-        the result is always ``WORKSPACE_IDE_CONTAINER_PORT`` (in-container IDE); the process still
-        binds that port inside the container even when ``ports`` is omitted.
+        ``WORKSPACE_PROJECT_CONTAINER_PATH`` (``/home/coder/project``) then optional binds from
+        ``extra_bind_mounts`` (e.g. code-server config/state via
+        ``CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS``—never auto-applied). The project bind
+        is always first in ``HostConfig`` binds (``rw``/``ro`` from ``WorkspaceProjectMountSpec``
+        when used, else ``rw``). Host publishes come
+        only from explicit ``ports`` (never an implicit default). Each workspace may use
+        ``host_port <= 0`` for ephemeral host ports so multiple containers do not share one fixed
+        host binding. ``workspace_ide_container_port`` on the result is always
+        ``WORKSPACE_IDE_CONTAINER_PORT`` (in-container IDE only); ``resolved_ports`` lists
+        host-published ``(host_port, container_port)`` pairs when the engine reports them (often
+        fully populated after the process is running and port maps exist).
         """
         if not str(name).strip():
             raise ContainerCreateError("container name must be non-empty")
@@ -439,8 +472,12 @@ class DockerRuntimeAdapter(RuntimeAdapter):
     def start_container(self, *, container_id: str) -> RuntimeActionResult:
         """
         Inspect-first, idempotent start: missing → ``ContainerNotFoundError``; already running →
-        success without calling ``start``; otherwise ``start`` then re-inspect for a normalized
-        ``RuntimeActionResult``.
+        success without calling ``start``; after a successful ``get``, ``reload`` + normalize so a
+        race where the container entered ``running`` still avoids a redundant ``start``; otherwise
+        ``start`` then re-inspect for a normalized ``RuntimeActionResult``.
+
+        Host port bindings are not part of ``RuntimeActionResult``; use ``inspect_container`` for
+        normalized ``ports`` when publish maps are required after start.
         """
         ins = self.inspect_container(container_id=container_id)
         if not ins.exists:
@@ -458,6 +495,16 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             ctr = self._client.containers.get(container_id)
         except docker.errors.NotFound as e:
             raise ContainerNotFoundError(f"container not found: {container_id!r}") from e
+
+        ctr.reload()
+        live = _normalize_inspection(ctr.attrs)
+        if live.container_state == "running":
+            return RuntimeActionResult(
+                container_id=live.container_id or container_id,
+                container_state=live.container_state,
+                success=True,
+                message=None,
+            )
 
         try:
             ctr.start()
@@ -477,8 +524,9 @@ class DockerRuntimeAdapter(RuntimeAdapter):
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
         """
         Inspect-first stop, idempotent for cleanup: missing container → success; non-active
-        states → success without ``stop``; ``running`` / ``restarting`` / ``paused`` →
-        ``stop(timeout)`` then re-inspect.
+        states → success without ``stop``; when the engine ``get`` succeeds, ``reload`` + normalize
+        so a stale “needs stop” inspect still skips ``stop`` if the container is already inactive;
+        else ``stop(timeout)`` then re-inspect.
         """
         ins = self.inspect_container(container_id=container_id)
         if not ins.exists:
@@ -502,8 +550,19 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             ctr = self._client.containers.get(container_id)
         except docker.errors.NotFound:
             return RuntimeActionResult(
-                container_id=container_id,
+                container_id=cid_out,
                 container_state="missing",
+                success=True,
+                message=None,
+            )
+
+        ctr.reload()
+        live = _normalize_inspection(ctr.attrs)
+        cid_live = live.container_id or cid_out
+        if not _container_state_needs_engine_stop(live.container_state):
+            return RuntimeActionResult(
+                container_id=cid_live,
+                container_state=live.container_state,
                 success=True,
                 message=None,
             )
@@ -538,8 +597,9 @@ class DockerRuntimeAdapter(RuntimeAdapter):
 
     def restart_container(self, *, container_id: str) -> RuntimeActionResult:
         """
-        Inspect-first restart: missing → ``ContainerNotFoundError``; else engine ``restart`` with
-        the same stop-timeout budget as ``stop_container``, then re-inspect.
+        Inspect-first restart: missing → ``ContainerNotFoundError``; else engine ``get``,
+        ``reload`` for a fresh snapshot, then ``restart`` with the same stop-timeout budget as
+        ``stop_container``, then re-inspect.
         """
         ins = self.inspect_container(container_id=container_id)
         if not ins.exists:
@@ -549,6 +609,8 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             ctr = self._client.containers.get(container_id)
         except docker.errors.NotFound as e:
             raise ContainerNotFoundError(f"container not found: {container_id!r}") from e
+
+        ctr.reload()
 
         try:
             ctr.restart(timeout=_default_stop_timeout_s())
@@ -569,8 +631,9 @@ class DockerRuntimeAdapter(RuntimeAdapter):
 
     def delete_container(self, *, container_id: str) -> RuntimeActionResult:
         """
-        Idempotent delete: missing → success; active states get the same graceful ``stop`` as
-        ``stop_container`` (timeout), then ``remove``; re-inspect to confirm removal.
+        Idempotent delete: missing → success; after ``get``, ``reload`` + normalize and decide
+        graceful ``stop`` from that live state (not the first inspect snapshot), then ``remove``;
+        re-inspect to confirm removal.
         """
         ins = self.inspect_container(container_id=container_id)
         if not ins.exists:
@@ -593,8 +656,12 @@ class DockerRuntimeAdapter(RuntimeAdapter):
                 message=None,
             )
 
+        ctr.reload()
+        live = _normalize_inspection(ctr.attrs)
+        cid_known = live.container_id or cid_known
+
         try:
-            if _container_state_needs_engine_stop(ins.container_state):
+            if _container_state_needs_engine_stop(live.container_state):
                 try:
                     ctr.stop(timeout=_default_stop_timeout_s())
                 except docker.errors.APIError as e:

@@ -15,31 +15,49 @@ class WorkspaceProjectMountSpec:
     """
     Storage input for the primary workspace project bind mount.
 
-    Maps host directory ``host_path`` into the container at ``WORKSPACE_PROJECT_CONTAINER_PATH``.
-    This is the first required mount for user-generated project files; richer storage specs can
-    extend the adapter later without changing this type.
+    Maps an absolute host directory ``host_path`` into the container at
+    ``WORKSPACE_PROJECT_CONTAINER_PATH`` (``/home/coder/project``). This mount is how IDE/terminal
+    user files persist on the Docker host. Richer storage specs can extend the adapter later without
+    changing this type.
     """
 
     host_path: str
     read_only: bool = False
 
 
-# Typical code-server persistence locations under ``/home/coder`` (use with ``WorkspaceExtraBindMountSpec``).
-# Add more module-level constants here if you need additional fixed targets; the adapter accepts any
-# absolute ``container_path`` string.
+# --- Optional code-server persistence (in addition to the required project mount) -------------
+#
+# code-server uses XDG-style dirs under ``/home/coder``. The adapter does **not** auto-mount these;
+# pass ``WorkspaceExtraBindMountSpec`` entries in ``ensure_container(..., extra_bind_mounts=...)``.
+#
+# - ``CODE_SERVER_CONFIG_CONTAINER_PATH``: server config (e.g. ``config.yaml``, ``auth``). Does not
+#   replace secrets management—set host directory permissions appropriately.
+# - ``CODE_SERVER_DATA_CONTAINER_PATH``: user data dir where upstream layouts place **extensions**,
+#   **workspace storage**, **User/** / **globalStorage** (editor-related state), etc. One bind here
+#   covers “extensions + editor state” for typical code-server; no separate adapter constant per
+#   subfolder to avoid over-fitting layout details.
+#
+# For any other absolute in-container path, pass ``container_path`` explicitly (e.g. future image
+# changes). See ``CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS`` for the conventional pair.
 CODE_SERVER_CONFIG_CONTAINER_PATH = "/home/coder/.config/code-server"
 CODE_SERVER_DATA_CONTAINER_PATH = "/home/coder/.local/share/code-server"
+
+CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS: tuple[str, ...] = (
+    CODE_SERVER_CONFIG_CONTAINER_PATH,
+    CODE_SERVER_DATA_CONTAINER_PATH,
+)
 
 
 @dataclass(frozen=True)
 class WorkspaceExtraBindMountSpec:
     """
-    Optional extra bind mount for workspace-adjacent persistence (e.g. code-server config,
-    extension data). Separate from the required project mount.
+    Optional extra bind mount for code-server (or similar) persistence beside the project mount.
 
-    Callers supply per-workspace ``host_path`` directories; ``container_path`` is usually one of
-    ``CODE_SERVER_CONFIG_CONTAINER_PATH`` or ``CODE_SERVER_DATA_CONTAINER_PATH``. The adapter does
-    not read secrets from the image—avoid mounting sensitive host dirs with loose permissions.
+    Each entry maps an absolute host directory to an absolute ``container_path``. Typical
+    ``container_path`` values are ``CODE_SERVER_CONFIG_CONTAINER_PATH`` and/or
+    ``CODE_SERVER_DATA_CONTAINER_PATH`` (extensions + editor/workspace state under the latter—see
+    module comments). Omitted entries mean that subtree is ephemeral inside the container. The
+    adapter never reads or injects secrets; avoid world-readable host dirs for sensitive config.
     """
 
     host_path: str
@@ -49,11 +67,18 @@ class WorkspaceExtraBindMountSpec:
 
 @dataclass(frozen=True)
 class BindMountInfo:
-    """Normalized bind mount from engine inspection (``Type: bind`` only)."""
+    """
+    Normalized bind mount from engine inspection (``Type: bind`` only).
+
+    ``propagation`` mirrors Docker's mount propagation when present (e.g. ``rprivate``); ``None``
+    if the engine omitted it—useful for debugging bind behavior alongside ``host_path`` /
+    ``container_path``.
+    """
 
     host_path: str
     container_path: str
     read_only: bool
+    propagation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,8 +92,9 @@ class RuntimeEnsureResult:
         created_new: Whether a new container was created in this call (vs reused).
         container_state: Normalized lifecycle state (e.g. created, running, exited).
         resolved_ports: Host-published ``(host_port, container_port)`` pairs only (empty when no
-            host publish is configured). On reuse, matches ``inspect_container`` when the engine
-            reports bindings; with explicit ephemeral or pinned maps, filled after publish exists.
+            host publish is configured, or before the engine has assigned ephemeral host ports).
+            On reuse, matches ``inspect_container`` when the engine reports bindings; after create,
+            prefer re-inspecting once running to read ephemeral assignments.
         node_id: Execution node when applicable (e.g. Swarm); ``None`` for single-host Docker.
         workspace_ide_container_port: In-container port for the workspace IDE (code-server);
             always ``WORKSPACE_IDE_CONTAINER_PORT`` for this adapter; independent of host publishing.
@@ -120,11 +146,14 @@ class ContainerInspectionResult:
         container_id: Engine id when present.
         container_state: Normalized lifecycle state, or ``missing`` when not exists.
         pid: Host-visible init PID when running and reported by the engine; else ``None``.
-        ports: Published ``(host_port, container_port)`` pairs.
+        ports: Host-to-container published ``(host_port, container_port)`` TCP pairs from the engine;
+            empty when nothing is published to the host (each workspace can still use
+            ``WORKSPACE_IDE_CONTAINER_PORT`` inside its own network namespace).
         mounts: Normalized ``source:destination`` strings (or destination-only when no source).
-        bind_mounts: Structured bind mounts only (``Type: bind`` from the engine).
-        workspace_project_mount: The bind whose destination is ``WORKSPACE_PROJECT_CONTAINER_PATH``,
-            if present.
+        bind_mounts: Structured bind mounts only (``Type: bind`` from the engine), in engine order.
+        workspace_project_mount: Convenience pointer to the bind whose ``container_path`` matches
+            ``WORKSPACE_PROJECT_CONTAINER_PATH`` (normalize trailing slashes); ``None`` if missing.
+            For full debugging use ``bind_mounts`` and ``mounts`` together.
         health_status: Adapter-normalized health (e.g. healthy, unhealthy); ``None`` if N/A.
     """
 
