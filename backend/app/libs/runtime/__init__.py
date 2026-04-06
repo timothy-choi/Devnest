@@ -13,14 +13,17 @@ from .errors import (
 from .interfaces import RuntimeAdapter
 from .models import (
     ContainerInspectionResult,
+    EnsureRunningRuntimeResult,
     NetnsRefResult,
     RuntimeActionResult,
     RuntimeEnsureResult,
 )
+from .runtime_orchestrator import ensure_running_runtime_only
 
 __all__ = [
     "ContainerCreateError",
     "DockerRuntimeAdapter",
+    "EnsureRunningRuntimeResult",
     "ContainerDeleteError",
     "ContainerInspectionResult",
     "ContainerNotFoundError",
@@ -32,4 +35,5 @@ __all__ = [
     "RuntimeAdapter",
     "RuntimeAdapterError",
     "RuntimeEnsureResult",
+    "ensure_running_runtime_only",
 ]

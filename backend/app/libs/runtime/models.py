@@ -62,3 +62,20 @@ class NetnsRefResult:
     container_id: str
     pid: int | None
     netns_ref: str | None
+
+
+@dataclass(frozen=True)
+class EnsureRunningRuntimeResult:
+    """
+    Outcome of ``ensure_running_runtime_only``: container ensured, started, inspected, netns resolved.
+
+    Built for internal callers (no HTTP). ``pid`` and ``netns_ref`` are set when the runtime reports
+    a host PID (typically while the container is running).
+    """
+
+    container_id: str
+    container_state: str
+    pid: int
+    netns_ref: str
+    ports: tuple[tuple[int, int], ...]
+    node_id: str | None

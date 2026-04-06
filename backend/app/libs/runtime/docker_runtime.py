@@ -7,8 +7,6 @@ from collections.abc import Mapping, Sequence
 
 import docker
 import docker.errors
-from docker.types import HostConfig
-
 from .errors import ContainerCreateError, ContainerNotFoundError, ContainerStartError, NetnsRefError
 from .interfaces import RuntimeAdapter
 from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResult, RuntimeEnsureResult
@@ -196,12 +194,13 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         if memory_limit_bytes is not None:
             hc_kwargs["mem_limit"] = int(memory_limit_bytes)
 
-        host_config = HostConfig(**hc_kwargs)
+        host_config = self._client.api.create_host_config(**hc_kwargs)
         env_dict = dict(env) if env else {}
         label_dict = dict(labels) if labels else {}
 
-        def _create() -> docker.models.containers.Container:
-            return self._client.containers.create(
+        def _create():
+            # High-level ``containers.create`` rejects ``host_config`` on docker-py 7+; use the API client.
+            resp = self._client.api.create_container(
                 image=resolved_image,
                 name=name,
                 detach=True,
@@ -210,6 +209,10 @@ class DockerRuntimeAdapter(RuntimeAdapter):
                 host_config=host_config,
                 ports=_exposed_container_ports(port_bindings),
             )
+            cid = resp.get("Id") or resp.get("id")
+            if not cid:
+                raise ContainerCreateError("create_container returned no Id")
+            return self._client.containers.get(cid)
 
         try:
             ctr = _create()
