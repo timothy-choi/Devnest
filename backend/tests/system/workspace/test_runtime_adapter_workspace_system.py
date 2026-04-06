@@ -63,12 +63,15 @@ def test_adapter_workspace_image_ephemeral_port_project_and_code_server_mounts_p
         assert ins.ports[0][1] == WORKSPACE_IDE_CONTAINER_PORT
 
         ctr = docker_client.containers.get(ensured.container_id)
+        # Image runs as ``coder``; host bind mounts are owned by the test user/CI UID, so default
+        # exec would get permission denied. Root can write; we only assert files appear on host.
         code, out = ctr.exec_run(
             f"sh -c 'echo ws-mark > {WORKSPACE_PROJECT_CONTAINER_PATH}/file.txt "
             f"&& mkdir -p {CODE_SERVER_CONFIG_CONTAINER_PATH} {CODE_SERVER_DATA_CONTAINER_PATH} "
             f"&& echo cfg > {CODE_SERVER_CONFIG_CONTAINER_PATH}/c.json "
             f"&& echo dat > {CODE_SERVER_DATA_CONTAINER_PATH}/d.txt'",
             demux=False,
+            user="root",
         )
         assert code == 0, out.decode("utf-8", errors="replace")
 
