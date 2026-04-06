@@ -45,7 +45,11 @@ def _sample_attrs(
         "NetworkSettings": {
             "Ports": ports
             if ports is not None
-            else {"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "18080"}]},
+            else {
+                f"{WORKSPACE_IDE_CONTAINER_PORT}/tcp": [
+                    {"HostIp": "0.0.0.0", "HostPort": "18080"},
+                ],
+            },
         },
         "Mounts": mounts
         if mounts is not None
@@ -142,7 +146,7 @@ class TestInspectContainerNormalization:
         ctr = MagicMock()
         ctr.attrs = _sample_attrs(
             ports={
-                "8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "3000"}],
+                f"{WORKSPACE_IDE_CONTAINER_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": "3000"}],
                 "9000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "4000"}],
             },
         )
@@ -158,7 +162,7 @@ class TestInspectContainerNormalization:
         ctr = MagicMock()
         ctr.attrs = _sample_attrs(
             ports={
-                "8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": ""}],
+                f"{WORKSPACE_IDE_CONTAINER_PORT}/tcp": [{"HostIp": "0.0.0.0", "HostPort": ""}],
                 "9000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "1111"}],
             },
         )
@@ -663,6 +667,27 @@ class TestEnsureContainer:
 
         mock_client.api.create_container.assert_not_called()
 
+    def test_create_rejects_blank_container_name(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        for bad in ("", "   ", "\t"):
+            with pytest.raises(ContainerCreateError, match="non-empty"):
+                adapter.ensure_container(name=bad, workspace_host_path="/w")
+
+        mock_client.api.create_container.assert_not_called()
+
+    def test_create_rejects_non_positive_container_port_in_ports(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        with pytest.raises(ContainerCreateError, match="container port"):
+            adapter.ensure_container(
+                name="ws",
+                workspace_host_path="/w",
+                ports=((0, 0),),
+            )
+
+        mock_client.api.create_container.assert_not_called()
+
     def test_create_passes_nano_cpus_when_cpu_limit_set(
         self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
     ) -> None:
@@ -946,6 +971,7 @@ class TestDeleteContainer:
         ctr.remove.assert_called_once_with()
         assert r.success is True
         assert r.container_state == "missing"
+        assert r.container_id == "deadbeef"
 
     def test_running_stops_then_removes(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
@@ -967,6 +993,7 @@ class TestDeleteContainer:
         ctr.remove.assert_called_once_with()
         assert r.success is True
         assert r.container_state == "missing"
+        assert r.container_id == "deadbeef"
 
     def test_stop_failure_raises(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
@@ -999,6 +1026,7 @@ class TestDeleteContainer:
 
         assert r.success is False
         assert r.message == "container still exists after delete"
+        assert r.container_id == "deadbeef"
         ctr.remove.assert_called_once_with()
 
 

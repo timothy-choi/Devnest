@@ -250,7 +250,10 @@ def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[st
     bindings: dict[str, int | None] = {}
     if ports:
         for host_p, cont_p in ports:
-            key = f"{int(cont_p)}/tcp"
+            cp = int(cont_p)
+            if cp <= 0:
+                raise ContainerCreateError(f"container port in ports= must be positive, got {cp!r}")
+            key = f"{cp}/tcp"
             hp = int(host_p)
             bindings[key] = None if hp <= 0 else hp
     return bindings
@@ -333,10 +336,13 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         **Create:** ``_resolve_image`` selects ``image`` or ``DEVNEST_WORKSPACE_IMAGE`` /
         ``devnest/workspace:latest``. Binds are ``[project, *extra_bind_mounts]`` to
         ``WORKSPACE_PROJECT_CONTAINER_PATH`` then optional code-server paths. Host publishes come
-        only from ``ports`` (never a fixed host 8080 default). ``workspace_ide_container_port`` on
+        only from ``ports`` (never an implicit default host publish). ``workspace_ide_container_port`` on
         the result is always ``WORKSPACE_IDE_CONTAINER_PORT`` (in-container IDE); the process still
         binds that port inside the container even when ``ports`` is omitted.
         """
+        if not str(name).strip():
+            raise ContainerCreateError("container name must be non-empty")
+
         existing: Container | None = None
         rid = (existing_container_id or "").strip()
         if rid:
@@ -510,7 +516,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         after = self.inspect_container(container_id=container_id)
         if not after.exists:
             return RuntimeActionResult(
-                container_id=container_id,
+                container_id=cid_out,
                 container_state="missing",
                 success=True,
                 message=None,
@@ -575,11 +581,13 @@ class DockerRuntimeAdapter(RuntimeAdapter):
                 message=None,
             )
 
+        cid_known = ins.container_id or container_id
+
         try:
             ctr = self._client.containers.get(container_id)
         except docker.errors.NotFound:
             return RuntimeActionResult(
-                container_id=container_id,
+                container_id=cid_known,
                 container_state="missing",
                 success=True,
                 message=None,
@@ -594,7 +602,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             ctr.remove()
         except docker.errors.NotFound:
             return RuntimeActionResult(
-                container_id=container_id,
+                container_id=cid_known,
                 container_state="missing",
                 success=True,
                 message=None,
@@ -605,13 +613,13 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         final = self.inspect_container(container_id=container_id)
         if final.exists:
             return RuntimeActionResult(
-                container_id=final.container_id or container_id,
+                container_id=final.container_id or cid_known,
                 container_state=final.container_state,
                 success=False,
                 message="container still exists after delete",
             )
         return RuntimeActionResult(
-            container_id=container_id,
+            container_id=cid_known,
             container_state="missing",
             success=True,
             message=None,
@@ -620,7 +628,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
     def get_container_netns_ref(self, *, container_id: str) -> NetnsRefResult:
         """
         Inspect-only bridge for future topology: resolve the host ``net`` namespace path from the
-        container's init PID. No ``setns``, veth, or routing — callers use the returned path later.
+        container's init PID. No ``setns``, veth, or routing; callers use the returned path later.
 
         Uses Docker ``State.Pid`` (host PID namespace, container init) per Engine API; ``netns_ref``
         is the Linux path ``/proc/<pid>/ns/net`` on the Docker host.

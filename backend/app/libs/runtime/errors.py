@@ -14,7 +14,7 @@ class ContainerNotFoundError(RuntimeAdapterError):
 
 
 class ContainerCreateError(RuntimeAdapterError):
-    """Raised when ``ensure_container`` cannot create or configure a container (pull, limits, invalid spec)."""
+    """Raised when ``ensure_container`` cannot create or configure a container (pull, limits, invalid name, ports, or mounts)."""
 
 
 class ContainerStartError(RuntimeAdapterError):

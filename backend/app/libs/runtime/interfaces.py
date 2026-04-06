@@ -64,9 +64,9 @@ class RuntimeAdapter(ABC):
         ``ports`` entries are optional host-publish pairs ``(host_port, container_port)``.
         Omit ``ports`` (or pass an empty sequence) to create **without** publishing any container
         port to the host—multiple workspaces then do not consume host ports; the in-container
-        IDE still uses the default workspace port (``8080``) inside the container. Use a positive
+        IDE still listens on ``WORKSPACE_IDE_CONTAINER_PORT`` inside the container. Use a positive
         ``host_port`` to pin a host port, or ``host_port <= 0`` with an explicit pair such as
-        ``(0, 8080)`` to request an engine-assigned ephemeral host port for local testing.
+        ``(0, WORKSPACE_IDE_CONTAINER_PORT)`` to request an engine-assigned ephemeral host port.
         If the same ``container_port`` appears more than once, the last pair wins.
 
         ``image`` may be omitted; the Docker adapter uses ``DEVNEST_WORKSPACE_IMAGE`` (or its

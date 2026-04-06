@@ -93,8 +93,9 @@ class RuntimeActionResult:
     or ``delete_container``.
 
     Fields:
-        container_id: Engine id when known; otherwise the caller's ``container_id`` argument
-            (e.g. ``stop_container`` / ``delete_container`` when the container is missing).
+        container_id: Canonical engine id when the adapter observed it (e.g. from inspect);
+            otherwise the caller's ``container_id`` argument (including for idempotent
+            ``stop_container`` / ``delete_container`` when the container was already missing).
         container_state: Observed state after the action (or best-effort snapshot).
         success: Whether the adapter considers the action to have succeeded.
         message: Optional human-readable detail (often used when ``success`` is false).
