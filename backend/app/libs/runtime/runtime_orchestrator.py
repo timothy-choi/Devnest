@@ -6,7 +6,11 @@ from collections.abc import Mapping, Sequence
 
 from .errors import ContainerCreateError, ContainerStartError
 from .interfaces import RuntimeAdapter
-from .models import EnsureRunningRuntimeResult
+from .models import (
+    EnsureRunningRuntimeResult,
+    WorkspaceExtraBindMountSpec,
+    WorkspaceProjectMountSpec,
+)
 
 
 def ensure_running_runtime_only(
@@ -19,7 +23,9 @@ def ensure_running_runtime_only(
     env: Mapping[str, str] | None = None,
     ports: Sequence[tuple[int, int]] | None = None,
     labels: Mapping[str, str] | None = None,
+    project_mount: WorkspaceProjectMountSpec | None = None,
     workspace_host_path: str | None = None,
+    extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None = None,
     existing_container_id: str | None = None,
 ) -> EnsureRunningRuntimeResult:
     """
@@ -42,7 +48,9 @@ def ensure_running_runtime_only(
         env=env,
         ports=ports,
         labels=labels,
+        project_mount=project_mount,
         workspace_host_path=workspace_host_path,
+        extra_bind_mounts=extra_bind_mounts,
         existing_container_id=existing_container_id,
     )
     if not ensure_res.container_id:
@@ -66,4 +74,5 @@ def ensure_running_runtime_only(
         resolved_ports=resolved_ports,
         node_id=ensure_res.node_id,
         workspace_ide_container_port=ensure_res.workspace_ide_container_port,
+        workspace_project_mount=inspected.workspace_project_mount or ensure_res.workspace_project_mount,
     )

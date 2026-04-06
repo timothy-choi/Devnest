@@ -12,18 +12,30 @@ from .errors import (
 )
 from .interfaces import RuntimeAdapter
 from .models import (
+    BindMountInfo,
     ContainerInspectionResult,
     EnsureRunningRuntimeResult,
     NetnsRefResult,
     RuntimeActionResult,
     RuntimeEnsureResult,
+    CODE_SERVER_CONFIG_CONTAINER_PATH,
+    CODE_SERVER_DATA_CONTAINER_PATH,
+    WORKSPACE_PROJECT_CONTAINER_PATH,
+    WorkspaceExtraBindMountSpec,
+    WorkspaceProjectMountSpec,
 )
 from .runtime_orchestrator import ensure_running_runtime_only
 
 __all__ = [
+    "BindMountInfo",
+    "CODE_SERVER_CONFIG_CONTAINER_PATH",
+    "CODE_SERVER_DATA_CONTAINER_PATH",
     "ContainerCreateError",
     "DockerRuntimeAdapter",
     "WORKSPACE_IDE_CONTAINER_PORT",
+    "WORKSPACE_PROJECT_CONTAINER_PATH",
+    "WorkspaceExtraBindMountSpec",
+    "WorkspaceProjectMountSpec",
     "EnsureRunningRuntimeResult",
     "ContainerDeleteError",
     "ContainerInspectionResult",

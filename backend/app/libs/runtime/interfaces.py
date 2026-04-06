@@ -13,7 +13,14 @@ from .errors import (
     ContainerStopError,
     NetnsRefError,
 )
-from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResult, RuntimeEnsureResult
+from .models import (
+    ContainerInspectionResult,
+    NetnsRefResult,
+    RuntimeActionResult,
+    RuntimeEnsureResult,
+    WorkspaceExtraBindMountSpec,
+    WorkspaceProjectMountSpec,
+)
 
 
 class RuntimeAdapter(ABC):
@@ -36,7 +43,9 @@ class RuntimeAdapter(ABC):
         env: Mapping[str, str] | None = None,
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
+        project_mount: WorkspaceProjectMountSpec | None = None,
         workspace_host_path: str | None = None,
+        extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None = None,
         existing_container_id: str | None = None,
     ) -> RuntimeEnsureResult:
         """
@@ -62,8 +71,16 @@ class RuntimeAdapter(ABC):
 
         ``image`` may be omitted; the Docker adapter uses ``DEVNEST_WORKSPACE_IMAGE`` (or its
         built-in default) for the workspace/code-server image in that case.
-        ``workspace_host_path`` is required when creating a new workspace container in the
-        Docker implementation (bind to ``/home/coder/project``).
+
+        **Project storage (required on create):** pass ``project_mount`` (preferred) and/or
+        ``workspace_host_path`` (legacy alias for the same host directory). The Docker adapter
+        bind-mounts that host path to ``WORKSPACE_PROJECT_CONTAINER_PATH`` (``/home/coder/project``).
+        If both are set, they must match. ``project_mount.read_only`` selects ``:ro`` vs ``:rw``.
+
+        **Optional code-server / state mounts:** ``extra_bind_mounts`` is a sequence of
+        ``WorkspaceExtraBindMountSpec`` (host directory → absolute container path, e.g.
+        ``CODE_SERVER_CONFIG_CONTAINER_PATH`` / ``CODE_SERVER_DATA_CONTAINER_PATH`` in ``models``).
+        Omitted or empty means no extra binds. Must not duplicate the project mount destination.
         """
 
     @abstractmethod

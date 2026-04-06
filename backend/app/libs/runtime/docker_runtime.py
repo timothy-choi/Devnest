@@ -18,11 +18,19 @@ from .errors import (
     NetnsRefError,
 )
 from .interfaces import RuntimeAdapter
-from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResult, RuntimeEnsureResult
+from .models import (
+    BindMountInfo,
+    ContainerInspectionResult,
+    NetnsRefResult,
+    RuntimeActionResult,
+    RuntimeEnsureResult,
+    WORKSPACE_PROJECT_CONTAINER_PATH,
+    WorkspaceExtraBindMountSpec,
+    WorkspaceProjectMountSpec,
+)
 
 # Matches Dockerfile.workspace default tag; override with DEVNEST_WORKSPACE_IMAGE.
 _DEFAULT_WORKSPACE_IMAGE = "devnest/workspace:latest"
-_WORKSPACE_MOUNT_TARGET = "/home/coder/project"
 # In-container IDE / code-server port (not a host publish unless ``ensure_container(ports=...)``).
 WORKSPACE_IDE_CONTAINER_PORT = 8080
 _WORKSPACE_CONTAINER_PORT = WORKSPACE_IDE_CONTAINER_PORT
@@ -61,6 +69,8 @@ def _inspection_not_found() -> ContainerInspectionResult:
         ports=(),
         mounts=(),
         health_status=None,
+        bind_mounts=(),
+        workspace_project_mount=None,
     )
 
 
@@ -119,6 +129,84 @@ def _normalize_health(attrs: dict) -> str | None:
     return str(status).lower()
 
 
+def _normalize_bind_mount_infos(attrs: dict) -> tuple[BindMountInfo, ...]:
+    out: list[BindMountInfo] = []
+    for m in attrs.get("Mounts") or []:
+        if not isinstance(m, dict):
+            continue
+        if str(m.get("Type") or "").lower() != "bind":
+            continue
+        dest = str(m.get("Destination") or "").strip()
+        src = str(m.get("Source") or "").strip()
+        if not dest:
+            continue
+        read_only = m.get("RW") is False
+        out.append(BindMountInfo(host_path=src, container_path=dest, read_only=read_only))
+    return tuple(out)
+
+
+def _workspace_project_bind(bind_mounts: tuple[BindMountInfo, ...]) -> BindMountInfo | None:
+    suffix = WORKSPACE_PROJECT_CONTAINER_PATH.rstrip("/")
+    for b in bind_mounts:
+        if b.container_path.rstrip("/") == suffix:
+            return b
+    return None
+
+
+def _resolve_project_host_path_for_create(
+    project_mount: WorkspaceProjectMountSpec | None,
+    workspace_host_path: str | None,
+) -> tuple[str, bool]:
+    pm_raw = (
+        str(project_mount.host_path).strip()
+        if project_mount is not None and project_mount.host_path is not None
+        else ""
+    )
+    wh_raw = str(workspace_host_path).strip() if workspace_host_path and str(workspace_host_path).strip() else ""
+    if pm_raw and wh_raw and pm_raw != wh_raw:
+        raise ContainerCreateError(
+            "project_mount.host_path and workspace_host_path disagree; pass one consistent path",
+        )
+    chosen = pm_raw or wh_raw
+    if not chosen:
+        raise ContainerCreateError(
+            "project_mount or workspace_host_path is required to create a workspace container "
+            f"(bind-mount host directory to {WORKSPACE_PROJECT_CONTAINER_PATH})",
+        )
+    read_only = bool(project_mount.read_only) if project_mount is not None else False
+    return chosen, read_only
+
+
+def _extra_bind_strings(
+    extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None,
+) -> list[str]:
+    """Docker ``HostConfig`` bind strings for optional mounts; project mount is handled separately."""
+    if not extra_bind_mounts:
+        return []
+    project_norm = WORKSPACE_PROJECT_CONTAINER_PATH.rstrip("/")
+    seen_dest: set[str] = set()
+    out: list[str] = []
+    for spec in extra_bind_mounts:
+        hp = str(spec.host_path).strip()
+        cp = str(spec.container_path).strip()
+        if not hp or not cp:
+            raise ContainerCreateError(
+                "extra_bind_mounts requires non-empty host_path and container_path on every entry",
+            )
+        dest_key = cp.rstrip("/") or "/"
+        if dest_key == project_norm:
+            raise ContainerCreateError(
+                "extra_bind_mounts cannot target the project mount path "
+                f"({WORKSPACE_PROJECT_CONTAINER_PATH}); use project_mount / workspace_host_path only",
+            )
+        if dest_key in seen_dest:
+            raise ContainerCreateError(f"duplicate extra_bind_mounts container_path: {cp!r}")
+        seen_dest.add(dest_key)
+        mode = "ro" if spec.read_only else "rw"
+        out.append(f"{hp}:{cp}:{mode}")
+    return out
+
+
 def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
     state = attrs.get("State") or {}
     status = _normalize_engine_state(state.get("Status"))
@@ -136,6 +224,7 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
         sid = str(cid).strip()
         container_id = sid or None
 
+    bind_mounts = _normalize_bind_mount_infos(attrs)
     return ContainerInspectionResult(
         exists=True,
         container_id=container_id,
@@ -144,6 +233,8 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
         ports=_normalize_ports(attrs),
         mounts=_normalize_mounts(attrs),
         health_status=_normalize_health(attrs),
+        bind_mounts=bind_mounts,
+        workspace_project_mount=_workspace_project_bind(bind_mounts),
     )
 
 
@@ -229,7 +320,9 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         env: Mapping[str, str] | None = None,
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
+        project_mount: WorkspaceProjectMountSpec | None = None,
         workspace_host_path: str | None = None,
+        extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None = None,
         existing_container_id: str | None = None,
     ) -> RuntimeEnsureResult:
         existing: Container | None = None
@@ -250,13 +343,14 @@ class DockerRuntimeAdapter(RuntimeAdapter):
                 resolved_ports=resolved,
                 node_id=None,
                 workspace_ide_container_port=_WORKSPACE_CONTAINER_PORT,
+                workspace_project_mount=ins.workspace_project_mount,
             )
 
-        if not workspace_host_path or not str(workspace_host_path).strip():
-            raise ContainerCreateError(
-                "workspace_host_path is required to create a new workspace container "
-                f"(bind-mount host path to {_WORKSPACE_MOUNT_TARGET})",
-            )
+        host_path, proj_ro = _resolve_project_host_path_for_create(project_mount, workspace_host_path)
+        if proj_ro:
+            mode = "ro"
+        else:
+            mode = "rw"
 
         if cpu_limit is not None and cpu_limit <= 0:
             raise ContainerCreateError("cpu_limit must be positive when set")
@@ -265,8 +359,9 @@ class DockerRuntimeAdapter(RuntimeAdapter):
 
         resolved_image = _resolve_image(image)
         port_bindings = _port_bindings_from_spec(ports)
+        binds = [f"{host_path}:{WORKSPACE_PROJECT_CONTAINER_PATH}:{mode}", *_extra_bind_strings(extra_bind_mounts)]
         hc_kwargs: dict = {
-            "binds": [f"{str(workspace_host_path).strip()}:{_WORKSPACE_MOUNT_TARGET}:rw"],
+            "binds": binds,
         }
         if port_bindings:
             hc_kwargs["port_bindings"] = port_bindings
@@ -320,6 +415,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             resolved_ports=resolved,
             node_id=None,
             workspace_ide_container_port=_WORKSPACE_CONTAINER_PORT,
+            workspace_project_mount=ins.workspace_project_mount,
         )
 
     def start_container(self, *, container_id: str) -> RuntimeActionResult:

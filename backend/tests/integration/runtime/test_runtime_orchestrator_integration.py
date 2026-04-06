@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, call
 import pytest
 
 from app.libs.runtime.models import (
+    BindMountInfo,
     ContainerInspectionResult,
     NetnsRefResult,
     RuntimeActionResult,
@@ -49,7 +50,9 @@ class _RecordingRuntimeAdapter:
         env: Mapping[str, str] | None = None,
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
+        project_mount: object | None = None,
         workspace_host_path: str | None = None,
+        extra_bind_mounts: object | None = None,
         existing_container_id: str | None = None,
     ) -> RuntimeEnsureResult:
         self.call_log.append("ensure_container")
@@ -104,6 +107,12 @@ def happy_results() -> tuple[RuntimeEnsureResult, RuntimeActionResult, Container
         pid=5000,
         ports=((18080, 8080),),
         mounts=("/host:/home/coder/project",),
+        bind_mounts=(
+            BindMountInfo(host_path="/host", container_path="/home/coder/project", read_only=False),
+        ),
+        workspace_project_mount=BindMountInfo(
+            host_path="/host", container_path="/home/coder/project", read_only=False
+        ),
     )
     netns = NetnsRefResult(container_id="abc123", pid=5000, netns_ref="/proc/5000/ns/net")
     return ensure, start, inspect, netns
@@ -137,6 +146,7 @@ def test_ensure_running_runtime_only_call_order_and_result(
     assert out.resolved_ports == ((18080, 8080),)
     assert out.node_id == "test-node"
     assert out.workspace_ide_container_port == 8080
+    assert out.workspace_project_mount == inspect.workspace_project_mount
 
 
 def test_ensure_running_falls_back_to_resolved_ports_when_inspect_ports_empty(
@@ -183,7 +193,9 @@ def test_magicmock_strict_call_sequence_matches_documentation(
                 env=None,
                 ports=None,
                 labels=None,
+                project_mount=None,
                 workspace_host_path="/host",
+                extra_bind_mounts=None,
                 existing_container_id=None,
             ),
             call.start_container(container_id="abc123"),
