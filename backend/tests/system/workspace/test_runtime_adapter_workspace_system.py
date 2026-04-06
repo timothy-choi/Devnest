@@ -15,6 +15,7 @@ import shutil
 import time
 import uuid
 
+import docker.errors
 import pytest
 
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
@@ -31,6 +32,41 @@ from tests.system.conftest import _remove_container_force
 pytestmark = [pytest.mark.system, pytest.mark.workspace_image]
 
 _WORKSPACE_HTTP_TIMEOUT_S = float(os.environ.get("DEVNEST_WORKSPACE_TEST_STARTUP_TIMEOUT", "240"))
+_WAIT_RUNNING_S = float(os.environ.get("DEVNEST_WORKSPACE_TEST_RUNNING_WAIT", "120"))
+
+
+def _chmod_world_writable_tree(path: str) -> None:
+    """Ensure bind-mount sources are writable by container ``coder`` (arbitrary host UID in CI)."""
+    os.chmod(path, 0o777)
+    try:
+        for root, dirs, files in os.walk(path):
+            os.chmod(root, 0o777)
+            for d in dirs:
+                os.chmod(os.path.join(root, d), 0o777)
+            for f in files:
+                os.chmod(os.path.join(root, f), 0o777)
+    except OSError:
+        pass
+
+
+def _wait_container_running_or_fail_with_logs(ctr, *, timeout_s: float) -> None:
+    """``docker exec`` returns 409 if the container is not running; code-server may need a moment."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        ctr.reload()
+        if ctr.status == "running":
+            return
+        if ctr.status in ("exited", "dead"):
+            logs = ctr.logs(tail=200).decode("utf-8", errors="replace")
+            pytest.fail(
+                f"workspace container exited before tests could exec (status={ctr.status!r}). "
+                f"Common cause: bind mounts not writable by the image user. Logs:\n{logs}",
+            )
+        time.sleep(1)
+    logs = ctr.logs(tail=200).decode("utf-8", errors="replace")
+    pytest.fail(
+        f"container not running after {timeout_s}s (status={ctr.status!r}). Logs:\n{logs}",
+    )
 
 
 def _wait_code_server_http_inside_container(ctr, *, ide_port: int, timeout_s: float) -> None:
@@ -44,16 +80,29 @@ def _wait_code_server_http_inside_container(ctr, *, ide_port: int, timeout_s: fl
     deadline = time.monotonic() + timeout_s
     last: str = ""
     while time.monotonic() < deadline:
-        code, raw = ctr.exec_run(
-            [
-                "sh",
-                "-c",
-                f"curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w '%{{http_code}}' "
-                f"http://127.0.0.1:{ide_port}/",
-            ],
-            demux=False,
-            user="coder",
-        )
+        ctr.reload()
+        if ctr.status != "running":
+            logs = ctr.logs(tail=120).decode("utf-8", errors="replace")
+            pytest.fail(
+                f"container stopped during HTTP wait (status={ctr.status!r}). Logs:\n{logs}",
+            )
+        try:
+            code, raw = ctr.exec_run(
+                [
+                    "sh",
+                    "-c",
+                    f"curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w '%{{http_code}}' "
+                    f"http://127.0.0.1:{ide_port}/",
+                ],
+                demux=False,
+                user="coder",
+            )
+        except docker.errors.APIError as e:
+            expl = getattr(e, "explanation", None) or str(e)
+            if e.status_code == 409 or "not running" in expl.lower():
+                logs = ctr.logs(tail=120).decode("utf-8", errors="replace")
+                pytest.fail(f"docker exec rejected (container not running?): {expl}\nLogs:\n{logs}")
+            raise
         txt = raw.decode("utf-8", errors="replace").strip()
         if code == 0 and txt.isdigit():
             status = int(txt)
@@ -96,13 +145,15 @@ def test_adapter_workspace_image_ephemeral_port_project_and_code_server_mounts_p
         assert ensured.created_new is True
         adapter.start_container(container_id=ensured.container_id)
 
+        ctr = docker_client.containers.get(ensured.container_id)
+        _wait_container_running_or_fail_with_logs(ctr, timeout_s=_WAIT_RUNNING_S)
+
         ins = adapter.inspect_container(container_id=ensured.container_id)
         assert ins.ports
         host_port, container_port = ins.ports[0]
         assert container_port == WORKSPACE_IDE_CONTAINER_PORT
         assert isinstance(host_port, int) and host_port > 0
 
-        ctr = docker_client.containers.get(ensured.container_id)
         _wait_code_server_http_inside_container(
             ctr,
             ide_port=WORKSPACE_IDE_CONTAINER_PORT,
