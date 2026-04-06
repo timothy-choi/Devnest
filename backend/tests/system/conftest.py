@@ -57,8 +57,7 @@ def isolated_runtime(
     """
     Unique name, temp bind-mount dir, teardown removes container + dir.
 
-    Port publishing uses the adapter default (ephemeral host port for container 8080) to avoid
-    fixed host-port collisions across parallel runs or local services.
+    Runtime tests that need a host mapping pass explicit ``ports`` (see ``tests/system/runtime``).
     """
     name = f"devnest-sys-{uuid.uuid4().hex[:12]}"
     workspace = os.path.join(

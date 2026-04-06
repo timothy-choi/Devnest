@@ -14,8 +14,8 @@ Or by path (skips collection of unrelated modules)::
     pytest tests/system/runtime/test_docker_runtime_system.py -v
 
 Image: set ``DEVNEST_RUNTIME_SYSTEM_IMAGE`` to override the default ``nginx:alpine``
-(see ``tests/system/conftest.py``). The adapter still publishes container port 8080 with
-an **ephemeral** host port so nothing binds a fixed host port like 8080.
+(see ``tests/system/conftest.py``). Tests pass ``ports=((0, 8080),)`` so the engine assigns an
+ephemeral **host** port for container 8080 (no fixed host 8080).
 """
 
 from __future__ import annotations
@@ -31,11 +31,12 @@ pytestmark = pytest.mark.system
 
 
 def _ensure(isolated_runtime: IsolatedRuntimeContext):
-    """Create via adapter; omit ``ports`` so host side is engine-assigned (ephemeral)."""
+    """Create via adapter; ephemeral host publish for container 8080 (explicit ``(0, 8080)``)."""
     return isolated_runtime.adapter.ensure_container(
         name=isolated_runtime.name,
         image=isolated_runtime.image,
         workspace_host_path=isolated_runtime.workspace_host_path,
+        ports=((0, 8080),),
         labels={"devnest.system_test": "runtime"},
     )
 

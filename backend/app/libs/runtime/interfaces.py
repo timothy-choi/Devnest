@@ -52,11 +52,13 @@ class RuntimeAdapter(ABC):
         container is reused; otherwise if ``name`` resolves to an existing container, reuse
         it; otherwise create a container named ``name``.
 
-        ``ports`` entries are ``(host_port, container_port)`` publish pairs. Use
-        ``host_port == 0`` to request an ephemeral host port for that container port.
-        Implementations should not assume a fixed host port for the IDE (container port
-        ``8080`` is typical). If the same ``container_port`` appears more than once, the
-        last pair wins.
+        ``ports`` entries are optional host-publish pairs ``(host_port, container_port)``.
+        Omit ``ports`` (or pass an empty sequence) to create **without** publishing any container
+        port to the host—multiple workspaces then do not consume host ports; the in-container
+        IDE still uses the default workspace port (``8080``) inside the container. Use a positive
+        ``host_port`` to pin a host port, or ``host_port <= 0`` with an explicit pair such as
+        ``(0, 8080)`` to request an engine-assigned ephemeral host port for local testing.
+        If the same ``container_port`` appears more than once, the last pair wins.
 
         ``image`` may be omitted; the Docker adapter uses ``DEVNEST_WORKSPACE_IMAGE`` (or its
         built-in default) for the workspace/code-server image in that case.

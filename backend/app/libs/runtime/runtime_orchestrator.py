@@ -65,4 +65,5 @@ def ensure_running_runtime_only(
         netns_ref=netns.netns_ref,
         resolved_ports=resolved_ports,
         node_id=ensure_res.node_id,
+        workspace_ide_container_port=ensure_res.workspace_ide_container_port,
     )

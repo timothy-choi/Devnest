@@ -195,6 +195,7 @@ class TestEnsureContainer:
         assert r.created_new is False
         assert r.container_id == "exist1"
         assert r.container_state == "exited"
+        assert r.workspace_ide_container_port == 8080
         mock_client.containers.create.assert_not_called()
 
     def test_reuses_existing_when_existing_container_id_resolves(
@@ -276,7 +277,7 @@ class TestEnsureContainer:
         assert "/data/ws:/home/coder/project:rw" in hc_kwargs["binds"][0]
         assert hc_kwargs["port_bindings"]["8080/tcp"] == 9000
 
-    def test_create_default_ide_port_uses_ephemeral_host_binding(
+    def test_create_omits_host_publish_when_ports_not_specified(
         self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
     ) -> None:
         new_ctr = MagicMock()
@@ -292,10 +293,13 @@ class TestEnsureContainer:
         mock_client.containers.get.side_effect = get_side_effect
         mock_client.api.create_container.return_value = {"Id": "ephemfull"}
 
-        adapter.ensure_container(name="ws-eph", workspace_host_path="/proj")
+        r = adapter.ensure_container(name="ws-eph", workspace_host_path="/proj")
 
         hc_kwargs = mock_client.api.create_host_config.call_args.kwargs
-        assert hc_kwargs["port_bindings"]["8080/tcp"] is None
+        assert "port_bindings" not in hc_kwargs
+        assert mock_client.api.create_container.call_args.kwargs["ports"] == []
+        assert r.workspace_ide_container_port == 8080
+        assert r.resolved_ports == ()
 
     def test_create_explicit_zero_host_port_is_ephemeral(
         self, adapter: DockerRuntimeAdapter, mock_client: MagicMock

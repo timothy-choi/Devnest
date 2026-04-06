@@ -23,7 +23,9 @@ from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResu
 # Matches Dockerfile.workspace default tag; override with DEVNEST_WORKSPACE_IMAGE.
 _DEFAULT_WORKSPACE_IMAGE = "devnest/workspace:latest"
 _WORKSPACE_MOUNT_TARGET = "/home/coder/project"
-_WORKSPACE_CONTAINER_PORT = 8080
+# In-container IDE / code-server port (not a host publish unless ``ensure_container(ports=...)``).
+WORKSPACE_IDE_CONTAINER_PORT = 8080
+_WORKSPACE_CONTAINER_PORT = WORKSPACE_IDE_CONTAINER_PORT
 # Seconds between SIGTERM and SIGKILL on ``docker stop`` (override via env).
 _DEFAULT_STOP_TIMEOUT_S = 10
 
@@ -147,13 +149,14 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
 
 def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[str, int | None]:
     """
-    Map ``container_port/tcp`` -> host port, or ``None`` for an ephemeral host port.
+    Host publish map only: ``container_port/tcp`` -> host port, or ``None`` for ephemeral.
 
-    Always publishes the workspace IDE/container port (``8080``) so in-container services
-    (e.g. code-server) keep a stable container port; the host side is **ephemeral** unless
-    the caller supplies a positive ``host_port`` for that container port.
-    ``(0, container_port)`` selects ephemeral publish. Duplicate ``container_port`` keys:
-    last host binding wins.
+    When ``ports`` is omitted or empty, **no** ports are published to the host (workspace IDE
+    still listens on container port ``8080`` inside the container network namespace).
+
+    When ``ports`` is provided, each entry is ``(host_port, container_port)``: use a positive
+    ``host_port`` to pin, or ``<= 0`` for an engine-assigned ephemeral host port for that
+    container port. Duplicate container ports: last binding wins.
     """
     bindings: dict[str, int | None] = {}
     if ports:
@@ -161,9 +164,6 @@ def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[st
             key = f"{int(cont_p)}/tcp"
             hp = int(host_p)
             bindings[key] = None if hp <= 0 else hp
-    key8080 = f"{_WORKSPACE_CONTAINER_PORT}/tcp"
-    if key8080 not in bindings:
-        bindings[key8080] = None
     return bindings
 
 
@@ -249,6 +249,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
                 container_state=ins.container_state,
                 resolved_ports=resolved,
                 node_id=None,
+                workspace_ide_container_port=_WORKSPACE_CONTAINER_PORT,
             )
 
         if not workspace_host_path or not str(workspace_host_path).strip():
@@ -264,8 +265,11 @@ class DockerRuntimeAdapter(RuntimeAdapter):
 
         resolved_image = _resolve_image(image)
         port_bindings = _port_bindings_from_spec(ports)
-        hc_kwargs: dict = {"port_bindings": port_bindings}
-        hc_kwargs["binds"] = [f"{str(workspace_host_path).strip()}:{_WORKSPACE_MOUNT_TARGET}:rw"]
+        hc_kwargs: dict = {
+            "binds": [f"{str(workspace_host_path).strip()}:{_WORKSPACE_MOUNT_TARGET}:rw"],
+        }
+        if port_bindings:
+            hc_kwargs["port_bindings"] = port_bindings
         if cpu_limit is not None:
             hc_kwargs["nano_cpus"] = int(cpu_limit * 1_000_000_000)
         if memory_limit_bytes is not None:
@@ -315,6 +319,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             container_state=ins.container_state,
             resolved_ports=resolved,
             node_id=None,
+            workspace_ide_container_port=_WORKSPACE_CONTAINER_PORT,
         )
 
     def start_container(self, *, container_id: str) -> RuntimeActionResult:

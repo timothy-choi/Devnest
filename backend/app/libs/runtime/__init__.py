@@ -1,6 +1,6 @@
 """Runtime adapter: normalized types for container lifecycle (orchestrator-facing)."""
 
-from .docker_runtime import DockerRuntimeAdapter
+from .docker_runtime import WORKSPACE_IDE_CONTAINER_PORT, DockerRuntimeAdapter
 from .errors import (
     ContainerCreateError,
     ContainerDeleteError,
@@ -23,6 +23,7 @@ from .runtime_orchestrator import ensure_running_runtime_only
 __all__ = [
     "ContainerCreateError",
     "DockerRuntimeAdapter",
+    "WORKSPACE_IDE_CONTAINER_PORT",
     "EnsureRunningRuntimeResult",
     "ContainerDeleteError",
     "ContainerInspectionResult",

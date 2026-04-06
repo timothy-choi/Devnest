@@ -25,7 +25,7 @@ pytest tests/system/runtime/test_docker_runtime_system.py -v
 
 | Variable | Purpose |
 |----------|---------|
-| `DEVNEST_RUNTIME_SYSTEM_IMAGE` | Image used for create/start (default `nginx:alpine`). Must stay up with its default `CMD` when started; the adapter bind-mounts a temp directory to `/home/coder/project` and publishes container port `8080` with an **ephemeral** host port. |
+| `DEVNEST_RUNTIME_SYSTEM_IMAGE` | Image used for create/start (default `nginx:alpine`). Must stay up with its default `CMD` when started; the adapter bind-mounts a temp directory to `/home/coder/project`. Tests request host publish via explicit `ports=((0, 8080),)` (ephemeral host port for in-container 8080). |
 
 ## Isolation and cleanup
 

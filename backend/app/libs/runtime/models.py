@@ -15,10 +15,12 @@ class RuntimeEnsureResult:
         exists: Whether the container record exists after ensure.
         created_new: Whether a new container was created in this call (vs reused).
         container_state: Normalized lifecycle state (e.g. created, running, exited).
-        resolved_ports: Published ``(host_port, container_port)`` pairs. On reuse, matches
-            ``inspect_container`` port normalization when the engine reports bindings; on create,
-            may be empty until the engine assigns ephemeral host ports (then visible after start).
+        resolved_ports: Host-published ``(host_port, container_port)`` pairs only (empty when no
+            host publish is configured). On reuse, matches ``inspect_container`` when the engine
+            reports bindings; with explicit ephemeral or pinned maps, filled after publish exists.
         node_id: Execution node when applicable (e.g. Swarm); ``None`` for single-host Docker.
+        workspace_ide_container_port: In-container port for the workspace IDE (code-server);
+            stable default ``8080`` independent of host publishing.
     """
 
     container_id: str
@@ -27,6 +29,7 @@ class RuntimeEnsureResult:
     container_state: str
     resolved_ports: tuple[tuple[int, int], ...]
     node_id: str | None = None
+    workspace_ide_container_port: int = 8080
 
 
 @dataclass(frozen=True)
@@ -106,9 +109,10 @@ class EnsureRunningRuntimeResult:
         container_state: Observed state (expected ``running`` on success).
         pid: Host PID used for the netns path.
         netns_ref: Path to the ``net`` namespace.
-        resolved_ports: Published ``(host_port, container_port)`` pairs from inspection (or
+        resolved_ports: Host-published ``(host_port, container_port)`` pairs from inspection (or
             fallback from ``RuntimeEnsureResult.resolved_ports``).
         node_id: Propagated from ``RuntimeEnsureResult.node_id``.
+        workspace_ide_container_port: In-container IDE port from ``RuntimeEnsureResult``.
     """
 
     container_id: str
@@ -117,3 +121,4 @@ class EnsureRunningRuntimeResult:
     netns_ref: str
     resolved_ports: tuple[tuple[int, int], ...]
     node_id: str | None
+    workspace_ide_container_port: int = 8080
