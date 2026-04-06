@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 # Canonical in-container path for persisted workspace project files (IDE / terminal).
 WORKSPACE_PROJECT_CONTAINER_PATH = "/home/coder/project"
+# code-server / workspace IDE listens on this port inside the container (host publish is optional).
+WORKSPACE_IDE_CONTAINER_PORT = 8080
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,7 @@ class RuntimeEnsureResult:
             reports bindings; with explicit ephemeral or pinned maps, filled after publish exists.
         node_id: Execution node when applicable (e.g. Swarm); ``None`` for single-host Docker.
         workspace_ide_container_port: In-container port for the workspace IDE (code-server);
-            stable default ``8080`` independent of host publishing.
+            always ``WORKSPACE_IDE_CONTAINER_PORT`` for this adapter; independent of host publishing.
         workspace_project_mount: Bind mount for ``WORKSPACE_PROJECT_CONTAINER_PATH`` when the
             engine reports it; ``None`` if missing or not a bind (e.g. old container layout).
     """
@@ -80,7 +82,7 @@ class RuntimeEnsureResult:
     container_state: str
     resolved_ports: tuple[tuple[int, int], ...]
     node_id: str | None = None
-    workspace_ide_container_port: int = 8080
+    workspace_ide_container_port: int = WORKSPACE_IDE_CONTAINER_PORT
     workspace_project_mount: BindMountInfo | None = None
 
 
@@ -179,5 +181,5 @@ class EnsureRunningRuntimeResult:
     netns_ref: str
     resolved_ports: tuple[tuple[int, int], ...]
     node_id: str | None
-    workspace_ide_container_port: int = 8080
+    workspace_ide_container_port: int = WORKSPACE_IDE_CONTAINER_PORT
     workspace_project_mount: BindMountInfo | None = None

@@ -1,6 +1,6 @@
 """Runtime adapter: normalized types for container lifecycle (orchestrator-facing)."""
 
-from .docker_runtime import WORKSPACE_IDE_CONTAINER_PORT, DockerRuntimeAdapter
+from .docker_runtime import DockerRuntimeAdapter
 from .errors import (
     ContainerCreateError,
     ContainerDeleteError,
@@ -20,6 +20,7 @@ from .models import (
     RuntimeEnsureResult,
     CODE_SERVER_CONFIG_CONTAINER_PATH,
     CODE_SERVER_DATA_CONTAINER_PATH,
+    WORKSPACE_IDE_CONTAINER_PORT,
     WORKSPACE_PROJECT_CONTAINER_PATH,
     WorkspaceExtraBindMountSpec,
     WorkspaceProjectMountSpec,

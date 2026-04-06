@@ -14,15 +14,34 @@ Or by path (skips collection of unrelated modules)::
     pytest tests/system/runtime/test_docker_runtime_system.py -v
 
 Image: set ``DEVNEST_RUNTIME_SYSTEM_IMAGE`` to override the default ``nginx:alpine``
-(see ``tests/system/conftest.py``). Tests pass ``ports=((0, 8080),)`` so the engine assigns an
-ephemeral **host** port for container 8080 (no fixed host 8080).
+(see ``tests/system/conftest.py``). Tests pass ``ports=((0, WORKSPACE_IDE_CONTAINER_PORT),)``
+so the engine assigns an ephemeral **host** port for the IDE container port (no fixed host 8080).
+
+Also covers: parallel containers with distinct ephemeral host ports, project bind persistence,
+optional code-server config/data extra binds, restart identity, idempotent delete. The built
+workspace image is exercised in ``tests/system/workspace/test_runtime_adapter_workspace_system.py``.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
+import uuid
+
+import docker
 import pytest
 
+from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.runtime.errors import NetnsRefError
+from app.libs.runtime.models import (
+    CODE_SERVER_CONFIG_CONTAINER_PATH,
+    CODE_SERVER_DATA_CONTAINER_PATH,
+    WORKSPACE_IDE_CONTAINER_PORT,
+    WORKSPACE_PROJECT_CONTAINER_PATH,
+    WorkspaceExtraBindMountSpec,
+)
+
+from tests.system.conftest import _remove_container_force
 
 from ..isolated_context import IsolatedRuntimeContext
 
@@ -31,13 +50,28 @@ pytestmark = pytest.mark.system
 
 
 def _ensure(isolated_runtime: IsolatedRuntimeContext):
-    """Create via adapter; ephemeral host publish for container 8080 (explicit ``(0, 8080)``)."""
+    """Create via adapter; ephemeral host publish for ``WORKSPACE_IDE_CONTAINER_PORT`` (host port from engine)."""
     return isolated_runtime.adapter.ensure_container(
         name=isolated_runtime.name,
         image=isolated_runtime.image,
         workspace_host_path=isolated_runtime.workspace_host_path,
-        ports=((0, 8080),),
+        ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
         labels={"devnest.system_test": "runtime"},
+    )
+
+
+def _make_isolated_context(docker_client: docker.DockerClient, system_test_image: str) -> IsolatedRuntimeContext:
+    name = f"devnest-sys-{uuid.uuid4().hex[:12]}"
+    workspace = os.path.join(
+        os.environ.get("TMPDIR", "/tmp"),
+        f"devnest-runtime-{uuid.uuid4().hex[:12]}",
+    )
+    os.makedirs(workspace, mode=0o755, exist_ok=False)
+    return IsolatedRuntimeContext(
+        adapter=DockerRuntimeAdapter(client=docker_client),
+        name=name,
+        workspace_host_path=workspace,
+        image=system_test_image,
     )
 
 
@@ -73,7 +107,7 @@ def test_inspect_container_returns_normalized_real_data(
     assert ins.ports
     pair = ins.ports[0]
     assert isinstance(pair[0], int) and isinstance(pair[1], int)
-    assert pair[1] == 8080
+    assert pair[1] == WORKSPACE_IDE_CONTAINER_PORT
     assert isolated_runtime.workspace_host_path in "".join(ins.mounts)
 
 
@@ -110,6 +144,20 @@ def test_restart_container_restarts_container(isolated_runtime: IsolatedRuntimeC
     assert restarted.container_state == "running"
 
 
+def test_restart_container_preserves_engine_container_id(
+    isolated_runtime: IsolatedRuntimeContext,
+) -> None:
+    ensured = _ensure(isolated_runtime)
+    isolated_runtime.adapter.start_container(container_id=ensured.container_id)
+    cid = ensured.container_id
+
+    restarted = isolated_runtime.adapter.restart_container(container_id=cid)
+
+    assert restarted.success is True
+    after = isolated_runtime.adapter.inspect_container(container_id=cid)
+    assert after.container_id == cid
+
+
 def test_delete_container_removes_container(isolated_runtime: IsolatedRuntimeContext) -> None:
     ensured = _ensure(isolated_runtime)
     isolated_runtime.adapter.start_container(container_id=ensured.container_id)
@@ -122,6 +170,130 @@ def test_delete_container_removes_container(isolated_runtime: IsolatedRuntimeCon
     after = isolated_runtime.adapter.inspect_container(container_id=ensured.container_id)
     assert after.exists is False
     assert after.container_state == "missing"
+
+
+def test_delete_container_idempotent_when_already_removed(
+    isolated_runtime: IsolatedRuntimeContext,
+) -> None:
+    ensured = _ensure(isolated_runtime)
+    isolated_runtime.adapter.start_container(container_id=ensured.container_id)
+    first = isolated_runtime.adapter.delete_container(container_id=ensured.container_id)
+    assert first.success is True
+
+    second = isolated_runtime.adapter.delete_container(container_id=ensured.container_id)
+
+    assert second.success is True
+    assert second.container_state == "missing"
+
+
+def test_two_parallel_containers_use_distinct_ephemeral_host_ports(
+    docker_client: docker.DockerClient,
+    system_test_image: str,
+) -> None:
+    """Each container asks for engine-assigned host ports; bindings must not collapse to one shared host port."""
+    a = _make_isolated_context(docker_client, system_test_image)
+    b = _make_isolated_context(docker_client, system_test_image)
+    label = {"devnest.system_test": "runtime-multiport"}
+    try:
+        ra = a.adapter.ensure_container(
+            name=a.name,
+            image=a.image,
+            workspace_host_path=a.workspace_host_path,
+            ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
+            labels=label,
+        )
+        rb = b.adapter.ensure_container(
+            name=b.name,
+            image=b.image,
+            workspace_host_path=b.workspace_host_path,
+            ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
+            labels=label,
+        )
+        a.adapter.start_container(container_id=ra.container_id)
+        b.adapter.start_container(container_id=rb.container_id)
+        ia = a.adapter.inspect_container(container_id=ra.container_id)
+        ib = b.adapter.inspect_container(container_id=rb.container_id)
+        assert ia.ports and ib.ports
+        host_a = ia.ports[0][0]
+        host_b = ib.ports[0][0]
+        assert host_a != host_b
+        assert ia.ports[0][1] == WORKSPACE_IDE_CONTAINER_PORT
+        assert ib.ports[0][1] == WORKSPACE_IDE_CONTAINER_PORT
+    finally:
+        _remove_container_force(docker_client, a.name)
+        _remove_container_force(docker_client, b.name)
+        shutil.rmtree(a.workspace_host_path, ignore_errors=True)
+        shutil.rmtree(b.workspace_host_path, ignore_errors=True)
+
+
+def test_project_bind_mount_persists_host_and_container_writes(
+    isolated_runtime: IsolatedRuntimeContext,
+    docker_client: docker.DockerClient,
+) -> None:
+    ws = isolated_runtime.workspace_host_path
+    with open(os.path.join(ws, "seed.txt"), "w", encoding="utf-8") as f:
+        f.write("from-host\n")
+
+    ensured = _ensure(isolated_runtime)
+    isolated_runtime.adapter.start_container(container_id=ensured.container_id)
+    ctr = docker_client.containers.get(ensured.container_id)
+    inner_seed = f"{WORKSPACE_PROJECT_CONTAINER_PATH}/seed.txt"
+    inner_out = f"{WORKSPACE_PROJECT_CONTAINER_PATH}/from_container.txt"
+    code, out = ctr.exec_run(
+        f"sh -c 'test -f {inner_seed} && echo persisted > {inner_out}'",
+        demux=False,
+    )
+    assert code == 0, out.decode("utf-8", errors="replace")
+
+    isolated_runtime.adapter.stop_container(container_id=ensured.container_id)
+
+    host_written = os.path.join(ws, "from_container.txt")
+    assert os.path.isfile(host_written)
+    with open(host_written, encoding="utf-8") as f:
+        assert f.read().strip() == "persisted"
+
+
+def test_extra_bind_code_server_paths_persist_on_host(
+    isolated_runtime: IsolatedRuntimeContext,
+    docker_client: docker.DockerClient,
+) -> None:
+    tmp_parent = os.path.dirname(isolated_runtime.workspace_host_path)
+    cfg_h = os.path.join(tmp_parent, f"devnest-cs-cfg-{uuid.uuid4().hex[:10]}")
+    data_h = os.path.join(tmp_parent, f"devnest-cs-dat-{uuid.uuid4().hex[:10]}")
+    try:
+        os.makedirs(cfg_h, mode=0o755, exist_ok=False)
+        os.makedirs(data_h, mode=0o755, exist_ok=False)
+
+        ensured = isolated_runtime.adapter.ensure_container(
+            name=isolated_runtime.name,
+            image=isolated_runtime.image,
+            workspace_host_path=isolated_runtime.workspace_host_path,
+            ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
+            labels={"devnest.system_test": "runtime-cs-extra"},
+            extra_bind_mounts=(
+                WorkspaceExtraBindMountSpec(host_path=cfg_h, container_path=CODE_SERVER_CONFIG_CONTAINER_PATH),
+                WorkspaceExtraBindMountSpec(host_path=data_h, container_path=CODE_SERVER_DATA_CONTAINER_PATH),
+            ),
+        )
+        isolated_runtime.adapter.start_container(container_id=ensured.container_id)
+        ctr = docker_client.containers.get(ensured.container_id)
+        code, _ = ctr.exec_run(
+            f"sh -c 'mkdir -p {CODE_SERVER_CONFIG_CONTAINER_PATH} {CODE_SERVER_DATA_CONTAINER_PATH} "
+            f"&& echo cfg > {CODE_SERVER_CONFIG_CONTAINER_PATH}/marker.conf "
+            f"&& echo data > {CODE_SERVER_DATA_CONTAINER_PATH}/marker.txt'",
+            demux=False,
+        )
+        assert code == 0
+
+        isolated_runtime.adapter.stop_container(container_id=ensured.container_id)
+
+        with open(os.path.join(cfg_h, "marker.conf"), encoding="utf-8") as f:
+            assert f.read().strip() == "cfg"
+        with open(os.path.join(data_h, "marker.txt"), encoding="utf-8") as f:
+            assert f.read().strip() == "data"
+    finally:
+        shutil.rmtree(cfg_h, ignore_errors=True)
+        shutil.rmtree(data_h, ignore_errors=True)
 
 
 def test_get_container_netns_ref_returns_real_pid_and_path(

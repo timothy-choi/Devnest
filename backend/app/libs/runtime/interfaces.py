@@ -81,6 +81,10 @@ class RuntimeAdapter(ABC):
         ``WorkspaceExtraBindMountSpec`` (host directory → absolute container path, e.g.
         ``CODE_SERVER_CONFIG_CONTAINER_PATH`` / ``CODE_SERVER_DATA_CONTAINER_PATH`` in ``models``).
         Omitted or empty means no extra binds. Must not duplicate the project mount destination.
+
+        **Reuse note:** When an existing container is returned, create-only arguments above are
+        ignored; ``RuntimeEnsureResult`` reflects the running container (ports, project bind from
+        inspect). The in-container IDE port contract remains ``WORKSPACE_IDE_CONTAINER_PORT``.
         """
 
     @abstractmethod

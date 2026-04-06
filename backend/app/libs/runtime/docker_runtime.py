@@ -24,6 +24,7 @@ from .models import (
     NetnsRefResult,
     RuntimeActionResult,
     RuntimeEnsureResult,
+    WORKSPACE_IDE_CONTAINER_PORT,
     WORKSPACE_PROJECT_CONTAINER_PATH,
     WorkspaceExtraBindMountSpec,
     WorkspaceProjectMountSpec,
@@ -31,9 +32,6 @@ from .models import (
 
 # Matches Dockerfile.workspace default tag; override with DEVNEST_WORKSPACE_IMAGE.
 _DEFAULT_WORKSPACE_IMAGE = "devnest/workspace:latest"
-# In-container IDE / code-server port (not a host publish unless ``ensure_container(ports=...)``).
-WORKSPACE_IDE_CONTAINER_PORT = 8080
-_WORKSPACE_CONTAINER_PORT = WORKSPACE_IDE_CONTAINER_PORT
 # Seconds between SIGTERM and SIGKILL on ``docker stop`` (override via env).
 _DEFAULT_STOP_TIMEOUT_S = 10
 
@@ -243,7 +241,7 @@ def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[st
     Host publish map only: ``container_port/tcp`` -> host port, or ``None`` for ephemeral.
 
     When ``ports`` is omitted or empty, **no** ports are published to the host (workspace IDE
-    still listens on container port ``8080`` inside the container network namespace).
+    still listens on ``WORKSPACE_IDE_CONTAINER_PORT`` inside the container network namespace).
 
     When ``ports`` is provided, each entry is ``(host_port, container_port)``: use a positive
     ``host_port`` to pin, or ``<= 0`` for an engine-assigned ephemeral host port for that
@@ -325,6 +323,20 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None = None,
         existing_container_id: str | None = None,
     ) -> RuntimeEnsureResult:
+        """
+        Ensure a workspace container: reuse by ``existing_container_id`` or ``name``, else create.
+
+        **Reuse:** Returns inspection-based ``resolved_ports`` and ``workspace_project_mount``;
+        ``image``, ``ports``, ``project_mount``, ``workspace_host_path``, and ``extra_bind_mounts``
+        are **not** applied (callers rely on the existing container; replace/delete is out of band).
+
+        **Create:** ``_resolve_image`` selects ``image`` or ``DEVNEST_WORKSPACE_IMAGE`` /
+        ``devnest/workspace:latest``. Binds are ``[project, *extra_bind_mounts]`` to
+        ``WORKSPACE_PROJECT_CONTAINER_PATH`` then optional code-server paths. Host publishes come
+        only from ``ports`` (never a fixed host 8080 default). ``workspace_ide_container_port`` on
+        the result is always ``WORKSPACE_IDE_CONTAINER_PORT`` (in-container IDE); the process still
+        binds that port inside the container even when ``ports`` is omitted.
+        """
         existing: Container | None = None
         rid = (existing_container_id or "").strip()
         if rid:
@@ -342,7 +354,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
                 container_state=ins.container_state,
                 resolved_ports=resolved,
                 node_id=None,
-                workspace_ide_container_port=_WORKSPACE_CONTAINER_PORT,
+                workspace_ide_container_port=WORKSPACE_IDE_CONTAINER_PORT,
                 workspace_project_mount=ins.workspace_project_mount,
             )
 
@@ -414,7 +426,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             container_state=ins.container_state,
             resolved_ports=resolved,
             node_id=None,
-            workspace_ide_container_port=_WORKSPACE_CONTAINER_PORT,
+            workspace_ide_container_port=WORKSPACE_IDE_CONTAINER_PORT,
             workspace_project_mount=ins.workspace_project_mount,
         )
 
