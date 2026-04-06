@@ -103,7 +103,8 @@ class EnsureRunningRuntimeResult:
         container_state: Observed state (expected ``running`` on success).
         pid: Host PID used for the netns path.
         netns_ref: Path to the ``net`` namespace.
-        ports: Published ``(host_port, container_port)`` pairs from inspection (or fallback).
+        resolved_ports: Published ``(host_port, container_port)`` pairs from inspection (or
+            fallback from ``RuntimeEnsureResult.resolved_ports``).
         node_id: Propagated from ``RuntimeEnsureResult.node_id``.
     """
 
@@ -111,5 +112,5 @@ class EnsureRunningRuntimeResult:
     container_state: str
     pid: int
     netns_ref: str
-    ports: tuple[tuple[int, int], ...]
+    resolved_ports: tuple[tuple[int, int], ...]
     node_id: str | None

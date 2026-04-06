@@ -57,6 +57,14 @@ def adapter(mock_client: MagicMock) -> DockerRuntimeAdapter:
 
 
 class TestInspectContainerNormalization:
+    def test_api_error_other_than_not_found_propagates(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        mock_client.containers.get.side_effect = docker.errors.APIError("engine down")
+
+        with pytest.raises(docker.errors.APIError, match="engine down"):
+            adapter.inspect_container(container_id="any")
+
     def test_not_found_returns_missing_snapshot(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
 
@@ -107,6 +115,59 @@ class TestInspectContainerNormalization:
         r = adapter.inspect_container(container_id="x")
 
         assert r.container_state == "unknown"
+
+    def test_multiple_ports_sorted_by_host_then_container(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(
+            ports={
+                "8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "3000"}],
+                "9000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "4000"}],
+            },
+        )
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.inspect_container(container_id="x")
+
+        assert r.ports == ((3000, 8080), (4000, 9000))
+
+    def test_skips_bindings_without_numeric_host_port(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(
+            ports={
+                "8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": ""}],
+                "9000/tcp": [{"HostIp": "0.0.0.0", "HostPort": "1111"}],
+            },
+        )
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.inspect_container(container_id="x")
+
+        assert r.ports == ((1111, 9000),)
+
+    def test_mounts_skip_non_dict_entries(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        attrs = _sample_attrs()
+        attrs["Mounts"] = ["not-a-dict", {"Type": "bind", "Source": "/a", "Destination": "/b"}]
+        ctr.attrs = attrs
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.inspect_container(container_id="x")
+
+        assert r.mounts == ("/a:/b",)
+
+    def test_destination_only_mount_when_no_source(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        attrs = _sample_attrs(mounts=[{"Type": "volume", "Source": "", "Destination": "/data"}])
+        ctr.attrs = attrs
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.inspect_container(container_id="x")
+
+        assert r.mounts == ("/data",)
 
 
 class TestEnsureContainer:
@@ -325,6 +386,21 @@ class TestStartContainer:
         with pytest.raises(ContainerStartError, match="boom"):
             adapter.start_container(container_id="cid")
 
+    def test_start_succeeds_false_when_still_not_running_after_start(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="created", pid=0)
+        ctr.start.return_value = None
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.start_container(container_id="cid")
+
+        ctr.start.assert_called_once()
+        assert r.success is False
+        assert r.container_state == "created"
+        assert r.message is not None and "unexpected state" in r.message
+
 
 class TestStopContainer:
     def test_missing_returns_idempotent_success(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
@@ -350,6 +426,22 @@ class TestStopContainer:
     def test_running_stops_then_reinspect_exited(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
         ctr.attrs = _sample_attrs(status="running", pid=1)
+
+        def stop_side_effect(*_a, **kw) -> None:
+            ctr.attrs = _sample_attrs(status="exited", pid=0)
+
+        ctr.stop.side_effect = stop_side_effect
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.stop_container(container_id="cid")
+
+        ctr.stop.assert_called_once_with(timeout=10)
+        assert r.success is True
+        assert r.container_state == "exited"
+
+    def test_paused_triggers_stop(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="paused", pid=1)
 
         def stop_side_effect(*_a, **kw) -> None:
             ctr.attrs = _sample_attrs(status="exited", pid=0)
@@ -404,6 +496,24 @@ class TestRestartContainer:
 
         with pytest.raises(ContainerStartError, match="restart boom"):
             adapter.restart_container(container_id="cid")
+
+    def test_restart_success_false_when_not_running_after(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+
+        def restart_side_effect(*_a, **kw) -> None:
+            ctr.attrs = _sample_attrs(status="exited", pid=0)
+
+        ctr.restart.side_effect = restart_side_effect
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.restart_container(container_id="cid")
+
+        assert r.success is False
+        assert r.container_state == "exited"
+        assert r.message is not None and "unexpected state" in r.message
 
 
 class TestDeleteContainer:
@@ -514,6 +624,18 @@ class TestGetContainerNetnsRef:
 
         with pytest.raises(NetnsRefError, match="no host PID"):
             adapter.get_container_netns_ref(container_id="c1")
+
+    def test_raises_when_inspect_exists_but_container_id_missing(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        attrs = _sample_attrs(cid="", pid=100, status="running")
+        attrs["Id"] = ""
+        ctr.attrs = attrs
+        mock_client.containers.get.return_value = ctr
+
+        with pytest.raises(NetnsRefError, match="not found"):
+            adapter.get_container_netns_ref(container_id="by-name")
 
 
 class TestDefaultImageFromEnv:

@@ -12,5 +12,4 @@ class IsolatedRuntimeContext:
     adapter: DockerRuntimeAdapter
     name: str
     workspace_host_path: str
-    host_port: int
     image: str

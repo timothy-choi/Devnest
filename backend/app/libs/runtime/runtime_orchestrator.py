@@ -1,4 +1,4 @@
-"""Internal runtime orchestration (adapter sequencing only; no DB, no topology, no HTTP)."""
+"""Internal runtime-only orchestration: sequence ``RuntimeAdapter`` calls (no DB, topology, or HTTP)."""
 
 from __future__ import annotations
 
@@ -23,9 +23,16 @@ def ensure_running_runtime_only(
     existing_container_id: str | None = None,
 ) -> EnsureRunningRuntimeResult:
     """
-    Ensure a workspace container exists, start it, then return inspection + netns snapshot.
+    Narrow orchestrator slice: bring a container to a running state and collect runtime facts.
 
-    Not registered as an API route. Callers persist workspace state separately if needed.
+    **Call order:** ``ensure_container`` → ``start_container`` → ``inspect_container`` →
+    ``get_container_netns_ref`` (all via ``runtime``).
+
+    **Raises:** ``ContainerCreateError`` (empty id after ensure), ``ContainerStartError`` (start
+    not successful), ``NetnsRefError`` (from ``get_container_netns_ref`` if PID/netns unavailable).
+
+    Does not write the database, attach topology, compute public URLs, or register gateway routes.
+    Callers persist workspace / routing state separately.
     """
     ensure_res = runtime.ensure_container(
         name=name,
@@ -49,13 +56,13 @@ def ensure_running_runtime_only(
     netns = runtime.get_container_netns_ref(container_id=ensure_res.container_id)
 
     container_id = inspected.container_id or ensure_res.container_id
-    ports_out = inspected.ports if inspected.ports else ensure_res.resolved_ports
+    resolved_ports = inspected.ports if inspected.ports else ensure_res.resolved_ports
 
     return EnsureRunningRuntimeResult(
         container_id=container_id,
         container_state=inspected.container_state,
         pid=netns.pid,
         netns_ref=netns.netns_ref,
-        ports=ports_out,
+        resolved_ports=resolved_ports,
         node_id=ensure_res.node_id,
     )

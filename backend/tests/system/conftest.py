@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import socket
 import uuid
 from collections.abc import Generator
 import docker
@@ -18,12 +17,6 @@ from .isolated_context import IsolatedRuntimeContext
 
 def _default_system_image() -> str:
     return os.environ.get("DEVNEST_RUNTIME_SYSTEM_IMAGE", "nginx:alpine").strip() or "nginx:alpine"
-
-
-def _free_tcp_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def _remove_container_force(client: docker.DockerClient, name: str) -> None:
@@ -62,7 +55,10 @@ def isolated_runtime(
     system_test_image: str,
 ) -> Generator[IsolatedRuntimeContext, None, None]:
     """
-    Unique name, temp bind-mount dir, ephemeral host port, teardown removes container + dir.
+    Unique name, temp bind-mount dir, teardown removes container + dir.
+
+    Port publishing uses the adapter default (ephemeral host port for container 8080) to avoid
+    fixed host-port collisions across parallel runs or local services.
     """
     name = f"devnest-sys-{uuid.uuid4().hex[:12]}"
     workspace = os.path.join(
@@ -70,13 +66,11 @@ def isolated_runtime(
         f"devnest-runtime-{uuid.uuid4().hex[:12]}",
     )
     os.makedirs(workspace, mode=0o755, exist_ok=False)
-    host_port = _free_tcp_port()
     adapter = DockerRuntimeAdapter(client=docker_client)
     ctx = IsolatedRuntimeContext(
         adapter=adapter,
         name=name,
         workspace_host_path=workspace,
-        host_port=host_port,
         image=system_test_image,
     )
     try:

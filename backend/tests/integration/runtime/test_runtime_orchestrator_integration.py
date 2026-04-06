@@ -134,7 +134,7 @@ def test_ensure_running_runtime_only_call_order_and_result(
     assert out.container_state == "running"
     assert out.pid == 5000
     assert out.netns_ref == "/proc/5000/ns/net"
-    assert out.ports == ((18080, 8080),)
+    assert out.resolved_ports == ((18080, 8080),)
     assert out.node_id == "test-node"
 
 
@@ -155,7 +155,7 @@ def test_ensure_running_falls_back_to_resolved_ports_when_inspect_ports_empty(
 
     out = ensure_running_runtime_only(runtime, name="n", workspace_host_path="/w")
 
-    assert out.ports == ((8080, 8080),)
+    assert out.resolved_ports == ((8080, 8080),)
 
 
 def test_magicmock_strict_call_sequence_matches_documentation(
