@@ -3,14 +3,16 @@ System tests: ``DockerRuntimeAdapter`` against the real built workspace image (c
 
 Uses the same ``built_workspace_image`` session fixture as other workspace system tests.
 Slower than ``nginx:alpine`` lifecycle tests in ``tests/system/runtime/``; run with the
-``workspace_image`` marker. Validates ephemeral host publish, mounts, and **code-server HTTP**
-response on the assigned host port (no fixed host 8080 requirement).
+``workspace_image`` marker. Validates ephemeral host publish (inspected), mounts, and **code-server
+HTTP** from inside the container on ``WORKSPACE_IDE_CONTAINER_PORT`` (avoids flaky host→published-port
+access in some CI networks).
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import time
 import uuid
 
 import pytest
@@ -25,11 +27,44 @@ from app.libs.runtime.models import (
 )
 
 from tests.system.conftest import _remove_container_force
-from tests.system.workspace.test_workspace_image_system import _wait_for_code_server_http
 
 pytestmark = [pytest.mark.system, pytest.mark.workspace_image]
 
 _WORKSPACE_HTTP_TIMEOUT_S = float(os.environ.get("DEVNEST_WORKSPACE_TEST_STARTUP_TIMEOUT", "240"))
+
+
+def _wait_code_server_http_inside_container(ctr, *, ide_port: int, timeout_s: float) -> None:
+    """
+    Probe code-server over HTTP on ``127.0.0.1:<ide_port>`` *inside* the container.
+
+    Host-side ``127.0.0.1:<published>`` can fail in some CI/sandbox or networking setups even when
+    the process is healthy; the adapter applies port maps for the Docker network path, so
+    in-container reachability matches production ``connect`` from other containers / mesh.
+    """
+    deadline = time.monotonic() + timeout_s
+    last: str = ""
+    while time.monotonic() < deadline:
+        code, raw = ctr.exec_run(
+            [
+                "sh",
+                "-c",
+                f"curl -sS --connect-timeout 3 --max-time 8 -o /dev/null -w '%{{http_code}}' "
+                f"http://127.0.0.1:{ide_port}/",
+            ],
+            demux=False,
+            user="coder",
+        )
+        txt = raw.decode("utf-8", errors="replace").strip()
+        if code == 0 and txt.isdigit():
+            status = int(txt)
+            if status in (200, 301, 302, 303, 307, 308, 401, 403):
+                return
+        last = f"exit={code}, out={txt!r}"
+        time.sleep(2)
+    pytest.fail(
+        f"code-server did not return an expected HTTP status inside the container within {timeout_s}s "
+        f"(tried http://127.0.0.1:{ide_port}/ as user coder; last: {last})",
+    )
 
 
 def test_adapter_workspace_image_ephemeral_port_project_and_code_server_mounts_persist(
@@ -67,14 +102,12 @@ def test_adapter_workspace_image_ephemeral_port_project_and_code_server_mounts_p
         assert container_port == WORKSPACE_IDE_CONTAINER_PORT
         assert isinstance(host_port, int) and host_port > 0
 
-        status, _body = _wait_for_code_server_http(
-            "127.0.0.1",
-            host_port,
+        ctr = docker_client.containers.get(ensured.container_id)
+        _wait_code_server_http_inside_container(
+            ctr,
+            ide_port=WORKSPACE_IDE_CONTAINER_PORT,
             timeout_s=_WORKSPACE_HTTP_TIMEOUT_S,
         )
-        assert status in (200, 301, 302, 303, 307, 308, 401, 403)
-
-        ctr = docker_client.containers.get(ensured.container_id)
         # Image runs as ``coder``; host bind mounts are owned by the test user/CI UID, so default
         # exec would get permission denied. Root can write; we only assert files appear on host.
         code, out = ctr.exec_run(
