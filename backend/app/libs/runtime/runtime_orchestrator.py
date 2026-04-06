@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from .errors import ContainerCreateError, ContainerStartError, NetnsRefError
+from .errors import ContainerCreateError, ContainerStartError
 from .interfaces import RuntimeAdapter
 from .models import EnsureRunningRuntimeResult
 
@@ -20,6 +20,7 @@ def ensure_running_runtime_only(
     ports: Sequence[tuple[int, int]] | None = None,
     labels: Mapping[str, str] | None = None,
     workspace_host_path: str | None = None,
+    existing_container_id: str | None = None,
 ) -> EnsureRunningRuntimeResult:
     """
     Ensure a workspace container exists, start it, then return inspection + netns snapshot.
@@ -35,6 +36,7 @@ def ensure_running_runtime_only(
         ports=ports,
         labels=labels,
         workspace_host_path=workspace_host_path,
+        existing_container_id=existing_container_id,
     )
     if not ensure_res.container_id:
         raise ContainerCreateError("ensure_container returned an empty container_id")
@@ -48,11 +50,6 @@ def ensure_running_runtime_only(
 
     container_id = inspected.container_id or ensure_res.container_id
     ports_out = inspected.ports if inspected.ports else ensure_res.resolved_ports
-
-    if netns.pid is None or not netns.netns_ref:
-        raise NetnsRefError(
-            f"could not resolve netns for container {container_id!r} after start",
-        )
 
     return EnsureRunningRuntimeResult(
         container_id=container_id,

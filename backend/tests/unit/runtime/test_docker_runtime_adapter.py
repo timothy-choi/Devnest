@@ -92,6 +92,15 @@ class TestInspectContainerNormalization:
 
         assert r.pid is None
 
+    def test_empty_engine_status_becomes_unknown(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="", pid=100)
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.inspect_container(container_id="x")
+
+        assert r.container_state == "unknown"
+
 
 class TestEnsureContainer:
     def test_reuses_existing_without_create(
@@ -109,6 +118,31 @@ class TestEnsureContainer:
         assert r.container_state == "exited"
         mock_client.containers.create.assert_not_called()
 
+    def test_reuses_existing_when_existing_container_id_resolves(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(cid="realid", status="exited", pid=0)
+
+        def get_side_effect(ref: str, *a, **kw):
+            if ref == "fullcontainerid":
+                return ctr
+            if ref == "logical-name":
+                raise docker.errors.NotFound("nope")
+            raise AssertionError(ref)
+
+        mock_client.containers.get.side_effect = get_side_effect
+
+        r = adapter.ensure_container(
+            name="logical-name",
+            existing_container_id="fullcontainerid",
+            workspace_host_path="/unused",
+        )
+
+        assert r.created_new is False
+        assert r.container_id == "realid"
+        assert mock_client.containers.get.call_args_list[0][0][0] == "fullcontainerid"
+
     def test_reuse_uses_synthetic_ports_when_engine_ports_empty(
         self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
     ) -> None:
@@ -120,7 +154,7 @@ class TestEnsureContainer:
 
         r = adapter.ensure_container(name="ws-1", workspace_host_path="/tmp")
 
-        assert r.resolved_ports == ((8080, 8080),)
+        assert r.resolved_ports == ()
 
     def test_create_new_when_not_found(
         self,
@@ -162,6 +196,48 @@ class TestEnsureContainer:
         hc_kwargs = mock_client.api.create_host_config.call_args.kwargs
         assert "/data/ws:/home/coder/project:rw" in hc_kwargs["binds"][0]
         assert hc_kwargs["port_bindings"]["8080/tcp"] == 9000
+
+    def test_create_default_ide_port_uses_ephemeral_host_binding(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="ephem", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-eph":
+                raise docker.errors.NotFound("nope")
+            if container_id == "ephemfull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "ephemfull"}
+
+        adapter.ensure_container(name="ws-eph", workspace_host_path="/proj")
+
+        hc_kwargs = mock_client.api.create_host_config.call_args.kwargs
+        assert hc_kwargs["port_bindings"]["8080/tcp"] is None
+
+    def test_create_explicit_zero_host_port_is_ephemeral(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="z", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-z":
+                raise docker.errors.NotFound("nope")
+            if container_id == "zfull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "zfull"}
+
+        adapter.ensure_container(name="ws-z", workspace_host_path="/p", ports=((0, 8080),))
+
+        hc_kwargs = mock_client.api.create_host_config.call_args.kwargs
+        assert hc_kwargs["port_bindings"]["8080/tcp"] is None
 
     def test_create_requires_workspace_host_path(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         mock_client.containers.get.side_effect = docker.errors.NotFound("nope")

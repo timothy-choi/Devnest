@@ -7,6 +7,8 @@ from collections.abc import Mapping, Sequence
 
 import docker
 import docker.errors
+from docker.models.containers import Container
+
 from .errors import ContainerCreateError, ContainerNotFoundError, ContainerStartError, NetnsRefError
 from .interfaces import RuntimeAdapter
 from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResult, RuntimeEnsureResult
@@ -39,6 +41,21 @@ def _inspection_not_found() -> ContainerInspectionResult:
     )
 
 
+def _normalize_engine_state(raw: object | None) -> str:
+    """
+    Map Docker ``State.Status`` (or equivalent) to a stable lowercase token.
+
+    Docker Engine commonly reports: created, running, paused, restarting, removing, exited, dead.
+    Missing or empty values become ``unknown``.
+    """
+    if raw is None:
+        return "unknown"
+    s = str(raw).strip()
+    if not s:
+        return "unknown"
+    return s.lower()
+
+
 def _normalize_ports(attrs: dict) -> tuple[tuple[int, int], ...]:
     out: list[tuple[int, int]] = []
     net_ports = (attrs.get("NetworkSettings") or {}).get("Ports") or {}
@@ -55,7 +72,7 @@ def _normalize_ports(attrs: dict) -> tuple[tuple[int, int], ...]:
             hp = b.get("HostPort")
             if hp is not None and str(hp).isdigit():
                 out.append((int(hp), cport))
-    return tuple(out)
+    return tuple(sorted(out, key=lambda p: (p[0], p[1])))
 
 
 def _normalize_mounts(attrs: dict) -> tuple[str, ...]:
@@ -79,7 +96,7 @@ def _normalize_health(attrs: dict) -> str | None:
 
 def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
     state = attrs.get("State") or {}
-    status = (state.get("Status") or "unknown").lower()
+    status = _normalize_engine_state(state.get("Status"))
     raw_pid = state.get("Pid")
     pid: int | None
     if raw_pid is None or raw_pid == 0:
@@ -101,21 +118,32 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
     )
 
 
-def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[str, int]:
-    """Map ``container_port/tcp`` -> host port; always publishes workspace port 8080."""
-    bindings: dict[str, int] = {}
+def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[str, int | None]:
+    """
+    Map ``container_port/tcp`` -> host port, or ``None`` for an ephemeral host port.
+
+    Always publishes the IDE/container port (``8080``) so in-container code-server keeps a
+    stable port; the host side is **ephemeral** unless the caller supplies a positive
+    ``host_port`` for that container port. ``(0, container_port)`` selects ephemeral publish.
+    """
+    bindings: dict[str, int | None] = {}
     if ports:
         for host_p, cont_p in ports:
-            bindings[f"{int(cont_p)}/tcp"] = int(host_p)
-    key = f"{_WORKSPACE_CONTAINER_PORT}/tcp"
-    if key not in bindings:
-        bindings[key] = _WORKSPACE_CONTAINER_PORT
+            key = f"{int(cont_p)}/tcp"
+            hp = int(host_p)
+            bindings[key] = None if hp <= 0 else hp
+    key8080 = f"{_WORKSPACE_CONTAINER_PORT}/tcp"
+    if key8080 not in bindings:
+        bindings[key8080] = None
     return bindings
 
 
-def _resolved_ports_tuple(bindings: dict[str, int]) -> tuple[tuple[int, int], ...]:
+def _resolved_ports_tuple(bindings: dict[str, int | None]) -> tuple[tuple[int, int], ...]:
+    """Pairs where host port is known from spec (ephemeral ``None`` entries are omitted)."""
     out: list[tuple[int, int]] = []
     for spec, hp in bindings.items():
+        if hp is None:
+            continue
         try:
             cport = int(str(spec).split("/")[0])
         except (TypeError, ValueError):
@@ -124,7 +152,7 @@ def _resolved_ports_tuple(bindings: dict[str, int]) -> tuple[tuple[int, int], ..
     return tuple(sorted(out))
 
 
-def _exposed_container_ports(bindings: dict[str, int]) -> list[int]:
+def _exposed_container_ports(bindings: dict[str, int | None]) -> list[int]:
     ports_set: set[int] = set()
     for spec in bindings:
         try:
@@ -144,7 +172,18 @@ class DockerRuntimeAdapter(RuntimeAdapter):
     def __init__(self, client: docker.DockerClient | None = None) -> None:
         self._client = client if client is not None else docker.from_env()
 
+    def _get_container_if_exists(self, ref: str) -> Container | None:
+        try:
+            return self._client.containers.get(ref)
+        except docker.errors.NotFound:
+            return None
+
     def inspect_container(self, *, container_id: str) -> ContainerInspectionResult:
+        """
+        Read-only inspect by container id or name: returns ``ContainerInspectionResult`` only.
+
+        ``docker.errors.NotFound`` maps to ``exists=False``; other engine errors propagate.
+        """
         try:
             ctr = self._client.containers.get(container_id)
         except docker.errors.NotFound:
@@ -162,20 +201,24 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
         workspace_host_path: str | None = None,
+        existing_container_id: str | None = None,
     ) -> RuntimeEnsureResult:
-        try:
-            existing = self._client.containers.get(name)
-        except docker.errors.NotFound:
-            existing = None
+        existing: Container | None = None
+        rid = (existing_container_id or "").strip()
+        if rid:
+            existing = self._get_container_if_exists(rid)
+        if existing is None:
+            existing = self._get_container_if_exists(name)
 
         if existing is not None:
             ins = _normalize_inspection(existing.attrs)
+            resolved = ins.ports if ins.ports else ()
             return RuntimeEnsureResult(
                 container_id=ins.container_id or "",
                 exists=True,
                 created_new=False,
                 container_state=ins.container_state,
-                resolved_ports=ins.ports if ins.ports else _resolved_ports_tuple(_port_bindings_from_spec(ports)),
+                resolved_ports=resolved,
                 node_id=None,
             )
 
@@ -228,6 +271,7 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         except docker.errors.APIError as e:
             raise ContainerCreateError(str(e)) from e
 
+        ctr.reload()
         ins = _normalize_inspection(ctr.attrs)
         resolved = ins.ports if ins.ports else _resolved_ports_tuple(port_bindings)
         return RuntimeEnsureResult(

@@ -6,24 +6,24 @@ class RuntimeAdapterError(Exception):
 
 
 class ContainerNotFoundError(RuntimeAdapterError):
-    """No container matches the given id (or name) for this adapter."""
+    """Raised when a referenced container id or name does not exist (e.g. start/stop/delete)."""
 
 
 class ContainerCreateError(RuntimeAdapterError):
-    """Creating or configuring a container failed (e.g. pull, resource limits, invalid spec)."""
+    """Raised when ``ensure_container`` cannot create or configure a container (pull, limits, invalid spec)."""
 
 
 class ContainerStartError(RuntimeAdapterError):
-    """Starting an existing container failed."""
+    """Raised when ``start_container`` or the start phase of ``restart_container`` fails."""
 
 
 class ContainerStopError(RuntimeAdapterError):
-    """Stopping a container failed."""
+    """Raised when ``stop_container`` or the stop phase of ``restart_container`` fails."""
 
 
 class ContainerDeleteError(RuntimeAdapterError):
-    """Removing a container failed."""
+    """Raised when ``delete_container`` cannot remove the container."""
 
 
 class NetnsRefError(RuntimeAdapterError):
-    """Resolving the container network namespace reference (e.g. pid / netns path) failed."""
+    """Raised when ``get_container_netns_ref`` cannot resolve pid or netns (container missing or not runnable)."""

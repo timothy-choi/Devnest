@@ -50,6 +50,7 @@ class _RecordingRuntimeAdapter:
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
         workspace_host_path: str | None = None,
+        existing_container_id: str | None = None,
     ) -> RuntimeEnsureResult:
         self.call_log.append("ensure_container")
         assert self._ensure is not None
@@ -181,6 +182,7 @@ def test_magicmock_strict_call_sequence_matches_documentation(
                 ports=None,
                 labels=None,
                 workspace_host_path="/host",
+                existing_container_id=None,
             ),
             call.start_container(container_id="abc123"),
             call.inspect_container(container_id="abc123"),
@@ -246,7 +248,7 @@ def test_start_failure_skips_inspect_and_netns() -> None:
             ports=(),
             mounts=(),
         ),
-        netns=NetnsRefResult(container_id="x", pid=None, netns_ref=None),
+        netns=NetnsRefResult(container_id="x", pid=1, netns_ref="/proc/1/ns/net"),
     )
 
     with pytest.raises(ContainerStartError, match="cannot start"):

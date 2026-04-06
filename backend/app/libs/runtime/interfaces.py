@@ -5,6 +5,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 
+from .errors import (
+    ContainerCreateError,
+    ContainerDeleteError,
+    ContainerNotFoundError,
+    ContainerStartError,
+    ContainerStopError,
+    NetnsRefError,
+)
 from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResult, RuntimeEnsureResult
 
 
@@ -13,7 +21,8 @@ class RuntimeAdapter(ABC):
     Container lifecycle abstraction for the orchestrator.
 
     Implementations translate these calls to Docker/containerd/etc. and return only normalized
-    result models. Callers persist ``Workspace_runtime`` (and related state); adapters do not.
+    dataclasses defined in ``models`` (no raw engine objects). Callers persist runtime rows;
+    adapters do not write application database state.
     """
 
     @abstractmethod
@@ -28,36 +37,101 @@ class RuntimeAdapter(ABC):
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
         workspace_host_path: str | None = None,
+        existing_container_id: str | None = None,
     ) -> RuntimeEnsureResult:
         """
-        Idempotently ensure a container exists and matches the given spec.
+        Idempotently ensure a container exists for the given name/spec.
 
-        ``ports`` entries are ``(host_port, container_port)`` publish pairs.
-        ``labels`` are engine labels (orchestrator may pass correlation ids without this type knowing workspace rules).
-        ``image`` may be omitted; Docker adapter uses the DevNest workspace image default.
-        ``workspace_host_path`` is required when creating a new workspace container (Docker: bind to ``/home/coder/project``).
+        Returns:
+            ``RuntimeEnsureResult`` with ``resolved_ports`` and ``container_state``.
+
+        Raises:
+            ContainerCreateError: Build/create/pull or invalid configuration failed.
+
+        Reuse order (Docker): if ``existing_container_id`` is set and still exists, that
+        container is reused; otherwise if ``name`` resolves to an existing container, reuse
+        it; otherwise create a container named ``name``.
+
+        ``ports`` entries are ``(host_port, container_port)`` publish pairs. Use
+        ``host_port == 0`` to request an ephemeral host port for that container port.
+        Implementations should not assume a fixed host port for the IDE (container port
+        ``8080`` is typical).
+
+        ``image`` may be omitted where the implementation defines a workspace default.
+        ``workspace_host_path`` is required when creating a new workspace container in the
+        Docker implementation (bind to ``/home/coder/project``).
         """
 
     @abstractmethod
     def start_container(self, *, container_id: str) -> RuntimeActionResult:
-        """Start a stopped container."""
+        """
+        Start a stopped container.
+
+        Returns:
+            ``RuntimeActionResult`` (``success`` false if the engine reports a non-running state).
+
+        Raises:
+            ContainerNotFoundError: No such container.
+            ContainerStartError: Engine API error while starting.
+        """
 
     @abstractmethod
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
-        """Stop a running container."""
+        """
+        Stop a running container.
+
+        Returns:
+            ``RuntimeActionResult``.
+
+        Raises:
+            ContainerNotFoundError: No such container.
+            ContainerStopError: Engine API error while stopping.
+        """
 
     @abstractmethod
     def restart_container(self, *, container_id: str) -> RuntimeActionResult:
-        """Restart a container."""
+        """
+        Restart a container (stop then start, or engine-native restart).
+
+        Returns:
+            ``RuntimeActionResult``.
+
+        Raises:
+            ContainerNotFoundError: No such container.
+            ContainerStartError / ContainerStopError: Depending on implementation and failure phase.
+        """
 
     @abstractmethod
     def delete_container(self, *, container_id: str) -> RuntimeActionResult:
-        """Remove a container."""
+        """
+        Remove a container.
+
+        Returns:
+            ``RuntimeActionResult``.
+
+        Raises:
+            ContainerNotFoundError: No such container (optional; implementations may treat as success).
+            ContainerDeleteError: Engine API error while removing.
+        """
 
     @abstractmethod
     def inspect_container(self, *, container_id: str) -> ContainerInspectionResult:
-        """Return a normalized inspection snapshot (may represent a missing container via ``exists=False``)."""
+        """
+        Return a normalized inspection snapshot.
+
+        Returns:
+            ``ContainerInspectionResult`` with ``exists=False`` when the container is missing
+            (no exception for “not found”).
+        """
 
     @abstractmethod
     def get_container_netns_ref(self, *, container_id: str) -> NetnsRefResult:
-        """Resolve pid and network namespace path for topology attach (future phases)."""
+        """
+        Resolve host PID and ``net`` namespace path for the container.
+
+        Returns:
+            ``NetnsRefResult`` with non-empty ``pid`` and ``netns_ref``.
+
+        Raises:
+            NetnsRefError: Container missing, not running, or PID/netns not available.
+        """
