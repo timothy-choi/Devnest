@@ -128,6 +128,11 @@ def test_adapter_workspace_image_ephemeral_port_project_and_code_server_mounts_p
     os.makedirs(workspace, mode=0o755, exist_ok=False)
     os.makedirs(cfg_h, mode=0o755, exist_ok=False)
     os.makedirs(data_h, mode=0o755, exist_ok=False)
+    # Host dirs are owned by the CI uid; ``coder`` in the image is often a different uid. Open perms
+    # keep this test about bind persistence, not host ownership edge cases.
+    _chmod_world_writable_tree(workspace)
+    _chmod_world_writable_tree(cfg_h)
+    _chmod_world_writable_tree(data_h)
 
     adapter = DockerRuntimeAdapter(client=docker_client)
     try:
