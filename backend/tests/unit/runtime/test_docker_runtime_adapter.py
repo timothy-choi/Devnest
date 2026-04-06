@@ -10,6 +10,7 @@ import pytest
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.runtime.errors import (
     ContainerCreateError,
+    ContainerDeleteError,
     ContainerNotFoundError,
     ContainerStartError,
     ContainerStopError,
@@ -372,6 +373,112 @@ class TestStopContainer:
             adapter.stop_container(container_id="cid")
 
 
+class TestRestartContainer:
+    def test_missing_raises(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        with pytest.raises(ContainerNotFoundError, match="gone"):
+            adapter.restart_container(container_id="gone")
+
+    def test_restart_then_running_success(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+
+        def restart_side_effect(*_a, **kw) -> None:
+            ctr.attrs = _sample_attrs(status="running", pid=2)
+
+        ctr.restart.side_effect = restart_side_effect
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.restart_container(container_id="cid")
+
+        ctr.restart.assert_called_once_with(timeout=10)
+        assert r.success is True
+        assert r.container_state == "running"
+
+    def test_restart_api_error_raises_start_error(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+        ctr.restart.side_effect = docker.errors.APIError("restart boom")
+        mock_client.containers.get.return_value = ctr
+
+        with pytest.raises(ContainerStartError, match="restart boom"):
+            adapter.restart_container(container_id="cid")
+
+
+class TestDeleteContainer:
+    def test_missing_returns_idempotent_success(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        r = adapter.delete_container(container_id="gone")
+
+        assert r.success is True
+        assert r.container_state == "missing"
+        assert r.container_id == "gone"
+
+    def test_exited_removes_without_stop(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="exited", pid=0)
+        n = 0
+
+        def get_side_effect(cid: str, *a, **kw):
+            nonlocal n
+            n += 1
+            if n <= 2:
+                return ctr
+            raise docker.errors.NotFound("gone")
+
+        mock_client.containers.get.side_effect = get_side_effect
+
+        r = adapter.delete_container(container_id="cid")
+
+        ctr.stop.assert_not_called()
+        ctr.remove.assert_called_once_with()
+        assert r.success is True
+        assert r.container_state == "missing"
+
+    def test_running_stops_then_removes(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+        n = 0
+
+        def get_side_effect(cid: str, *a, **kw):
+            nonlocal n
+            n += 1
+            if n <= 2:
+                return ctr
+            raise docker.errors.NotFound("gone")
+
+        mock_client.containers.get.side_effect = get_side_effect
+
+        r = adapter.delete_container(container_id="cid")
+
+        ctr.stop.assert_called_once_with(timeout=10)
+        ctr.remove.assert_called_once_with()
+        assert r.success is True
+        assert r.container_state == "missing"
+
+    def test_stop_failure_raises(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+        ctr.stop.side_effect = docker.errors.APIError("stop nope")
+        mock_client.containers.get.return_value = ctr
+
+        with pytest.raises(ContainerStopError, match="stop nope"):
+            adapter.delete_container(container_id="cid")
+
+        ctr.remove.assert_not_called()
+
+    def test_remove_failure_raises_delete_error(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="exited", pid=0)
+        ctr.remove.side_effect = docker.errors.APIError("remove nope")
+        mock_client.containers.get.return_value = ctr
+
+        with pytest.raises(ContainerDeleteError, match="remove nope"):
+            adapter.delete_container(container_id="cid")
+
+
 class TestGetContainerNetnsRef:
     def test_valid_returns_proc_path(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
@@ -393,6 +500,16 @@ class TestGetContainerNetnsRef:
     def test_no_pid_raises(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
         ctr.attrs = _sample_attrs(pid=0, status="created")
+        mock_client.containers.get.return_value = ctr
+
+        with pytest.raises(NetnsRefError, match="no host PID"):
+            adapter.get_container_netns_ref(container_id="c1")
+
+    def test_non_positive_pid_raises(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        attrs = _sample_attrs(pid=1, status="running")
+        attrs["State"]["Pid"] = -1
+        ctr.attrs = attrs
         mock_client.containers.get.return_value = ctr
 
         with pytest.raises(NetnsRefError, match="no host PID"):

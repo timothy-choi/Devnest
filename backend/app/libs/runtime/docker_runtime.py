@@ -11,6 +11,7 @@ from docker.models.containers import Container
 
 from .errors import (
     ContainerCreateError,
+    ContainerDeleteError,
     ContainerNotFoundError,
     ContainerStartError,
     ContainerStopError,
@@ -404,16 +405,104 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         )
 
     def restart_container(self, *, container_id: str) -> RuntimeActionResult:
-        raise NotImplementedError("DockerRuntimeAdapter.restart_container is not implemented yet")
+        """
+        Inspect-first restart: missing → ``ContainerNotFoundError``; else engine ``restart`` with
+        the same stop-timeout budget as ``stop_container``, then re-inspect.
+        """
+        ins = self.inspect_container(container_id=container_id)
+        if not ins.exists:
+            raise ContainerNotFoundError(f"container not found: {container_id!r}")
+
+        try:
+            ctr = self._client.containers.get(container_id)
+        except docker.errors.NotFound as e:
+            raise ContainerNotFoundError(f"container not found: {container_id!r}") from e
+
+        try:
+            ctr.restart(timeout=_default_stop_timeout_s())
+        except docker.errors.APIError as e:
+            raise ContainerStartError(str(e)) from e
+
+        after = self.inspect_container(container_id=container_id)
+        if not after.exists:
+            raise ContainerNotFoundError(f"container not found after restart: {container_id!r}")
+        cid_out = after.container_id or container_id
+        ok = after.container_state == "running"
+        return RuntimeActionResult(
+            container_id=cid_out,
+            container_state=after.container_state,
+            success=ok,
+            message=None if ok else f"unexpected state after restart: {after.container_state}",
+        )
 
     def delete_container(self, *, container_id: str) -> RuntimeActionResult:
-        raise NotImplementedError("DockerRuntimeAdapter.delete_container is not implemented yet")
+        """
+        Idempotent delete: missing → success; active states get the same graceful ``stop`` as
+        ``stop_container`` (timeout), then ``remove``; re-inspect to confirm removal.
+        """
+        ins = self.inspect_container(container_id=container_id)
+        if not ins.exists:
+            return RuntimeActionResult(
+                container_id=container_id,
+                container_state="missing",
+                success=True,
+                message=None,
+            )
+
+        try:
+            ctr = self._client.containers.get(container_id)
+        except docker.errors.NotFound:
+            return RuntimeActionResult(
+                container_id=container_id,
+                container_state="missing",
+                success=True,
+                message=None,
+            )
+
+        try:
+            if _container_state_needs_engine_stop(ins.container_state):
+                try:
+                    ctr.stop(timeout=_default_stop_timeout_s())
+                except docker.errors.APIError as e:
+                    raise ContainerStopError(str(e)) from e
+            ctr.remove()
+        except docker.errors.NotFound:
+            return RuntimeActionResult(
+                container_id=container_id,
+                container_state="missing",
+                success=True,
+                message=None,
+            )
+        except docker.errors.APIError as e:
+            raise ContainerDeleteError(str(e)) from e
+
+        final = self.inspect_container(container_id=container_id)
+        if final.exists:
+            return RuntimeActionResult(
+                container_id=final.container_id or container_id,
+                container_state=final.container_state,
+                success=False,
+                message="container still exists after delete",
+            )
+        return RuntimeActionResult(
+            container_id=container_id,
+            container_state="missing",
+            success=True,
+            message=None,
+        )
 
     def get_container_netns_ref(self, *, container_id: str) -> NetnsRefResult:
+        """
+        Inspect-only bridge for future topology: resolve the host ``net`` namespace path from the
+        container's init PID. No ``setns``, veth, or routing — callers use the returned path later.
+
+        Raises:
+            NetnsRefError: Missing container, or no valid host PID (typically when not running).
+        """
         ins = self.inspect_container(container_id=container_id)
         if not ins.exists or not ins.container_id:
             raise NetnsRefError(f"container not found: {container_id!r}")
-        if ins.pid is None:
+        if ins.pid is None or ins.pid <= 0:
             raise NetnsRefError(
                 f"no host PID for container {ins.container_id!r} (is the container running?)",
             )

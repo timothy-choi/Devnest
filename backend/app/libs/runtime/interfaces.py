@@ -93,26 +93,27 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def restart_container(self, *, container_id: str) -> RuntimeActionResult:
         """
-        Restart a container (stop then start, or engine-native restart).
+        Restart a container (inspect first; engine-native restart; re-inspect).
 
         Returns:
-            ``RuntimeActionResult``.
+            ``RuntimeActionResult`` (``success`` reflects whether the final state is ``running``).
 
         Raises:
-            ContainerNotFoundError: No such container.
-            ContainerStartError / ContainerStopError: Depending on implementation and failure phase.
+            ContainerNotFoundError: Inspect reports missing (or missing after restart).
+            ContainerStartError: Engine API error during restart (Docker combines stop/start).
         """
 
     @abstractmethod
     def delete_container(self, *, container_id: str) -> RuntimeActionResult:
         """
-        Remove a container.
+        Remove a container (inspect first; re-inspect after removal).
 
         Returns:
-            ``RuntimeActionResult``.
+            ``RuntimeActionResult``. Missing containers may return ``success=True`` with
+            ``container_state`` set to ``missing`` (idempotent cleanup).
 
         Raises:
-            ContainerNotFoundError: No such container (optional; implementations may treat as success).
+            ContainerStopError: Graceful stop failed before remove (when the container was active).
             ContainerDeleteError: Engine API error while removing.
         """
 
@@ -129,11 +130,13 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def get_container_netns_ref(self, *, container_id: str) -> NetnsRefResult:
         """
-        Resolve host PID and ``net`` namespace path for the container.
+        Resolve host PID and ``net`` namespace path (inspect first; no topology side effects).
+
+        Implementations typically derive ``netns_ref`` from ``/proc/<pid>/ns/net`` on Linux hosts.
 
         Returns:
             ``NetnsRefResult`` with non-empty ``pid`` and ``netns_ref``.
 
         Raises:
-            NetnsRefError: Container missing, not running, or PID/netns not available.
+            NetnsRefError: Container missing or no usable host PID for namespace resolution.
         """
