@@ -65,26 +65,28 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def start_container(self, *, container_id: str) -> RuntimeActionResult:
         """
-        Start a stopped container.
+        Start a stopped container (inspect first; re-inspect after ``start``).
 
         Returns:
-            ``RuntimeActionResult`` (``success`` false if the engine reports a non-running state).
+            ``RuntimeActionResult``. Already-running containers return ``success=True`` without
+            invoking start (idempotent).
 
         Raises:
-            ContainerNotFoundError: No such container.
+            ContainerNotFoundError: Inspect reports the container is missing.
             ContainerStartError: Engine API error while starting.
         """
 
     @abstractmethod
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
         """
-        Stop a running container.
+        Stop a running container (inspect first; re-inspect after ``stop``).
 
         Returns:
-            ``RuntimeActionResult``.
+            ``RuntimeActionResult``. Missing containers may return ``success=True`` with
+            ``container_state`` set to ``missing`` (idempotent cleanup). Already-inactive states return
+            ``success=True`` without calling the engine stop API.
 
         Raises:
-            ContainerNotFoundError: No such container.
             ContainerStopError: Engine API error while stopping.
         """
 

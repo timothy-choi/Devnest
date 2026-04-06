@@ -8,7 +8,13 @@ import docker.errors
 import pytest
 
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
-from app.libs.runtime.errors import ContainerCreateError, ContainerNotFoundError, ContainerStartError, NetnsRefError
+from app.libs.runtime.errors import (
+    ContainerCreateError,
+    ContainerNotFoundError,
+    ContainerStartError,
+    ContainerStopError,
+    NetnsRefError,
+)
 
 
 def _sample_attrs(
@@ -278,7 +284,6 @@ class TestEnsureContainer:
 class TestStartContainer:
     def test_already_running_no_start_call(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
-        ctr.status = "running"
         ctr.attrs = _sample_attrs(status="running", pid=1)
         mock_client.containers.get.return_value = ctr
 
@@ -290,17 +295,12 @@ class TestStartContainer:
 
     def test_stopped_starts_then_returns_running(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
-        ctr.status = "exited"
-        reload_count = 0
+        ctr.attrs = _sample_attrs(status="exited", pid=0)
 
-        def reload_side_effect() -> None:
-            nonlocal reload_count
-            reload_count += 1
-            if reload_count >= 2:
-                ctr.status = "running"
-                ctr.attrs = _sample_attrs(status="running", pid=99)
+        def start_side_effect(*_a, **_kw) -> None:
+            ctr.attrs = _sample_attrs(status="running", pid=99)
 
-        ctr.reload.side_effect = reload_side_effect
+        ctr.start.side_effect = start_side_effect
         mock_client.containers.get.return_value = ctr
 
         r = adapter.start_container(container_id="cid")
@@ -317,12 +317,59 @@ class TestStartContainer:
 
     def test_start_api_error_wraps(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
-        ctr.status = "created"
+        ctr.attrs = _sample_attrs(status="created", pid=0)
         ctr.start.side_effect = docker.errors.APIError("boom")
         mock_client.containers.get.return_value = ctr
 
         with pytest.raises(ContainerStartError, match="boom"):
             adapter.start_container(container_id="cid")
+
+
+class TestStopContainer:
+    def test_missing_returns_idempotent_success(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        r = adapter.stop_container(container_id="gone")
+
+        assert r.success is True
+        assert r.container_state == "missing"
+        assert r.container_id == "gone"
+
+    def test_exited_does_not_call_engine_stop(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="exited", pid=0)
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.stop_container(container_id="cid")
+
+        assert r.success is True
+        assert r.container_state == "exited"
+        ctr.stop.assert_not_called()
+
+    def test_running_stops_then_reinspect_exited(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+
+        def stop_side_effect(*_a, **kw) -> None:
+            ctr.attrs = _sample_attrs(status="exited", pid=0)
+
+        ctr.stop.side_effect = stop_side_effect
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.stop_container(container_id="cid")
+
+        ctr.stop.assert_called_once_with(timeout=10)
+        assert r.success is True
+        assert r.container_state == "exited"
+
+    def test_stop_api_error_raises(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="running", pid=1)
+        ctr.stop.side_effect = docker.errors.APIError("stop failed")
+        mock_client.containers.get.return_value = ctr
+
+        with pytest.raises(ContainerStopError, match="stop failed"):
+            adapter.stop_container(container_id="cid")
 
 
 class TestGetContainerNetnsRef:

@@ -9,7 +9,13 @@ import docker
 import docker.errors
 from docker.models.containers import Container
 
-from .errors import ContainerCreateError, ContainerNotFoundError, ContainerStartError, NetnsRefError
+from .errors import (
+    ContainerCreateError,
+    ContainerNotFoundError,
+    ContainerStartError,
+    ContainerStopError,
+    NetnsRefError,
+)
 from .interfaces import RuntimeAdapter
 from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResult, RuntimeEnsureResult
 
@@ -17,6 +23,20 @@ from .models import ContainerInspectionResult, NetnsRefResult, RuntimeActionResu
 _DEFAULT_WORKSPACE_IMAGE = "devnest/workspace:latest"
 _WORKSPACE_MOUNT_TARGET = "/home/coder/project"
 _WORKSPACE_CONTAINER_PORT = 8080
+# Seconds between SIGTERM and SIGKILL on ``docker stop`` (override via env).
+_DEFAULT_STOP_TIMEOUT_S = 10
+
+
+def _default_stop_timeout_s() -> int:
+    raw = os.environ.get("DEVNEST_RUNTIME_STOP_TIMEOUT_SECONDS", "")
+    if raw.strip().isdigit():
+        return max(1, int(raw.strip()))
+    return _DEFAULT_STOP_TIMEOUT_S
+
+
+def _container_state_needs_engine_stop(container_state: str) -> bool:
+    """States where Docker should receive ``stop`` (running or transient/active)."""
+    return container_state in frozenset({"running", "restarting", "paused"})
 
 
 def _default_workspace_image() -> str:
@@ -284,14 +304,16 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         )
 
     def start_container(self, *, container_id: str) -> RuntimeActionResult:
-        try:
-            ctr = self._client.containers.get(container_id)
-        except docker.errors.NotFound as e:
-            raise ContainerNotFoundError(f"container not found: {container_id!r}") from e
+        """
+        Inspect-first, idempotent start: missing → ``ContainerNotFoundError``; already running →
+        success without calling ``start``; otherwise ``start`` then re-inspect for a normalized
+        ``RuntimeActionResult``.
+        """
+        ins = self.inspect_container(container_id=container_id)
+        if not ins.exists:
+            raise ContainerNotFoundError(f"container not found: {container_id!r}")
 
-        ctr.reload()
-        if ctr.status == "running":
-            ins = _normalize_inspection(ctr.attrs)
+        if ins.container_state == "running":
             return RuntimeActionResult(
                 container_id=ins.container_id or container_id,
                 container_state=ins.container_state,
@@ -300,21 +322,86 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             )
 
         try:
+            ctr = self._client.containers.get(container_id)
+        except docker.errors.NotFound as e:
+            raise ContainerNotFoundError(f"container not found: {container_id!r}") from e
+
+        try:
             ctr.start()
         except docker.errors.APIError as e:
             raise ContainerStartError(str(e)) from e
 
-        ctr.reload()
-        ins = _normalize_inspection(ctr.attrs)
+        after = self.inspect_container(container_id=container_id)
         return RuntimeActionResult(
-            container_id=ins.container_id or container_id,
-            container_state=ins.container_state,
-            success=ins.container_state == "running",
-            message=None if ins.container_state == "running" else f"unexpected state after start: {ins.container_state}",
+            container_id=after.container_id or container_id,
+            container_state=after.container_state,
+            success=after.container_state == "running",
+            message=None
+            if after.container_state == "running"
+            else f"unexpected state after start: {after.container_state}",
         )
 
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
-        raise NotImplementedError("DockerRuntimeAdapter.stop_container is not implemented yet")
+        """
+        Inspect-first stop, idempotent for cleanup: missing container → success; non-active
+        states → success without ``stop``; ``running`` / ``restarting`` / ``paused`` →
+        ``stop(timeout)`` then re-inspect.
+        """
+        ins = self.inspect_container(container_id=container_id)
+        if not ins.exists:
+            return RuntimeActionResult(
+                container_id=container_id,
+                container_state="missing",
+                success=True,
+                message=None,
+            )
+
+        cid_out = ins.container_id or container_id
+        if not _container_state_needs_engine_stop(ins.container_state):
+            return RuntimeActionResult(
+                container_id=cid_out,
+                container_state=ins.container_state,
+                success=True,
+                message=None,
+            )
+
+        try:
+            ctr = self._client.containers.get(container_id)
+        except docker.errors.NotFound:
+            return RuntimeActionResult(
+                container_id=container_id,
+                container_state="missing",
+                success=True,
+                message=None,
+            )
+
+        try:
+            ctr.stop(timeout=_default_stop_timeout_s())
+        except docker.errors.APIError as e:
+            raise ContainerStopError(str(e)) from e
+
+        after = self.inspect_container(container_id=container_id)
+        if not after.exists:
+            return RuntimeActionResult(
+                container_id=container_id,
+                container_state="missing",
+                success=True,
+                message=None,
+            )
+        cid_after = after.container_id or container_id
+        if _container_state_needs_engine_stop(after.container_state):
+            return RuntimeActionResult(
+                container_id=cid_after,
+                container_state=after.container_state,
+                success=False,
+                message=f"container still active after stop: {after.container_state}",
+            )
+        return RuntimeActionResult(
+            container_id=cid_after,
+            container_state=after.container_state,
+            success=True,
+            message=None,
+        )
 
     def restart_container(self, *, container_id: str) -> RuntimeActionResult:
         raise NotImplementedError("DockerRuntimeAdapter.restart_container is not implemented yet")
