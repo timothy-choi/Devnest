@@ -86,6 +86,19 @@ def test_stop_container_stops_running_container(isolated_runtime: IsolatedRuntim
     assert stopped.container_state in ("exited", "created")
 
 
+def test_stop_container_is_idempotent_when_already_stopped(
+    isolated_runtime: IsolatedRuntimeContext,
+) -> None:
+    ensured = _ensure(isolated_runtime)
+    isolated_runtime.adapter.start_container(container_id=ensured.container_id)
+    isolated_runtime.adapter.stop_container(container_id=ensured.container_id)
+
+    second = isolated_runtime.adapter.stop_container(container_id=ensured.container_id)
+
+    assert second.success is True
+    assert second.container_state in ("exited", "created", "missing")
+
+
 def test_restart_container_restarts_container(isolated_runtime: IsolatedRuntimeContext) -> None:
     ensured = _ensure(isolated_runtime)
     isolated_runtime.adapter.start_container(container_id=ensured.container_id)

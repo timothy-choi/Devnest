@@ -148,6 +148,17 @@ class TestInspectContainerNormalization:
 
         assert r.ports == ((1111, 9000),)
 
+    def test_host_port_with_whitespace_is_accepted(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(
+            ports={"8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": " 18080 "}]},
+        )
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.inspect_container(container_id="x")
+
+        assert r.ports == ((18080, 8080),)
+
     def test_mounts_skip_non_dict_entries(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
         attrs = _sample_attrs()
@@ -307,6 +318,31 @@ class TestEnsureContainer:
         hc_kwargs = mock_client.api.create_host_config.call_args.kwargs
         assert hc_kwargs["port_bindings"]["8080/tcp"] is None
 
+    def test_create_duplicate_container_port_uses_last_host_binding(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="dup", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-dup":
+                raise docker.errors.NotFound("nope")
+            if container_id == "dupfull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "dupfull"}
+
+        adapter.ensure_container(
+            name="ws-dup",
+            workspace_host_path="/w",
+            ports=((1111, 8080), (2222, 8080)),
+        )
+
+        hc_kwargs = mock_client.api.create_host_config.call_args.kwargs
+        assert hc_kwargs["port_bindings"]["8080/tcp"] == 2222
+
     def test_create_requires_workspace_host_path(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
 
@@ -314,6 +350,45 @@ class TestEnsureContainer:
             adapter.ensure_container(name="ws", workspace_host_path=None)
 
         mock_client.api.create_container.assert_not_called()
+
+    def test_create_rejects_non_positive_cpu_limit(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        with pytest.raises(ContainerCreateError, match="cpu_limit"):
+            adapter.ensure_container(name="ws", workspace_host_path="/w", cpu_limit=0.0)
+
+        mock_client.api.create_container.assert_not_called()
+
+    def test_create_rejects_non_positive_memory_limit(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        with pytest.raises(ContainerCreateError, match="memory_limit_bytes"):
+            adapter.ensure_container(name="ws", workspace_host_path="/w", memory_limit_bytes=0)
+
+        mock_client.api.create_container.assert_not_called()
+
+    def test_create_passes_nano_cpus_when_cpu_limit_set(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="cpu", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-cpu":
+                raise docker.errors.NotFound("nope")
+            if container_id == "cpufull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "cpufull"}
+
+        adapter.ensure_container(name="ws-cpu", workspace_host_path="/w", cpu_limit=0.5)
+
+        hc = mock_client.api.create_host_config.call_args.kwargs
+        assert hc["nano_cpus"] == 500_000_000
 
     def test_create_pulls_image_on_image_not_found(
         self,
@@ -442,6 +517,22 @@ class TestStopContainer:
     def test_paused_triggers_stop(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
         ctr.attrs = _sample_attrs(status="paused", pid=1)
+
+        def stop_side_effect(*_a, **kw) -> None:
+            ctr.attrs = _sample_attrs(status="exited", pid=0)
+
+        ctr.stop.side_effect = stop_side_effect
+        mock_client.containers.get.return_value = ctr
+
+        r = adapter.stop_container(container_id="cid")
+
+        ctr.stop.assert_called_once_with(timeout=10)
+        assert r.success is True
+        assert r.container_state == "exited"
+
+    def test_restarting_triggers_stop(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        ctr = MagicMock()
+        ctr.attrs = _sample_attrs(status="restarting", pid=1)
 
         def stop_side_effect(*_a, **kw) -> None:
             ctr.attrs = _sample_attrs(status="exited", pid=0)

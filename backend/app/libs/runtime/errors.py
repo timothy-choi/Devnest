@@ -6,7 +6,11 @@ class RuntimeAdapterError(Exception):
 
 
 class ContainerNotFoundError(RuntimeAdapterError):
-    """Raised when a referenced container id or name does not exist (e.g. start/stop/delete)."""
+    """Raised when a container must exist but does not (e.g. ``start_container``, ``restart_container``).
+
+    ``stop_container`` and ``delete_container`` treat a missing container as a successful no-op
+    instead of raising this error.
+    """
 
 
 class ContainerCreateError(RuntimeAdapterError):
@@ -18,7 +22,7 @@ class ContainerStartError(RuntimeAdapterError):
 
 
 class ContainerStopError(RuntimeAdapterError):
-    """Raised when ``stop_container`` or the stop phase of ``restart_container`` fails."""
+    """Raised when ``stop_container`` fails, or when ``delete_container`` fails during graceful stop."""
 
 
 class ContainerDeleteError(RuntimeAdapterError):

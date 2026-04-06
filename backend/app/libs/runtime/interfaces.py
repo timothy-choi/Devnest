@@ -55,9 +55,11 @@ class RuntimeAdapter(ABC):
         ``ports`` entries are ``(host_port, container_port)`` publish pairs. Use
         ``host_port == 0`` to request an ephemeral host port for that container port.
         Implementations should not assume a fixed host port for the IDE (container port
-        ``8080`` is typical).
+        ``8080`` is typical). If the same ``container_port`` appears more than once, the
+        last pair wins.
 
-        ``image`` may be omitted where the implementation defines a workspace default.
+        ``image`` may be omitted; the Docker adapter uses ``DEVNEST_WORKSPACE_IMAGE`` (or its
+        built-in default) for the workspace/code-server image in that case.
         ``workspace_host_path`` is required when creating a new workspace container in the
         Docker implementation (bind to ``/home/coder/project``).
         """
@@ -132,7 +134,8 @@ class RuntimeAdapter(ABC):
         """
         Resolve host PID and ``net`` namespace path (inspect first; no topology side effects).
 
-        Implementations typically derive ``netns_ref`` from ``/proc/<pid>/ns/net`` on Linux hosts.
+        Implementations typically derive ``netns_ref`` from ``/proc/<pid>/ns/net`` on Linux Docker
+        hosts using the engine-reported init ``Pid`` (host PID namespace).
 
         Returns:
             ``NetnsRefResult`` with non-empty ``pid`` and ``netns_ref``.

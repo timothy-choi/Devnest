@@ -15,7 +15,9 @@ class RuntimeEnsureResult:
         exists: Whether the container record exists after ensure.
         created_new: Whether a new container was created in this call (vs reused).
         container_state: Normalized lifecycle state (e.g. created, running, exited).
-        resolved_ports: Published ``(host_port, container_port)`` pairs as observed or intended.
+        resolved_ports: Published ``(host_port, container_port)`` pairs. On reuse, matches
+            ``inspect_container`` port normalization when the engine reports bindings; on create,
+            may be empty until the engine assigns ephemeral host ports (then visible after start).
         node_id: Execution node when applicable (e.g. Swarm); ``None`` for single-host Docker.
     """
 
@@ -34,7 +36,8 @@ class RuntimeActionResult:
     or ``delete_container``.
 
     Fields:
-        container_id: Target container id (or name) as returned by the adapter.
+        container_id: Engine id when known; otherwise the caller's ``container_id`` argument
+            (e.g. ``stop_container`` / ``delete_container`` when the container is missing).
         container_state: Observed state after the action (or best-effort snapshot).
         success: Whether the adapter considers the action to have succeeded.
         message: Optional human-readable detail (often used when ``success`` is false).
@@ -83,7 +86,7 @@ class NetnsRefResult:
     Fields:
         container_id: Container this reference belongs to.
         pid: Init process PID in the host PID namespace.
-        netns_ref: Path to the ``net`` namespace (e.g. ``/proc/<pid>/ns/net``).
+        netns_ref: Path to the ``net`` namespace on the Docker host (Linux: ``/proc/<pid>/ns/net``).
     """
 
     container_id: str

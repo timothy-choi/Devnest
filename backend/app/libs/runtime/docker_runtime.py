@@ -91,8 +91,10 @@ def _normalize_ports(attrs: dict) -> tuple[tuple[int, int], ...]:
             if not b:
                 continue
             hp = b.get("HostPort")
-            if hp is not None and str(hp).isdigit():
-                out.append((int(hp), cport))
+            if hp is not None:
+                hs = str(hp).strip()
+                if hs.isdigit():
+                    out.append((int(hs), cport))
     return tuple(sorted(out, key=lambda p: (p[0], p[1])))
 
 
@@ -126,7 +128,11 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
         pid = int(raw_pid)
 
     cid = attrs.get("Id")
-    container_id = str(cid) if cid else None
+    if cid is None:
+        container_id = None
+    else:
+        sid = str(cid).strip()
+        container_id = sid or None
 
     return ContainerInspectionResult(
         exists=True,
@@ -143,9 +149,11 @@ def _port_bindings_from_spec(ports: Sequence[tuple[int, int]] | None) -> dict[st
     """
     Map ``container_port/tcp`` -> host port, or ``None`` for an ephemeral host port.
 
-    Always publishes the IDE/container port (``8080``) so in-container code-server keeps a
-    stable port; the host side is **ephemeral** unless the caller supplies a positive
-    ``host_port`` for that container port. ``(0, container_port)`` selects ephemeral publish.
+    Always publishes the workspace IDE/container port (``8080``) so in-container services
+    (e.g. code-server) keep a stable container port; the host side is **ephemeral** unless
+    the caller supplies a positive ``host_port`` for that container port.
+    ``(0, container_port)`` selects ephemeral publish. Duplicate ``container_port`` keys:
+    last host binding wins.
     """
     bindings: dict[str, int | None] = {}
     if ports:
@@ -248,6 +256,11 @@ class DockerRuntimeAdapter(RuntimeAdapter):
                 "workspace_host_path is required to create a new workspace container "
                 f"(bind-mount host path to {_WORKSPACE_MOUNT_TARGET})",
             )
+
+        if cpu_limit is not None and cpu_limit <= 0:
+            raise ContainerCreateError("cpu_limit must be positive when set")
+        if memory_limit_bytes is not None and memory_limit_bytes <= 0:
+            raise ContainerCreateError("memory_limit_bytes must be positive when set")
 
         resolved_image = _resolve_image(image)
         port_bindings = _port_bindings_from_spec(ports)
@@ -496,6 +509,9 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         Inspect-only bridge for future topology: resolve the host ``net`` namespace path from the
         container's init PID. No ``setns``, veth, or routing — callers use the returned path later.
 
+        Uses Docker ``State.Pid`` (host PID namespace, container init) per Engine API; ``netns_ref``
+        is the Linux path ``/proc/<pid>/ns/net`` on the Docker host.
+
         Raises:
             NetnsRefError: Missing container, or no valid host PID (typically when not running).
         """
@@ -506,5 +522,6 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             raise NetnsRefError(
                 f"no host PID for container {ins.container_id!r} (is the container running?)",
             )
+        # Engine reports init PID in the host PID namespace for running containers.
         ref = f"/proc/{ins.pid}/ns/net"
         return NetnsRefResult(container_id=ins.container_id, pid=ins.pid, netns_ref=ref)
