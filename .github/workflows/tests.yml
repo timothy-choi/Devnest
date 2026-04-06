@@ -5,7 +5,6 @@ on:
   push:
 
 jobs:
-
   unit-tests:
     runs-on: ubuntu-latest
 
@@ -27,9 +26,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run unit tests (parallel)
+      - name: Run unit tests in parallel
         run: pytest tests/unit -v -n auto
-
 
   integration-tests:
     runs-on: ubuntu-latest
@@ -40,11 +38,11 @@ jobs:
         env:
           POSTGRES_USER: test
           POSTGRES_PASSWORD: test
-          POSTGRES_DB: devnest_test
+          POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd="pg_isready -U test -d devnest_test"
+          --health-cmd="pg_isready -U test -d postgres"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=5
@@ -54,7 +52,6 @@ jobs:
         working-directory: backend
 
     env:
-      DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
       PGPASSWORD: test
 
     steps:
@@ -75,20 +72,15 @@ jobs:
 
       - name: Wait for PostgreSQL
         run: |
-          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
+          until pg_isready -h localhost -p 5432 -U test -d postgres; do
             sleep 1
           done
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Optional if you use migrations
-      # - name: Run migrations
-      #   run: alembic upgrade head
-
-      - name: Run integration tests (parallel)
+      - name: Run integration tests in parallel
         run: pytest tests/integration -v -n 2
-
 
   system-tests:
     runs-on: ubuntu-latest
@@ -141,9 +133,5 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Optional if needed
-      # - name: Run migrations
-      #   run: alembic upgrade head
-
-      - name: Run system tests (parallel)
-        run: pytest tests/system -v -n 2
+      - name: Run system tests
+        run: pytest tests/system -v
