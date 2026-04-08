@@ -6,6 +6,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session, SQLModel, create_engine
 
 from ..common.config import get_settings
+from ..topology.models import (  # noqa: F401 — register metadata
+    IpAllocation,
+    Topology,
+    TopologyAttachment,
+    TopologyRuntime,
+)
 from ...services.auth_service.models import OAuth, PasswordResetToken, Token, UserAuth  # noqa: F401 — register metadata
 from ...services.notification_service.models import (  # noqa: F401 — register metadata
     Notification,
