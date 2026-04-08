@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT
 from app.libs.topology import DbTopologyAdapter
 from app.libs.topology.models import IpAllocation, Topology, TopologyAttachment, TopologyRuntime
-from app.libs.topology.models.enums import TopologyAttachmentStatus
+from app.libs.topology.models.enums import TopologyAttachmentStatus, TopologyRuntimeStatus
 
 
 def _seed_topology(session: Session, *, spec: dict | None = None) -> int:
@@ -126,3 +126,93 @@ def test_attach_twice_stable_attachment_id(db_session: Session) -> None:
     assert r1.attachment_id == r2.attachment_id
     assert r2.internal_endpoint == f"{ip.workspace_ip}:{WORKSPACE_IDE_CONTAINER_PORT}"
     assert db_session.get(TopologyAttachment, r1.attachment_id).container_id == "c2"
+
+
+def test_detach_persists_detached_ip_lease_stable(db_session: Session) -> None:
+    tid = _seed_topology(
+        db_session,
+        spec={"cidr": "10.88.5.0/24", "gateway_ip": "10.88.5.1", "bridge_name": "br-det"},
+    )
+    adapter = DbTopologyAdapter(db_session)
+    adapter.ensure_node_topology(topology_id=tid, node_id="n-det")
+    ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n-det", workspace_id=800)
+    adapter.attach_workspace(
+        topology_id=tid,
+        node_id="n-det",
+        workspace_id=800,
+        container_id="c-det",
+        netns_ref="/proc/1/ns/net",
+        workspace_ip=ip.workspace_ip,
+    )
+    out = adapter.detach_workspace(topology_id=tid, node_id="n-det", workspace_id=800)
+    assert out.detached is True
+    assert out.released_ip is False
+    row = db_session.exec(
+        select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == tid,
+            TopologyAttachment.workspace_id == 800,
+        ),
+    ).first()
+    assert row is not None
+    assert row.status == TopologyAttachmentStatus.DETACHED
+    assert row.container_id is None
+    lease = db_session.exec(
+        select(IpAllocation).where(
+            IpAllocation.topology_id == tid,
+            IpAllocation.workspace_id == 800,
+        ),
+    ).first()
+    assert lease is not None
+    assert lease.released_at is None
+    assert lease.ip == ip.workspace_ip
+
+
+def test_check_topology_reflects_persisted_runtime(db_session: Session) -> None:
+    tid = _seed_topology(
+        db_session,
+        spec={"cidr": "10.88.6.0/24", "gateway_ip": "10.88.6.1"},
+    )
+    adapter = DbTopologyAdapter(db_session)
+    adapter.ensure_node_topology(topology_id=tid, node_id="n-ct")
+    res = adapter.check_topology(topology_id=tid, node_id="n-ct")
+    assert res.healthy is True
+    assert res.cidr == "10.88.6.0/24"
+    rt = db_session.exec(
+        select(TopologyRuntime).where(
+            TopologyRuntime.topology_id == tid,
+            TopologyRuntime.node_id == "n-ct",
+        ),
+    ).first()
+    assert rt is not None
+    assert res.topology_runtime_id == rt.topology_runtime_id
+
+
+def test_check_topology_unhealthy_when_missing_runtime(db_session: Session) -> None:
+    tid = _seed_topology(db_session)
+    adapter = DbTopologyAdapter(db_session)
+    res = adapter.check_topology(topology_id=tid, node_id="ghost-node")
+    assert res.healthy is False
+    assert res.topology_runtime_id is None
+    assert res.status == TopologyRuntimeStatus.FAILED
+
+
+def test_check_attachment_persisted_and_internal_endpoint(db_session: Session) -> None:
+    tid = _seed_topology(
+        db_session,
+        spec={"cidr": "10.88.7.0/24", "gateway_ip": "10.88.7.1", "bridge_name": "br-ca"},
+    )
+    adapter = DbTopologyAdapter(db_session)
+    adapter.ensure_node_topology(topology_id=tid, node_id="n-ca")
+    ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n-ca", workspace_id=900)
+    att = adapter.attach_workspace(
+        topology_id=tid,
+        node_id="n-ca",
+        workspace_id=900,
+        container_id="c-ca",
+        netns_ref="/ns/ca",
+        workspace_ip=ip.workspace_ip,
+    )
+    chk = adapter.check_attachment(topology_id=tid, node_id="n-ca", workspace_id=900)
+    assert chk.healthy is True
+    assert chk.attachment_id == att.attachment_id
+    assert chk.internal_endpoint == f"{ip.workspace_ip}:{WORKSPACE_IDE_CONTAINER_PORT}"

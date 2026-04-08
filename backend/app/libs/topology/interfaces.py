@@ -18,6 +18,7 @@ from .results import (
     AttachWorkspaceResult,
     CheckAttachmentResult,
     CheckTopologyResult,
+    DetachWorkspaceResult,
     EnsureNodeTopologyResult,
 )
 
@@ -79,12 +80,21 @@ class TopologyAdapter(ABC):
         """
 
     @abstractmethod
-    def detach_workspace(self, *, topology_id: int, node_id: str, workspace_id: int) -> None:
+    def detach_workspace(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> DetachWorkspaceResult:
         """
-        Detach ``workspace_id`` from the topology on ``node_id`` (release veth / routing as needed).
+        Detach ``workspace_id`` from the topology on ``node_id`` (V1: DB attachment state; IP lease kept).
+
+        Idempotent: no attachment row returns ``detached=False`` with ``status`` ``DETACHED``.
+        ``released_ip`` remains ``False`` in V1 unless a future step defines lease release on detach.
 
         Raises:
-            WorkspaceDetachError: Teardown failed (attachment may be partially removed).
+            WorkspaceDetachError: Persisting detach state failed.
         """
 
     @abstractmethod
@@ -99,11 +109,12 @@ class TopologyAdapter(ABC):
     @abstractmethod
     def check_topology(self, *, topology_id: int, node_id: str) -> CheckTopologyResult:
         """
-        Verify topology runtime health; returns structured status without raising for degraded-but-known state.
+        Verify topology runtime health from persisted fields (V1: no live Linux probes).
+
+        Missing runtime yields ``healthy=False`` and issues; no exception for not-found.
 
         Raises:
-            TopologyHealthCheckError: Probe could not run (e.g. agent down).
-            TopologyRuntimeNotFoundError: No runtime record on the node.
+            TopologyHealthCheckError: Implementation cannot read state (rare).
         """
 
     @abstractmethod
@@ -115,8 +126,10 @@ class TopologyAdapter(ABC):
         workspace_id: int,
     ) -> CheckAttachmentResult:
         """
-        Verify workspace attachment health (interfaces, address, reachability policy as implemented).
+        Verify attachment + active lease consistency from persisted fields (V1: no live probes).
+
+        Missing attachment yields ``healthy=False``; no exception for not-found.
 
         Raises:
-            AttachmentHealthCheckError: Check could not run.
+            AttachmentHealthCheckError: Implementation cannot read state (rare).
         """

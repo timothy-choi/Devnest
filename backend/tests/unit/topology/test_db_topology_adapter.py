@@ -218,3 +218,213 @@ class TestAttachWorkspace:
                 workspace_ip="10.0.0.99",
             )
         assert ip.workspace_ip != "10.0.0.99"
+
+
+class TestDetachWorkspace:
+    def test_idempotent_when_no_attachment(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session)
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        out = adapter.detach_workspace(topology_id=tid, node_id="n1", workspace_id=999)
+        assert out.detached is False
+        assert out.status == TopologyAttachmentStatus.DETACHED
+        assert out.workspace_id == 999
+        assert out.workspace_ip is None
+        assert out.released_ip is False
+
+    def test_sets_detached_and_clears_container_id(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.10.0/24", "gateway_ip": "10.77.10.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=20)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=20,
+            container_id="cid-live",
+            netns_ref="/ns/x",
+            workspace_ip=ip.workspace_ip,
+        )
+        out = adapter.detach_workspace(topology_id=tid, node_id="n1", workspace_id=20)
+        assert out.detached is True
+        assert out.released_ip is False
+        assert out.workspace_ip == ip.workspace_ip
+        row = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.node_id == "n1",
+                TopologyAttachment.workspace_id == 20,
+            ),
+        ).first()
+        assert row is not None
+        assert row.status == TopologyAttachmentStatus.DETACHED
+        assert row.container_id is None
+
+    def test_ip_lease_not_released_on_detach(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session, spec={"cidr": "10.77.11.0/24", "gateway_ip": "10.77.11.1"})
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=21)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=21,
+            container_id="c",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        adapter.detach_workspace(topology_id=tid, node_id="n1", workspace_id=21)
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.workspace_id == 21,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is None
+        assert lease.ip == ip.workspace_ip
+
+    def test_second_detach_idempotent(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session, spec={"cidr": "10.77.12.0/24", "gateway_ip": "10.77.12.1"})
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=22)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=22,
+            container_id="c",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        adapter.detach_workspace(topology_id=tid, node_id="n1", workspace_id=22)
+        second = adapter.detach_workspace(topology_id=tid, node_id="n1", workspace_id=22)
+        assert second.detached is False
+        assert second.status == TopologyAttachmentStatus.DETACHED
+
+
+class TestCheckTopology:
+    def test_healthy_when_runtime_ready_and_populated(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.20.0/24", "gateway_ip": "10.77.20.1", "bridge_name": "br-chk"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-chk")
+        res = adapter.check_topology(topology_id=tid, node_id="n-chk")
+        assert res.healthy is True
+        assert res.status == TopologyRuntimeStatus.READY
+        assert res.issues == ()
+        assert res.topology_runtime_id is not None
+        assert res.bridge_name == "br-chk"
+        assert res.cidr == "10.77.20.0/24"
+        assert res.gateway_ip == "10.77.20.1"
+
+    def test_unhealthy_when_runtime_missing(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session)
+        adapter = DbTopologyAdapter(topo_session)
+        res = adapter.check_topology(topology_id=tid, node_id="no-runtime")
+        assert res.healthy is False
+        assert res.status == TopologyRuntimeStatus.FAILED
+        assert res.topology_runtime_id is None
+        assert any("not found" in i for i in res.issues)
+
+    def test_unhealthy_when_runtime_incomplete(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session)
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-inc")
+        row = topo_session.exec(
+            select(TopologyRuntime).where(
+                TopologyRuntime.topology_id == tid,
+                TopologyRuntime.node_id == "n-inc",
+            ),
+        ).first()
+        assert row is not None
+        row.bridge_name = None
+        topo_session.add(row)
+        topo_session.commit()
+        res = adapter.check_topology(topology_id=tid, node_id="n-inc")
+        assert res.healthy is False
+        assert "bridge_name" in " ".join(res.issues)
+
+
+class TestCheckAttachment:
+    def test_healthy_after_attach(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.30.0/24", "gateway_ip": "10.77.30.1", "bridge_name": "br-a"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=30)
+        att = adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=30,
+            container_id="cid-h",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        res = adapter.check_attachment(topology_id=tid, node_id="n1", workspace_id=30)
+        assert res.healthy is True
+        assert res.status == TopologyAttachmentStatus.ATTACHED
+        assert res.issues == ()
+        assert res.attachment_id == att.attachment_id
+        assert res.internal_endpoint == f"{ip.workspace_ip}:{WORKSPACE_IDE_CONTAINER_PORT}"
+
+    def test_unhealthy_when_missing(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session)
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        res = adapter.check_attachment(topology_id=tid, node_id="n1", workspace_id=404)
+        assert res.healthy is False
+        assert res.attachment_id is None
+        assert any("not found" in i for i in res.issues)
+
+    def test_unhealthy_after_detach(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session, spec={"cidr": "10.77.32.0/24", "gateway_ip": "10.77.32.1"})
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=32)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=32,
+            container_id="c",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        adapter.detach_workspace(topology_id=tid, node_id="n1", workspace_id=32)
+        res = adapter.check_attachment(topology_id=tid, node_id="n1", workspace_id=32)
+        assert res.healthy is False
+        assert res.status == TopologyAttachmentStatus.DETACHED
+
+    def test_unhealthy_when_ip_mismatch(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session, spec={"cidr": "10.77.31.0/24", "gateway_ip": "10.77.31.1"})
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=31)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=31,
+            container_id="c",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        row = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 31,
+            ),
+        ).first()
+        assert row is not None
+        row.workspace_ip = "10.77.31.99"
+        topo_session.add(row)
+        topo_session.commit()
+        res = adapter.check_attachment(topology_id=tid, node_id="n1", workspace_id=31)
+        assert res.healthy is False
+        assert any("lease" in i or "match" in i for i in res.issues)

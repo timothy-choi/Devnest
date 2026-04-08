@@ -38,12 +38,27 @@ class AttachWorkspaceResult:
 
 
 @dataclass(frozen=True)
+class DetachWorkspaceResult:
+    """Outcome of ``detach_workspace`` (V1: attachment row only; IP lease stays active unless explicitly released later)."""
+
+    detached: bool
+    status: TopologyAttachmentStatus
+    workspace_id: int
+    workspace_ip: str | None
+    released_ip: bool
+
+
+@dataclass(frozen=True)
 class CheckTopologyResult:
-    """Outcome of ``check_topology``; ``healthy`` is False when runtime exists but is degraded per policy."""
+    """Outcome of ``check_topology``; ``healthy`` is False when runtime is missing, incomplete, or not READY."""
 
     healthy: bool
     status: TopologyRuntimeStatus
     issues: tuple[str, ...] = ()
+    topology_runtime_id: int | None = None
+    bridge_name: str | None = None
+    cidr: str | None = None
+    gateway_ip: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,3 +70,4 @@ class CheckAttachmentResult:
     workspace_ip: str | None = None
     internal_endpoint: str | None = None
     issues: tuple[str, ...] = ()
+    attachment_id: int | None = None

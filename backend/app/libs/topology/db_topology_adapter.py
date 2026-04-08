@@ -18,6 +18,7 @@ from .errors import (
     TopologyRuntimeCreateError,
     TopologyRuntimeNotFoundError,
     WorkspaceAttachmentError,
+    WorkspaceDetachError,
     WorkspaceIPAllocationError,
 )
 from .interfaces import TopologyAdapter
@@ -33,6 +34,7 @@ from .results import (
     AttachWorkspaceResult,
     CheckAttachmentResult,
     CheckTopologyResult,
+    DetachWorkspaceResult,
     EnsureNodeTopologyResult,
 )
 
@@ -342,14 +344,96 @@ class DbTopologyAdapter(TopologyAdapter):
             internal_endpoint=internal_endpoint,
         )
 
-    def detach_workspace(self, *, topology_id: int, node_id: str, workspace_id: int) -> None:
-        raise NotImplementedError("detach_workspace is deferred to a later topology step")
+    def detach_workspace(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> DetachWorkspaceResult:
+        node_id = node_id.strip()[:128]
+        stmt = select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == topology_id,
+            TopologyAttachment.node_id == node_id,
+            TopologyAttachment.workspace_id == workspace_id,
+        )
+        att = self._session.exec(stmt).first()
+        if att is None:
+            return DetachWorkspaceResult(
+                detached=False,
+                status=TopologyAttachmentStatus.DETACHED,
+                workspace_id=workspace_id,
+                workspace_ip=None,
+                released_ip=False,
+            )
+        prev_ip = att.workspace_ip
+        if att.status == TopologyAttachmentStatus.DETACHED:
+            return DetachWorkspaceResult(
+                detached=False,
+                status=TopologyAttachmentStatus.DETACHED,
+                workspace_id=workspace_id,
+                workspace_ip=prev_ip,
+                released_ip=False,
+            )
+        now = datetime.now(timezone.utc)
+        att.status = TopologyAttachmentStatus.DETACHED
+        att.container_id = None
+        att.updated_at = now
+        self._session.add(att)
+        try:
+            self._session.commit()
+        except Exception as e:
+            self._session.rollback()
+            raise WorkspaceDetachError(f"failed to persist workspace detach: {e}") from e
+        self._session.refresh(att)
+        return DetachWorkspaceResult(
+            detached=True,
+            status=TopologyAttachmentStatus.DETACHED,
+            workspace_id=workspace_id,
+            workspace_ip=prev_ip,
+            released_ip=False,
+        )
 
     def delete_topology(self, *, topology_id: int, node_id: str) -> None:
         raise NotImplementedError("delete_topology is deferred to a later topology step")
 
     def check_topology(self, *, topology_id: int, node_id: str) -> CheckTopologyResult:
-        raise NotImplementedError("check_topology is deferred to a later topology step")
+        node_id = node_id.strip()[:128]
+        stmt = select(TopologyRuntime).where(
+            TopologyRuntime.topology_id == topology_id,
+            TopologyRuntime.node_id == node_id,
+        )
+        row = self._session.exec(stmt).first()
+        if row is None:
+            return CheckTopologyResult(
+                healthy=False,
+                status=TopologyRuntimeStatus.FAILED,
+                issues=("topology runtime not found for this topology and node",),
+                topology_runtime_id=None,
+                bridge_name=None,
+                cidr=None,
+                gateway_ip=None,
+            )
+        issues: list[str] = []
+        if not (row.bridge_name and str(row.bridge_name).strip()):
+            issues.append("bridge_name is not set")
+        if not (row.cidr and str(row.cidr).strip()):
+            issues.append("cidr is not set")
+        if not (row.gateway_ip and str(row.gateway_ip).strip()):
+            issues.append("gateway_ip is not set")
+        if row.status != TopologyRuntimeStatus.READY:
+            issues.append(f"runtime status is {row.status.value}, expected READY for V1 healthy")
+        assert row.topology_runtime_id is not None
+        healthy = len(issues) == 0
+        return CheckTopologyResult(
+            healthy=healthy,
+            status=row.status,
+            issues=tuple(issues),
+            topology_runtime_id=row.topology_runtime_id,
+            bridge_name=row.bridge_name,
+            cidr=row.cidr,
+            gateway_ip=row.gateway_ip,
+        )
 
     def check_attachment(
         self,
@@ -358,4 +442,53 @@ class DbTopologyAdapter(TopologyAdapter):
         node_id: str,
         workspace_id: int,
     ) -> CheckAttachmentResult:
-        raise NotImplementedError("check_attachment is deferred to a later topology step")
+        node_id = node_id.strip()[:128]
+        att_stmt = select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == topology_id,
+            TopologyAttachment.node_id == node_id,
+            TopologyAttachment.workspace_id == workspace_id,
+        )
+        att = self._session.exec(att_stmt).first()
+        if att is None:
+            return CheckAttachmentResult(
+                healthy=False,
+                status=TopologyAttachmentStatus.DETACHED,
+                issues=("topology attachment not found",),
+                attachment_id=None,
+            )
+        issues: list[str] = []
+        if att.status != TopologyAttachmentStatus.ATTACHED:
+            issues.append(f"attachment status is {att.status.value}, expected ATTACHED for healthy V1")
+        if not (att.container_id and str(att.container_id).strip()):
+            issues.append("container_id is not set")
+        if not (att.workspace_ip and str(att.workspace_ip).strip()):
+            issues.append("workspace_ip is not set")
+        if not (att.bridge_name and str(att.bridge_name).strip()):
+            issues.append("bridge_name is not set")
+        if not (att.gateway_ip and str(att.gateway_ip).strip()):
+            issues.append("gateway_ip is not set")
+
+        alloc_stmt = select(IpAllocation).where(
+            IpAllocation.topology_id == topology_id,
+            IpAllocation.node_id == node_id,
+            IpAllocation.workspace_id == workspace_id,
+            IpAllocation.released_at.is_(None),  # type: ignore[union-attr]
+        )
+        alloc = self._session.exec(alloc_stmt).first()
+        if alloc is None:
+            issues.append("no active IpAllocation for this workspace")
+        elif att.workspace_ip and alloc.ip != att.workspace_ip:
+            issues.append("workspace_ip on attachment does not match active lease ip")
+
+        ws_ip = att.workspace_ip
+        internal = f"{ws_ip}:{WORKSPACE_IDE_CONTAINER_PORT}" if ws_ip else None
+        healthy = len(issues) == 0
+        assert att.attachment_id is not None
+        return CheckAttachmentResult(
+            healthy=healthy,
+            status=att.status,
+            workspace_ip=ws_ip,
+            internal_endpoint=internal,
+            issues=tuple(issues),
+            attachment_id=att.attachment_id,
+        )

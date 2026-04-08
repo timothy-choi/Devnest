@@ -25,6 +25,7 @@ from .results import (
     AttachWorkspaceResult,
     CheckAttachmentResult,
     CheckTopologyResult,
+    DetachWorkspaceResult,
     EnsureNodeTopologyResult,
 )
 
@@ -35,6 +36,7 @@ __all__ = [
     "CheckAttachmentResult",
     "CheckTopologyResult",
     "DbTopologyAdapter",
+    "DetachWorkspaceResult",
     "EnsureNodeTopologyResult",
     "IpAllocation",
     "Topology",
