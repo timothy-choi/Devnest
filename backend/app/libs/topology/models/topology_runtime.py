@@ -2,23 +2,39 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime
+from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from .enums import TopologyRuntimeStatus
+
+_runtime_status_enum = SAEnum(
+    TopologyRuntimeStatus,
+    name="topology_runtime_status",
+    native_enum=False,
+    length=32,
+    values_callable=lambda obj: [e.value for e in obj],
+)
 
 
 class TopologyRuntime(SQLModel, table=True):
     """
     Observed / agent-reported state for ``topology`` on ``node_id`` (bridge, CIDR, NAT flags, etc.).
+
+    At most one runtime row per (``topology_id``, ``node_id``) in V1.
     """
 
     __tablename__ = "topology_runtime"
+    __table_args__ = (
+        UniqueConstraint("topology_id", "node_id", name="uq_topology_runtime_topology_node"),
+    )
 
     topology_runtime_id: int | None = Field(default=None, primary_key=True)
     topology_id: int = Field(foreign_key="topology.topology_id", index=True)
     node_id: str = Field(index=True, max_length=128)
-    status: str = Field(max_length=32, default=TopologyRuntimeStatus.READY.value, index=True)
+    status: TopologyRuntimeStatus = Field(
+        default=TopologyRuntimeStatus.READY,
+        sa_column=Column(_runtime_status_enum, nullable=False, index=True),
+    )
     bridge_name: str | None = Field(default=None, max_length=64)
     cidr: str | None = Field(default=None, max_length=64)
     gateway_ip: str | None = Field(default=None, max_length=64)

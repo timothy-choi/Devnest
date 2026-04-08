@@ -11,6 +11,9 @@ class Topology(SQLModel, table=True):
     Declarative topology template: mode, egress, policy, services/devices live in ``spec_json``.
 
     Outer columns stay stable across V1+; new capabilities extend ``spec_json`` without renames.
+
+    ``version`` is a **string spec label** (e.g. ``\"v1\"``, ``\"1.0.0\"``): human- or tooling-defined,
+    not a database auto-increment. Use integers inside ``spec_json`` only if you need numeric counters.
     """
 
     __tablename__ = "topology"
