@@ -20,8 +20,10 @@ pytestmark = [pytest.mark.system, pytest.mark.topology_linux]
 
 
 def _unique_ipv4_subnet() -> tuple[str, str]:
+    """Pick a /24 in 10.240–10.247.x (unlikely to overlap Docker/kube defaults on CI hosts)."""
     b = uuid.uuid4().bytes
-    second, third = b[0] % 200 + 20, b[1]
+    second = 240 + (b[0] % 8)
+    third = b[1]
     return f"10.{second}.{third}.0/24", f"10.{second}.{third}.1"
 
 

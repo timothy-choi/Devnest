@@ -429,6 +429,8 @@ class DbTopologyAdapter(TopologyAdapter):
         workspace_ip = workspace_ip.strip()
 
         self.ensure_node_topology(topology_id=topology_id, node_id=node_id)
+        # ``ensure_node_topology`` commits inside ``_sync_linux_node_bridge``; reload ORM state.
+        self._session.expire_all()
 
         rt_stmt = select(TopologyRuntime).where(
             TopologyRuntime.topology_id == topology_id,

@@ -45,9 +45,12 @@ def check_bridge_exists(bridge_name: str, *, runner: CommandRunner | None = None
 
 def check_bridge_link_up(bridge_name: str, *, runner: CommandRunner | None = None) -> bool:
     """
-    Return True if the device exists and ``ip link`` reports administratively UP.
+    Return True if the bridge is up enough for V1 health checks.
 
-    Parses ``ip link show dev <name>`` for ``state UP`` (best-effort across iproute2 versions).
+    - **Oper up**: ``state UP`` in ``ip link show`` (carrier / LOWER_UP paths).
+    - **Admin up, no carrier**: many empty bridges show ``NO-CARRIER`` and ``state DOWN`` while
+      the ``<BROADCAST,MULTICAST,UP,...>`` flags still include ``UP`` after ``ip link set up``;
+      we treat that the same as up, matching ``ensure_bridge_up`` intent.
     """
     br = _validate_linux_ifname(bridge_name)
     r = runner or CommandRunner()
@@ -55,7 +58,11 @@ def check_bridge_link_up(bridge_name: str, *, runner: CommandRunner | None = Non
         out = r.run(["ip", "link", "show", "dev", br])
     except RuntimeError:
         return False
-    return bool(re.search(r"\bstate UP\b", out))
+    if re.search(r"\bstate UP\b", out):
+        return True
+    if re.search(r"<[^>]*\bUP\b[^>]*>", out):
+        return True
+    return False
 
 
 def check_bridge_has_ipv4_address(
