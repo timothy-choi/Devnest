@@ -25,6 +25,7 @@ import ipaddress
 import os
 from datetime import datetime, timezone
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT
@@ -142,6 +143,10 @@ def _gateway_as_address(cidr: str, gateway_ip: str) -> ipaddress.IPv4Address:
     if isinstance(g, ipaddress.IPv6Address):
         raise WorkspaceIPAllocationError("V1 allocation is IPv4 only")
     return g
+
+
+# Retries after IntegrityError (concurrent allocate on same workspace or same chosen IP).
+_ALLOCATE_IP_MAX_ATTEMPTS = 5
 
 
 def _iter_candidate_workspace_hosts(cidr: str, gateway_ip: str) -> list[ipaddress.IPv4Address]:
@@ -368,6 +373,31 @@ class DbTopologyAdapter(TopologyAdapter):
             )
         if not runtime.cidr or not runtime.gateway_ip:
             raise WorkspaceIPAllocationError("topology runtime missing cidr or gateway_ip")
+
+        for attempt in range(_ALLOCATE_IP_MAX_ATTEMPTS):
+            try:
+                return self._allocate_workspace_ip_attempt(
+                    topology_id=topology_id,
+                    node_id=node_id,
+                    workspace_id=workspace_id,
+                    runtime=runtime,
+                )
+            except IntegrityError as exc:
+                self._session.rollback()
+                if attempt + 1 >= _ALLOCATE_IP_MAX_ATTEMPTS:
+                    raise WorkspaceIPAllocationError(
+                        "IP allocation hit repeated database conflicts (likely concurrent requests); "
+                        f"giving up after {_ALLOCATE_IP_MAX_ATTEMPTS} attempts",
+                    ) from exc
+
+    def _allocate_workspace_ip_attempt(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+        runtime: TopologyRuntime,
+    ) -> AllocateWorkspaceIPResult:
         alloc_stmt = select(IpAllocation).where(
             IpAllocation.topology_id == topology_id,
             IpAllocation.node_id == node_id,
@@ -394,23 +424,25 @@ class DbTopologyAdapter(TopologyAdapter):
 
         now = datetime.now(timezone.utc)
         ip_str = str(chosen)
+        if row is None:
+            row = IpAllocation(
+                node_id=node_id,
+                topology_id=topology_id,
+                workspace_id=workspace_id,
+                ip=ip_str,
+                leased_at=now,
+                released_at=None,
+            )
+            self._session.add(row)
+        else:
+            row.ip = ip_str
+            row.leased_at = now
+            row.released_at = None
+            self._session.add(row)
         try:
-            if row is None:
-                row = IpAllocation(
-                    node_id=node_id,
-                    topology_id=topology_id,
-                    workspace_id=workspace_id,
-                    ip=ip_str,
-                    leased_at=now,
-                    released_at=None,
-                )
-                self._session.add(row)
-            else:
-                row.ip = ip_str
-                row.leased_at = now
-                row.released_at = None
-                self._session.add(row)
             self._session.commit()
+        except IntegrityError:
+            raise
         except Exception as e:
             self._session.rollback()
             raise WorkspaceIPAllocationError(f"failed to persist IP allocation: {e}") from e

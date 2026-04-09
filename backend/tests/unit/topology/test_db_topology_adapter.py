@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT
@@ -252,6 +255,54 @@ class TestAllocateWorkspaceIP:
         adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=1)
         with pytest.raises(WorkspaceIPAllocationError, match="no free"):
             adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=2)
+
+    def test_rejects_second_active_lease_same_ip(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.20.0/24", "gateway_ip": "10.77.20.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        first = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=1)
+        dup = IpAllocation(
+            node_id="n1",
+            topology_id=tid,
+            workspace_id=2,
+            ip=first.workspace_ip,
+            leased_at=datetime.now(timezone.utc),
+            released_at=None,
+        )
+        topo_session.add(dup)
+        with pytest.raises(IntegrityError):
+            topo_session.commit()
+        topo_session.rollback()
+
+    def test_concurrent_allocations_yield_distinct_ips(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "alloc_concurrent.db"
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        SQLModel.metadata.create_all(engine)
+        tid: int
+        with Session(engine) as s:
+            tid = _insert_topology(
+                s,
+                spec={"cidr": "10.99.0.0/24", "gateway_ip": "10.99.0.1"},
+            )
+            DbTopologyAdapter(s).ensure_node_topology(topology_id=tid, node_id="n1")
+
+        def alloc(workspace_id: int) -> str:
+            with Session(engine) as s:
+                return DbTopologyAdapter(s).allocate_workspace_ip(
+                    topology_id=tid,
+                    node_id="n1",
+                    workspace_id=workspace_id,
+                ).workspace_ip
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            ips = list(pool.map(alloc, range(1, 25)))
+        assert len(ips) == len(set(ips))
 
 
 class TestAttachWorkspace:
