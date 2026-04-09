@@ -27,6 +27,7 @@ import hashlib
 import ipaddress
 import os
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -57,6 +58,9 @@ from .results import (
     DetachWorkspaceResult,
     EnsureNodeTopologyResult,
 )
+
+if TYPE_CHECKING:
+    from .system.command_runner import CommandRunner
 
 _V1_MODE = "node_bridge"
 
@@ -393,7 +397,7 @@ class DbTopologyAdapter(TopologyAdapter):
         self,
         session: Session,
         *,
-        command_runner: "CommandRunner | None" = None,
+        command_runner: CommandRunner | None = None,
         apply_linux_bridge: bool | None = None,
         apply_linux_attachment: bool | None = None,
     ) -> None:

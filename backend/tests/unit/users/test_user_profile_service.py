@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from app.services.user_service.api.schemas import UpdateMyProfileRequest
 from app.services.user_service.models import UserProfile
 from app.services.user_service.services import user_profile_service
