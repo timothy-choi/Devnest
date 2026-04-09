@@ -6,6 +6,9 @@ disabled via ``apply_linux_bridge=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_B
 
 ``attach_workspace`` runs veth + netns wiring (see ``system.attachment_ops``) unless disabled via
 ``apply_linux_attachment=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT=1``.
+
+``detach_workspace`` removes the host veth leg when Linux attachment is enabled (same flag/env);
+otherwise it updates attachment DB state only. IP leases are not released (V1).
 """
 
 from __future__ import annotations
@@ -590,6 +593,28 @@ class DbTopologyAdapter(TopologyAdapter):
             internal_endpoint=internal_endpoint,
         )
 
+    def _linux_detach_host_veth(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+        interface_host: str | None,
+    ) -> None:
+        """Best-effort removal of the host-side veth for this attachment (idempotent if already gone)."""
+        from .system.attachment_ops import remove_veth_if_exists
+        from .system.command_runner import CommandRunner
+
+        if interface_host and str(interface_host).strip():
+            host_nm = str(interface_host).strip()
+        else:
+            host_nm, _ = _veth_pair_names(topology_id, node_id, workspace_id)
+        r = self._command_runner or CommandRunner()
+        try:
+            remove_veth_if_exists(host_nm, runner=r)
+        except RuntimeError as e:
+            raise WorkspaceDetachError(f"linux detach failed: {e}") from e
+
     def detach_workspace(
         self,
         *,
@@ -621,9 +646,19 @@ class DbTopologyAdapter(TopologyAdapter):
                 workspace_ip=prev_ip,
                 released_ip=False,
             )
+        if self._apply_linux_attachment:
+            self._linux_detach_host_veth(
+                topology_id=topology_id,
+                node_id=node_id,
+                workspace_id=workspace_id,
+                interface_host=att.interface_host,
+            )
+
         now = datetime.now(timezone.utc)
         att.status = TopologyAttachmentStatus.DETACHED
         att.container_id = None
+        att.interface_host = None
+        att.interface_container = None
         att.updated_at = now
         self._session.add(att)
         try:

@@ -403,6 +403,52 @@ class TestDetachWorkspace:
         assert row is not None
         assert row.status == TopologyAttachmentStatus.DETACHED
         assert row.container_id is None
+        assert row.interface_host is None
+        assert row.interface_container is None
+
+    def test_linux_detach_runs_ip_when_apply_enabled(self, topo_session: Session) -> None:
+        calls: list[list[str]] = []
+
+        class RecRunner:
+            def run(self, cmd: list[str]) -> str:
+                calls.append(list(cmd))
+                return ""
+
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.50.0/24", "gateway_ip": "10.77.50.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=50)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=50,
+            container_id="c",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        row = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 50,
+            ),
+        ).first()
+        assert row is not None
+        assert row.interface_host
+
+        detach_ad = DbTopologyAdapter(
+            topo_session,
+            command_runner=RecRunner(),
+            apply_linux_attachment=True,
+        )
+        detach_ad.detach_workspace(topology_id=tid, node_id="n1", workspace_id=50)
+        assert calls and calls[0][0] == "ip" and "link" in calls[0]
+        row2 = topo_session.get(TopologyAttachment, row.attachment_id)
+        assert row2 is not None
+        assert row2.interface_host is None
+        assert row2.interface_container is None
 
     def test_ip_lease_not_released_on_detach(self, topo_session: Session) -> None:
         tid = _insert_topology(topo_session, spec={"cidr": "10.77.11.0/24", "gateway_ip": "10.77.11.1"})
