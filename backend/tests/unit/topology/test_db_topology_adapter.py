@@ -311,6 +311,55 @@ class TestAttachWorkspace:
             )
         assert ip.workspace_ip != "10.0.0.99"
 
+    def test_rejects_invalid_netns_ref(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session)
+        adapter = DbTopologyAdapter(topo_session, apply_linux_attachment=True)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=91)
+        with pytest.raises(WorkspaceAttachmentError, match="unsupported netns_ref"):
+            adapter.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=91,
+                container_id="c",
+                netns_ref="/not/proc",
+                workspace_ip=ip.workspace_ip,
+            )
+
+    def test_linux_attach_failure_persists_failed(self, topo_session: Session) -> None:
+        class FailRunner:
+            def run(self, cmd: list[str]) -> str:
+                raise RuntimeError("boom")
+
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.40.0/24", "gateway_ip": "10.77.40.1", "bridge_name": "br-fail"},
+        )
+        adapter = DbTopologyAdapter(
+            topo_session,
+            command_runner=FailRunner(),
+            apply_linux_attachment=True,
+        )
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=40)
+        with pytest.raises(WorkspaceAttachmentError, match="linux attach failed"):
+            adapter.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=40,
+                container_id="c-fail",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip=ip.workspace_ip,
+            )
+        row = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 40,
+            ),
+        ).first()
+        assert row is not None
+        assert row.status == TopologyAttachmentStatus.FAILED
+
 
 class TestDetachWorkspace:
     def test_idempotent_when_no_attachment(self, topo_session: Session) -> None:

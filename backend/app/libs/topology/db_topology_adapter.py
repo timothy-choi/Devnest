@@ -3,7 +3,9 @@ DB-backed ``TopologyAdapter`` (V1): node bridge + control-plane state for IP lea
 
 ``ensure_node_topology`` applies node-local Linux bridge setup (see ``system.bridge_ops``) unless
 disabled via ``apply_linux_bridge=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE=1``.
-Attachment / netns work remains separate.
+
+``attach_workspace`` runs veth + netns wiring (see ``system.attachment_ops``) unless disabled via
+``apply_linux_attachment=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT=1``.
 """
 
 from __future__ import annotations
@@ -154,6 +156,21 @@ def _apply_linux_bridge_env_default() -> bool:
     )
 
 
+def _apply_linux_attachment_env_default() -> bool:
+    """When true, ``attach_workspace`` runs veth/netns ``ip`` + ``nsenter`` steps."""
+    return os.environ.get("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _veth_pair_names(topology_id: int, node_id: str, workspace_id: int) -> tuple[str, str]:
+    """Deterministic Linux interface names (≤15 chars) for host leg and container peer."""
+    h = hashlib.sha256(f"{topology_id}:{node_id}:{workspace_id}".encode("utf-8")).hexdigest()[:6]
+    return f"vh{h}", f"vc{h}"
+
+
 class DbTopologyAdapter(TopologyAdapter):
     """
     Persist ``TopologyRuntime``, ``IpAllocation``, and ``TopologyAttachment`` for V1 node_bridge.
@@ -167,11 +184,17 @@ class DbTopologyAdapter(TopologyAdapter):
         *,
         command_runner: "CommandRunner | None" = None,
         apply_linux_bridge: bool | None = None,
+        apply_linux_attachment: bool | None = None,
     ) -> None:
         self._session = session
         self._command_runner = command_runner
         self._apply_linux_bridge = (
             apply_linux_bridge if apply_linux_bridge is not None else _apply_linux_bridge_env_default()
+        )
+        self._apply_linux_attachment = (
+            apply_linux_attachment
+            if apply_linux_attachment is not None
+            else _apply_linux_attachment_env_default()
         )
 
     def _sync_linux_node_bridge(self, row: TopologyRuntime) -> None:
@@ -235,6 +258,34 @@ class DbTopologyAdapter(TopologyAdapter):
             self._session.rollback()
             raise TopologyRuntimeCreateError(f"failed to persist topology runtime after bridge sync: {e}") from e
         self._session.refresh(row)
+
+    def _run_linux_attach(
+        self,
+        *,
+        host_if: str,
+        container_if: str,
+        bridge_name: str,
+        cidr: str,
+        gateway_ip: str,
+        workspace_ip: str,
+        netns_ref: str,
+    ) -> None:
+        from .system import attachment_ops as ao
+        from .system.command_runner import CommandRunner
+
+        r = self._command_runner or CommandRunner()
+        try:
+            ao.create_veth_pair(host_if, container_if, runner=r)
+            ao.attach_host_if_to_bridge(host_if, bridge_name, runner=r)
+            ao.move_container_if_to_netns(container_if, netns_ref, runner=r)
+            ao.assign_ip_in_netns(netns_ref, container_if, workspace_ip, cidr, runner=r)
+            ao.ensure_default_route_in_netns(netns_ref, gateway_ip, runner=r)
+        except (RuntimeError, ValueError):
+            try:
+                ao.remove_veth_if_exists(host_if, runner=r)
+            except RuntimeError:
+                pass
+            raise
 
     def ensure_node_topology(self, *, topology_id: int, node_id: str) -> EnsureNodeTopologyResult:
         if not node_id or not node_id.strip():
@@ -360,11 +411,14 @@ class DbTopologyAdapter(TopologyAdapter):
         netns_ref: str,
         workspace_ip: str,
     ) -> AttachWorkspaceResult:
-        _ = netns_ref  # V1 control-plane only; Linux join deferred.
         if not container_id or not container_id.strip():
             raise WorkspaceAttachmentError("container_id is required")
         container_id = container_id.strip()[:128]
         node_id = node_id.strip()[:128]
+        workspace_ip = workspace_ip.strip()
+
+        self.ensure_node_topology(topology_id=topology_id, node_id=node_id)
+
         rt_stmt = select(TopologyRuntime).where(
             TopologyRuntime.topology_id == topology_id,
             TopologyRuntime.node_id == node_id,
@@ -374,6 +428,15 @@ class DbTopologyAdapter(TopologyAdapter):
             raise TopologyRuntimeNotFoundError(
                 f"no topology runtime for topology_id={topology_id} node_id={node_id!r}",
             )
+        if runtime.status != TopologyRuntimeStatus.READY:
+            raise WorkspaceAttachmentError(
+                f"topology runtime is not READY (status={runtime.status.value}); cannot attach workspace",
+            )
+        if not (runtime.bridge_name and str(runtime.bridge_name).strip()):
+            raise WorkspaceAttachmentError("topology runtime missing bridge_name")
+        if not (runtime.cidr and str(runtime.cidr).strip() and runtime.gateway_ip and str(runtime.gateway_ip).strip()):
+            raise WorkspaceAttachmentError("topology runtime missing cidr or gateway_ip")
+
         alloc_stmt = select(IpAllocation).where(
             IpAllocation.topology_id == topology_id,
             IpAllocation.node_id == node_id,
@@ -392,37 +455,133 @@ class DbTopologyAdapter(TopologyAdapter):
             TopologyAttachment.workspace_id == workspace_id,
         )
         att = self._session.exec(att_stmt).first()
-        now = datetime.now(timezone.utc)
+
         internal_endpoint = f"{workspace_ip}:{WORKSPACE_IDE_CONTAINER_PORT}"
-        try:
-            if att is None:
-                att = TopologyAttachment(
-                    topology_id=topology_id,
-                    node_id=node_id,
-                    workspace_id=workspace_id,
-                    container_id=container_id,
-                    status=TopologyAttachmentStatus.ATTACHED,
-                    workspace_ip=workspace_ip,
-                    bridge_name=runtime.bridge_name,
-                    gateway_ip=runtime.gateway_ip,
-                    created_at=now,
-                    updated_at=now,
+        if (
+            att is not None
+            and att.status == TopologyAttachmentStatus.ATTACHED
+            and (att.container_id or "") == container_id
+            and (att.workspace_ip or "") == workspace_ip
+        ):
+            assert att.attachment_id is not None
+            return AttachWorkspaceResult(
+                attachment_id=att.attachment_id,
+                workspace_ip=workspace_ip,
+                bridge_name=runtime.bridge_name,
+                gateway_ip=runtime.gateway_ip,
+                internal_endpoint=internal_endpoint,
+            )
+
+        from .system.attachment_ops import validate_netns_ref
+        from .system.command_runner import CommandRunner
+
+        netns_clean: str | None = None
+        if self._apply_linux_attachment:
+            try:
+                netns_clean = validate_netns_ref(netns_ref)
+            except ValueError as e:
+                raise WorkspaceAttachmentError(str(e)) from e
+        elif not (isinstance(netns_ref, str) and netns_ref.strip()):
+            raise WorkspaceAttachmentError("netns_ref is required")
+
+        host_if, ctr_if = _veth_pair_names(topology_id, node_id, workspace_id)
+
+        if self._apply_linux_attachment and att is not None and att.interface_host:
+            try:
+                from .system.attachment_ops import remove_veth_if_exists
+
+                remove_veth_if_exists(
+                    str(att.interface_host).strip(),
+                    runner=self._command_runner or CommandRunner(),
                 )
-                self._session.add(att)
-            else:
-                att.container_id = container_id
-                att.status = TopologyAttachmentStatus.ATTACHED
-                att.workspace_ip = workspace_ip
-                att.bridge_name = runtime.bridge_name
-                att.gateway_ip = runtime.gateway_ip
-                att.updated_at = now
-                self._session.add(att)
+            except RuntimeError:
+                pass
+
+        now = datetime.now(timezone.utc)
+        if att is None:
+            att = TopologyAttachment(
+                topology_id=topology_id,
+                node_id=node_id,
+                workspace_id=workspace_id,
+                container_id=container_id,
+                status=TopologyAttachmentStatus.ATTACHING,
+                workspace_ip=workspace_ip,
+                bridge_name=runtime.bridge_name,
+                gateway_ip=runtime.gateway_ip,
+                interface_host=host_if,
+                interface_container=ctr_if,
+                created_at=now,
+                updated_at=now,
+            )
+            self._session.add(att)
+        else:
+            att.container_id = container_id
+            att.workspace_ip = workspace_ip
+            att.bridge_name = runtime.bridge_name
+            att.gateway_ip = runtime.gateway_ip
+            att.interface_host = host_if
+            att.interface_container = ctr_if
+            att.status = TopologyAttachmentStatus.ATTACHING
+            att.updated_at = now
+            self._session.add(att)
+        try:
             self._session.commit()
         except Exception as e:
             self._session.rollback()
             raise WorkspaceAttachmentError(f"failed to persist topology attachment: {e}") from e
         self._session.refresh(att)
         assert att.attachment_id is not None
+
+        if not self._apply_linux_attachment:
+            att.status = TopologyAttachmentStatus.ATTACHED
+            att.updated_at = datetime.now(timezone.utc)
+            self._session.add(att)
+            try:
+                self._session.commit()
+            except Exception as e:
+                self._session.rollback()
+                raise WorkspaceAttachmentError(f"failed to persist topology attachment: {e}") from e
+            self._session.refresh(att)
+            return AttachWorkspaceResult(
+                attachment_id=att.attachment_id,
+                workspace_ip=workspace_ip,
+                bridge_name=runtime.bridge_name,
+                gateway_ip=runtime.gateway_ip,
+                internal_endpoint=internal_endpoint,
+            )
+
+        assert netns_clean is not None
+        try:
+            self._run_linux_attach(
+                host_if=host_if,
+                container_if=ctr_if,
+                bridge_name=str(runtime.bridge_name).strip(),
+                cidr=str(runtime.cidr).strip(),
+                gateway_ip=str(runtime.gateway_ip).strip(),
+                workspace_ip=workspace_ip,
+                netns_ref=netns_clean,
+            )
+        except (RuntimeError, ValueError) as e:
+            fail_at = datetime.now(timezone.utc)
+            att.status = TopologyAttachmentStatus.FAILED
+            att.updated_at = fail_at
+            self._session.add(att)
+            try:
+                self._session.commit()
+            except Exception as ce:
+                self._session.rollback()
+                raise WorkspaceAttachmentError(f"failed to persist attachment failure state: {ce}") from ce
+            raise WorkspaceAttachmentError(f"linux attach failed: {e}") from e
+
+        att.status = TopologyAttachmentStatus.ATTACHED
+        att.updated_at = datetime.now(timezone.utc)
+        self._session.add(att)
+        try:
+            self._session.commit()
+        except Exception as e:
+            self._session.rollback()
+            raise WorkspaceAttachmentError(f"failed to persist topology attachment: {e}") from e
+        self._session.refresh(att)
         return AttachWorkspaceResult(
             attachment_id=att.attachment_id,
             workspace_ip=workspace_ip,

@@ -1,2 +1,2 @@
-"""System helpers for topology (subprocess wrappers, etc.)."""
+"""System helpers for topology: command runner, bridge ops, attachment (veth/netns) ops."""
 
