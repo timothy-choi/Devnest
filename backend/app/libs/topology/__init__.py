@@ -2,6 +2,7 @@
 
 from .errors import (
     AttachmentHealthCheckError,
+    TopologyDeleteError,
     TopologyError,
     TopologyHealthCheckError,
     TopologyRuntimeCreateError,
@@ -43,6 +44,7 @@ __all__ = [
     "TopologyAdapter",
     "TopologyAttachment",
     "TopologyAttachmentStatus",
+    "TopologyDeleteError",
     "TopologyError",
     "TopologyHealthCheckError",
     "TopologyRuntime",

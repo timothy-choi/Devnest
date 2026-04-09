@@ -101,6 +101,20 @@ def check_bridge_has_ipv4_address(
     return False
 
 
+def remove_bridge_if_exists(bridge_name: str, *, runner: CommandRunner | None = None) -> None:
+    """
+    Remove a bridge device if present (``ip link del dev <name>``).
+
+    Idempotent when the interface is already absent. Does not flush addresses first; use only when
+    the bridge is safe to delete (V1: no active attachments per control plane).
+    """
+    br = _validate_linux_ifname(bridge_name)
+    r = runner or CommandRunner()
+    if not check_bridge_exists(br, runner=r):
+        return
+    r.run(["ip", "link", "del", "dev", br])
+
+
 def ensure_bridge_exists(bridge_name: str, *, runner: CommandRunner | None = None) -> None:
     """
     Ensure the bridge exists (idempotent).

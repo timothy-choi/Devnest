@@ -11,6 +11,7 @@ from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT
 from app.libs.topology import DbTopologyAdapter
 from app.libs.topology.db_topology_adapter import _veth_pair_names
 from app.libs.topology.errors import (
+    TopologyDeleteError,
     TopologyRuntimeCreateError,
     TopologyRuntimeNotFoundError,
     WorkspaceAttachmentError,
@@ -492,6 +493,126 @@ class TestDetachWorkspace:
         second = adapter.detach_workspace(topology_id=tid, node_id="n1", workspace_id=22)
         assert second.detached is False
         assert second.status == TopologyAttachmentStatus.DETACHED
+
+
+class TestDeleteTopology:
+    def test_noop_when_runtime_missing(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session)
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.delete_topology(topology_id=tid, node_id="no-runtime-node")
+        assert (
+            topo_session.exec(
+                select(TopologyRuntime).where(
+                    TopologyRuntime.topology_id == tid,
+                    TopologyRuntime.node_id == "no-runtime-node",
+                ),
+            ).first()
+            is None
+        )
+
+    def test_raises_when_workspace_still_attached(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.70.0/24", "gateway_ip": "10.77.70.1", "bridge_name": "br-del1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-del")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n-del", workspace_id=70)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n-del",
+            workspace_id=70,
+            container_id="c70",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        with pytest.raises(TopologyDeleteError, match="non-DETACHED"):
+            adapter.delete_topology(topology_id=tid, node_id="n-del")
+
+    def test_raises_when_failed_attachment_row(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.71.0/24", "gateway_ip": "10.77.71.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-fl")
+        now = datetime.now(timezone.utc)
+        topo_session.add(
+            TopologyAttachment(
+                topology_id=tid,
+                node_id="n-fl",
+                workspace_id=71,
+                container_id="c71",
+                status=TopologyAttachmentStatus.FAILED,
+                workspace_ip="10.77.71.2",
+                bridge_name="brx",
+                gateway_ip="10.77.71.1",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        topo_session.commit()
+        with pytest.raises(TopologyDeleteError, match="non-DETACHED"):
+            adapter.delete_topology(topology_id=tid, node_id="n-fl")
+
+    def test_deletes_runtime_and_detached_attachments(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.72.0/24", "gateway_ip": "10.77.72.1", "bridge_name": "br-del2"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-ok")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n-ok", workspace_id=72)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n-ok",
+            workspace_id=72,
+            container_id="c72",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        adapter.detach_workspace(topology_id=tid, node_id="n-ok", workspace_id=72)
+        rid = topo_session.exec(
+            select(TopologyRuntime.topology_runtime_id).where(
+                TopologyRuntime.topology_id == tid,
+                TopologyRuntime.node_id == "n-ok",
+            ),
+        ).first()
+        assert rid is not None
+        adapter.delete_topology(topology_id=tid, node_id="n-ok")
+        assert topo_session.get(TopologyRuntime, rid) is None
+        assert (
+            topo_session.exec(
+                select(TopologyAttachment).where(
+                    TopologyAttachment.topology_id == tid,
+                    TopologyAttachment.node_id == "n-ok",
+                ),
+            ).first()
+            is None
+        )
+
+    def test_linux_bridge_remove_when_apply_bridge(self, topo_session: Session) -> None:
+        calls: list[list[str]] = []
+
+        class FakeRunner:
+            def run(self, cmd: list[str]) -> str:
+                calls.append(list(cmd))
+                if "show" in cmd:
+                    return "1: br-rm: state UP\n"
+                return ""
+
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.73.0/24", "gateway_ip": "10.77.73.1", "bridge_name": "br-rm"},
+        )
+        DbTopologyAdapter(topo_session).ensure_node_topology(topology_id=tid, node_id="n-rm")
+        d_ad = DbTopologyAdapter(
+            topo_session,
+            command_runner=FakeRunner(),
+            apply_linux_bridge=True,
+        )
+        d_ad.delete_topology(topology_id=tid, node_id="n-rm")
+        assert any(c[:4] == ["ip", "link", "del", "dev"] for c in calls)
 
 
 class TestCheckTopology:

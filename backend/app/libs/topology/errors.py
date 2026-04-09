@@ -13,6 +13,10 @@ class TopologyRuntimeNotFoundError(TopologyError):
     """Raised when a topology runtime is required but missing on the node."""
 
 
+class TopologyDeleteError(TopologyError):
+    """Raised when ``delete_topology`` cannot remove node-local runtime safely (V1)."""
+
+
 class WorkspaceIPAllocationError(TopologyError):
     """Raised when ``allocate_workspace_ip`` cannot reserve or reuse an address in the topology CIDR."""
 

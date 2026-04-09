@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 
 from .errors import (
     AttachmentHealthCheckError,
+    TopologyDeleteError,
     TopologyHealthCheckError,
     TopologyRuntimeCreateError,
     TopologyRuntimeNotFoundError,
@@ -103,7 +104,9 @@ class TopologyAdapter(ABC):
         Remove node-local topology runtime when no longer needed (attachments should be detached first).
 
         Raises:
-            TopologyRuntimeNotFoundError: Nothing to delete (implementations may treat as no-op instead).
+            TopologyDeleteError: Deletion would be unsafe (e.g. active attachments) or Linux cleanup failed.
+
+        ``DbTopologyAdapter`` treats a missing runtime as success (idempotent no-op).
         """
 
     @abstractmethod

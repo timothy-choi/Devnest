@@ -13,6 +13,9 @@ otherwise it updates attachment DB state only. IP leases are not released (V1).
 ``check_topology`` / ``check_attachment`` append ``linux: …`` issues when the corresponding
 ``apply_linux_*`` flag is enabled (see env ``DEVNEST_TOPOLOGY_SKIP_LINUX_*``); otherwise they
 evaluate persisted state only. Issue strings prefixed with ``db:`` describe control-plane rows.
+
+``delete_topology`` removes the ``TopologyRuntime`` row (and node-local attachment rows) when no
+non-``DETACHED`` attachments exist; it optionally deletes the Linux bridge when bridge sync is enabled.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from sqlmodel import Session, select
 from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT
 
 from .errors import (
+    TopologyDeleteError,
     TopologyRuntimeCreateError,
     TopologyRuntimeNotFoundError,
     WorkspaceAttachmentError,
@@ -680,7 +684,54 @@ class DbTopologyAdapter(TopologyAdapter):
         )
 
     def delete_topology(self, *, topology_id: int, node_id: str) -> None:
-        raise NotImplementedError("delete_topology is deferred to a later topology step")
+        if not node_id or not node_id.strip():
+            raise TopologyDeleteError("node_id is required")
+        node_id = node_id.strip()[:128]
+
+        rt_stmt = select(TopologyRuntime).where(
+            TopologyRuntime.topology_id == topology_id,
+            TopologyRuntime.node_id == node_id,
+        )
+        runtime = self._session.exec(rt_stmt).first()
+        if runtime is None:
+            return
+
+        blocking_attachment = select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == topology_id,
+            TopologyAttachment.node_id == node_id,
+            TopologyAttachment.status != TopologyAttachmentStatus.DETACHED,
+        )
+        if self._session.exec(blocking_attachment).first() is not None:
+            raise TopologyDeleteError(
+                "cannot delete topology runtime: non-DETACHED attachments remain "
+                "(detach workspaces first)",
+            )
+
+        bridge_name = str(runtime.bridge_name).strip() if runtime.bridge_name else ""
+        if self._apply_linux_bridge and bridge_name:
+            from .system.bridge_ops import remove_bridge_if_exists
+            from .system.command_runner import CommandRunner
+
+            r = self._command_runner or CommandRunner()
+            try:
+                remove_bridge_if_exists(bridge_name, runner=r)
+            except ValueError as e:
+                raise TopologyDeleteError(f"cannot delete bridge {bridge_name!r}: {e}") from e
+            except RuntimeError as e:
+                raise TopologyDeleteError(f"linux bridge removal failed: {e}") from e
+
+        att_delete_stmt = select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == topology_id,
+            TopologyAttachment.node_id == node_id,
+        )
+        for att in self._session.exec(att_delete_stmt).all():
+            self._session.delete(att)
+        self._session.delete(runtime)
+        try:
+            self._session.commit()
+        except Exception as e:
+            self._session.rollback()
+            raise TopologyDeleteError(f"failed to persist topology deletion: {e}") from e
 
     def check_topology(self, *, topology_id: int, node_id: str) -> CheckTopologyResult:
         node_id = node_id.strip()[:128]
