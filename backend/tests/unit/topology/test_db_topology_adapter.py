@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT
 from app.libs.topology import DbTopologyAdapter
+from app.libs.topology.db_topology_adapter import _veth_pair_names
 from app.libs.topology.errors import (
     TopologyRuntimeCreateError,
     TopologyRuntimeNotFoundError,
@@ -537,6 +538,55 @@ class TestCheckTopology:
         assert res.healthy is False
         assert "bridge_name" in " ".join(res.issues)
 
+    def test_linux_topology_issues_when_bridge_absent_on_host(self, topo_session: Session) -> None:
+        class FailRunner:
+            def run(self, cmd: list[str]) -> str:
+                raise RuntimeError("no such device")
+
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.60.0/24", "gateway_ip": "10.77.60.1", "bridge_name": "br-lx"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-lx")
+        chk = DbTopologyAdapter(
+            topo_session,
+            command_runner=FailRunner(),
+            apply_linux_bridge=True,
+        )
+        res = chk.check_topology(topology_id=tid, node_id="n-lx")
+        assert res.healthy is False
+        assert any(i.startswith("linux:") and "bridge" in i for i in res.issues)
+
+    def test_linux_topology_healthy_when_ip_reports_bridge_ok(self, topo_session: Session) -> None:
+        gw, pfx = "10.77.61.1", 24
+
+        class GoodRunner:
+            def run(self, cmd: list[str]) -> str:
+                if cmd[:4] == ["ip", "link", "show", "dev"]:
+                    return (
+                        "3: br-ok: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
+                        "qdisc noqueue state UP mode DEFAULT group default\n"
+                    )
+                if cmd[:6] == ["ip", "-o", "-4", "addr", "show", "dev"]:
+                    return f"3: br-ok    inet {gw}/{pfx} brd 10.77.61.255 scope global br-ok\n"
+                raise AssertionError(f"unexpected cmd: {cmd}")
+
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.61.0/24", "gateway_ip": gw, "bridge_name": "br-ok"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-ok")
+        chk = DbTopologyAdapter(
+            topo_session,
+            command_runner=GoodRunner(),
+            apply_linux_bridge=True,
+        )
+        res = chk.check_topology(topology_id=tid, node_id="n-ok")
+        assert res.healthy is True
+        assert res.issues == ()
+
 
 class TestCheckAttachment:
     def test_healthy_after_attach(self, topo_session: Session) -> None:
@@ -615,3 +665,69 @@ class TestCheckAttachment:
         res = adapter.check_attachment(topology_id=tid, node_id="n1", workspace_id=31)
         assert res.healthy is False
         assert any("lease" in i or "match" in i for i in res.issues)
+
+    def test_linux_attachment_issues_when_host_veth_missing(self, topo_session: Session) -> None:
+        class FailRunner:
+            def run(self, cmd: list[str]) -> str:
+                raise RuntimeError("not found")
+
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.62.0/24", "gateway_ip": "10.77.62.1", "bridge_name": "br-v"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=62)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=62,
+            container_id="c62",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        chk = DbTopologyAdapter(
+            topo_session,
+            command_runner=FailRunner(),
+            apply_linux_attachment=True,
+        )
+        res = chk.check_attachment(topology_id=tid, node_id="n1", workspace_id=62)
+        assert res.healthy is False
+        assert any(i.startswith("linux:") and "veth" in i for i in res.issues)
+
+    def test_linux_attachment_healthy_when_ip_shows_veth_on_bridge(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.63.0/24", "gateway_ip": "10.77.63.1", "bridge_name": "br-veth"},
+        )
+        host_if, _ = _veth_pair_names(tid, "n1", 63)
+
+        class GoodRunner:
+            def run(self, cmd: list[str]) -> str:
+                if cmd[:4] == ["ip", "link", "show", "dev"]:
+                    if cmd[4] == host_if:
+                        return (
+                            f"9: {host_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
+                            f"qdisc noqueue master br-veth state UP mode DEFAULT group default\n"
+                        )
+                raise AssertionError(f"unexpected cmd: {cmd}")
+
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=63)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=63,
+            container_id="c63",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        chk = DbTopologyAdapter(
+            topo_session,
+            command_runner=GoodRunner(),
+            apply_linux_attachment=True,
+        )
+        res = chk.check_attachment(topology_id=tid, node_id="n1", workspace_id=63)
+        assert res.healthy is True
+        assert res.issues == ()

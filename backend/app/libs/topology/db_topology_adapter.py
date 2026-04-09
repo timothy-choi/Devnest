@@ -9,6 +9,10 @@ disabled via ``apply_linux_bridge=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_B
 
 ``detach_workspace`` removes the host veth leg when Linux attachment is enabled (same flag/env);
 otherwise it updates attachment DB state only. IP leases are not released (V1).
+
+``check_topology`` / ``check_attachment`` append ``linux: …`` issues when the corresponding
+``apply_linux_*`` flag is enabled (see env ``DEVNEST_TOPOLOGY_SKIP_LINUX_*``); otherwise they
+evaluate persisted state only. Issue strings prefixed with ``db:`` describe control-plane rows.
 """
 
 from __future__ import annotations
@@ -689,27 +693,61 @@ class DbTopologyAdapter(TopologyAdapter):
             return CheckTopologyResult(
                 healthy=False,
                 status=TopologyRuntimeStatus.FAILED,
-                issues=("topology runtime not found for this topology and node",),
+                issues=("db: topology runtime not found for this topology and node",),
                 topology_runtime_id=None,
                 bridge_name=None,
                 cidr=None,
                 gateway_ip=None,
             )
-        issues: list[str] = []
+        db_issues: list[str] = []
         if not (row.bridge_name and str(row.bridge_name).strip()):
-            issues.append("bridge_name is not set")
+            db_issues.append("db: bridge_name is not set")
         if not (row.cidr and str(row.cidr).strip()):
-            issues.append("cidr is not set")
+            db_issues.append("db: cidr is not set")
         if not (row.gateway_ip and str(row.gateway_ip).strip()):
-            issues.append("gateway_ip is not set")
+            db_issues.append("db: gateway_ip is not set")
         if row.status != TopologyRuntimeStatus.READY:
-            issues.append(f"runtime status is {row.status.value}, expected READY for V1 healthy")
+            db_issues.append(
+                f"db: runtime status is {row.status.value}, expected READY for V1 healthy",
+            )
         assert row.topology_runtime_id is not None
+
+        linux_issues: list[str] = []
+        if self._apply_linux_bridge:
+            from .system.bridge_ops import (
+                check_bridge_exists,
+                check_bridge_has_ipv4_address,
+                check_bridge_link_up,
+            )
+            from .system.command_runner import CommandRunner
+
+            r = self._command_runner or CommandRunner()
+            bn = str(row.bridge_name).strip() if row.bridge_name else ""
+            if bn:
+                try:
+                    if not check_bridge_exists(bn, runner=r):
+                        linux_issues.append("linux: bridge network device not found on host")
+                    elif not check_bridge_link_up(bn, runner=r):
+                        linux_issues.append("linux: bridge interface is not UP")
+                    elif row.cidr and str(row.cidr).strip() and row.gateway_ip and str(row.gateway_ip).strip():
+                        if not check_bridge_has_ipv4_address(
+                            bn,
+                            str(row.gateway_ip).strip(),
+                            str(row.cidr).strip(),
+                            runner=r,
+                        ):
+                            linux_issues.append(
+                                "linux: bridge lacks expected IPv4/gateway address from topology runtime",
+                            )
+                except ValueError as e:
+                    linux_issues.append(f"linux: bridge check skipped or invalid ({e})")
+
+        issues = tuple(db_issues + linux_issues)
         healthy = len(issues) == 0
         return CheckTopologyResult(
             healthy=healthy,
             status=row.status,
-            issues=tuple(issues),
+            issues=issues,
             topology_runtime_id=row.topology_runtime_id,
             bridge_name=row.bridge_name,
             cidr=row.cidr,
@@ -734,20 +772,22 @@ class DbTopologyAdapter(TopologyAdapter):
             return CheckAttachmentResult(
                 healthy=False,
                 status=TopologyAttachmentStatus.DETACHED,
-                issues=("topology attachment not found",),
+                issues=("db: topology attachment not found",),
                 attachment_id=None,
             )
-        issues: list[str] = []
+        db_issues: list[str] = []
         if att.status != TopologyAttachmentStatus.ATTACHED:
-            issues.append(f"attachment status is {att.status.value}, expected ATTACHED for healthy V1")
+            db_issues.append(
+                f"db: attachment status is {att.status.value}, expected ATTACHED for healthy V1",
+            )
         if not (att.container_id and str(att.container_id).strip()):
-            issues.append("container_id is not set")
+            db_issues.append("db: container_id is not set")
         if not (att.workspace_ip and str(att.workspace_ip).strip()):
-            issues.append("workspace_ip is not set")
+            db_issues.append("db: workspace_ip is not set")
         if not (att.bridge_name and str(att.bridge_name).strip()):
-            issues.append("bridge_name is not set")
+            db_issues.append("db: bridge_name is not set")
         if not (att.gateway_ip and str(att.gateway_ip).strip()):
-            issues.append("gateway_ip is not set")
+            db_issues.append("db: gateway_ip is not set")
 
         alloc_stmt = select(IpAllocation).where(
             IpAllocation.topology_id == topology_id,
@@ -757,12 +797,52 @@ class DbTopologyAdapter(TopologyAdapter):
         )
         alloc = self._session.exec(alloc_stmt).first()
         if alloc is None:
-            issues.append("no active IpAllocation for this workspace")
+            db_issues.append("db: no active IpAllocation for this workspace")
         elif att.workspace_ip and alloc.ip != att.workspace_ip:
-            issues.append("workspace_ip on attachment does not match active lease ip")
+            db_issues.append(
+                "db: workspace_ip on attachment does not match active lease ip",
+            )
 
         ws_ip = att.workspace_ip
         internal = f"{ws_ip}:{WORKSPACE_IDE_CONTAINER_PORT}" if ws_ip else None
+
+        linux_issues: list[str] = []
+        if self._apply_linux_attachment:
+            db_ok_for_link = (
+                att.status == TopologyAttachmentStatus.ATTACHED
+                and (att.container_id and str(att.container_id).strip())
+                and (att.workspace_ip and str(att.workspace_ip).strip())
+                and (att.bridge_name and str(att.bridge_name).strip())
+                and alloc is not None
+                and alloc.ip == att.workspace_ip
+            )
+            if db_ok_for_link:
+                from .system.attachment_ops import (
+                    check_host_veth_enslaved_to_bridge,
+                    check_interface_exists,
+                )
+                from .system.command_runner import CommandRunner
+
+                r = self._command_runner or CommandRunner()
+                host_if = (
+                    str(att.interface_host).strip()
+                    if att.interface_host and str(att.interface_host).strip()
+                    else _veth_pair_names(topology_id, node_id, workspace_id)[0]
+                )
+                brn = str(att.bridge_name).strip()
+                try:
+                    if not check_interface_exists(host_if, runner=r):
+                        linux_issues.append(
+                            "linux: host-side veth for workspace attachment not found on node",
+                        )
+                    elif not check_host_veth_enslaved_to_bridge(host_if, brn, runner=r):
+                        linux_issues.append(
+                            "linux: host veth is not enslaved to expected topology bridge",
+                        )
+                except ValueError as e:
+                    linux_issues.append(f"linux: host interface check failed ({e})")
+
+        issues = tuple(db_issues + linux_issues)
         healthy = len(issues) == 0
         assert att.attachment_id is not None
         return CheckAttachmentResult(
@@ -770,6 +850,6 @@ class DbTopologyAdapter(TopologyAdapter):
             status=att.status,
             workspace_ip=ws_ip,
             internal_endpoint=internal,
-            issues=tuple(issues),
+            issues=issues,
             attachment_id=att.attachment_id,
         )

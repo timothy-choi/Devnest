@@ -109,9 +109,10 @@ class TopologyAdapter(ABC):
     @abstractmethod
     def check_topology(self, *, topology_id: int, node_id: str) -> CheckTopologyResult:
         """
-        Verify topology runtime health from persisted fields (V1: no live Linux probes).
+        Verify topology runtime health: DB/runtime row plus optional live bridge checks (V1).
 
-        Missing runtime yields ``healthy=False`` and issues; no exception for not-found.
+        ``DbTopologyAdapter`` prefixes issues with ``db:`` vs ``linux:`` when Linux checks run.
+        Missing runtime yields ``healthy=False``; no exception for not-found.
 
         Raises:
             TopologyHealthCheckError: Implementation cannot read state (rare).
@@ -126,8 +127,9 @@ class TopologyAdapter(ABC):
         workspace_id: int,
     ) -> CheckAttachmentResult:
         """
-        Verify attachment + active lease consistency from persisted fields (V1: no live probes).
+        Verify attachment health: DB row, lease vs ``workspace_ip``, optional host veth/bridge linkage.
 
+        ``DbTopologyAdapter`` prefixes issues with ``db:`` vs ``linux:`` when Linux checks run.
         Missing attachment yields ``healthy=False``; no exception for not-found.
 
         Raises:

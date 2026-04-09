@@ -11,6 +11,7 @@ All command execution goes through ``CommandRunner`` so higher-level topology co
 from __future__ import annotations
 
 import ipaddress
+import re
 
 from .command_runner import CommandRunner
 
@@ -40,6 +41,64 @@ def check_bridge_exists(bridge_name: str, *, runner: CommandRunner | None = None
         return True
     except RuntimeError:
         return False
+
+
+def check_bridge_link_up(bridge_name: str, *, runner: CommandRunner | None = None) -> bool:
+    """
+    Return True if the device exists and ``ip link`` reports administratively UP.
+
+    Parses ``ip link show dev <name>`` for ``state UP`` (best-effort across iproute2 versions).
+    """
+    br = _validate_linux_ifname(bridge_name)
+    r = runner or CommandRunner()
+    try:
+        out = r.run(["ip", "link", "show", "dev", br])
+    except RuntimeError:
+        return False
+    return bool(re.search(r"\bstate UP\b", out))
+
+
+def check_bridge_has_ipv4_address(
+    bridge_name: str,
+    gateway_ip: str,
+    cidr: str,
+    *,
+    runner: CommandRunner | None = None,
+) -> bool:
+    """
+    Return True if ``ip -4 addr`` shows the gateway with the CIDR prefix length on the bridge.
+
+    Read-only health check aligned with ``ensure_bridge_address`` (IPv4 only).
+    """
+    br = _validate_linux_ifname(bridge_name)
+    r = runner or CommandRunner()
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+        gw = ipaddress.ip_address(gateway_ip.strip())
+    except ValueError:
+        return False
+    if net.version != 4 or not isinstance(gw, ipaddress.IPv4Address) or gw not in net:
+        return False
+    want_if = ipaddress.ip_interface(f"{gw}/{net.prefixlen}")
+    try:
+        out = r.run(["ip", "-o", "-4", "addr", "show", "dev", br])
+    except RuntimeError:
+        return False
+    for line in out.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+        i = parts.index("inet")
+        if i + 1 >= len(parts):
+            continue
+        token = parts[i + 1]
+        try:
+            iface = ipaddress.ip_interface(token)
+        except ValueError:
+            continue
+        if iface.ip == want_if.ip and iface.network.prefixlen == want_if.network.prefixlen:
+            return True
+    return False
 
 
 def ensure_bridge_exists(bridge_name: str, *, runner: CommandRunner | None = None) -> None:

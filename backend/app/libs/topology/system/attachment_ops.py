@@ -70,6 +70,27 @@ def _netns_prefix(netns_ref: str) -> list[str]:
     return ["nsenter", "-n", "-t", pid, "--"]
 
 
+def check_host_veth_enslaved_to_bridge(
+    host_if: str,
+    bridge_name: str,
+    *,
+    runner: CommandRunner | None = None,
+) -> bool:
+    """
+    Return True if ``host_if`` exists on the host and ``ip link`` reports ``master <bridge_name>``.
+
+    Used to verify the host leg of a workspace veth is attached to the topology bridge.
+    """
+    h = _validate_ifname(host_if, label="host_if")
+    br = _validate_ifname(bridge_name, label="bridge_name")
+    r = runner or CommandRunner()
+    try:
+        out = r.run(["ip", "link", "show", "dev", h])
+    except RuntimeError:
+        return False
+    return bool(re.search(rf"\bmaster\s+{re.escape(br)}\b", out))
+
+
 def check_interface_exists(
     ifname: str,
     *,
