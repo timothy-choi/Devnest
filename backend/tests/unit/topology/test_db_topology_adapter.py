@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -79,6 +81,96 @@ class TestEnsureNodeTopology:
         adapter = DbTopologyAdapter(topo_session)
         with pytest.raises(TopologyRuntimeCreateError, match="node_bridge"):
             adapter.ensure_node_topology(topology_id=tid, node_id="n")
+
+
+class TestEnsureNodeTopologyLinuxBridge:
+    """``apply_linux_bridge=True`` bypasses autouse SKIP when passed explicitly."""
+
+    def test_records_degraded_on_bridge_os_error(self, topo_session: Session) -> None:
+        class FailRunner:
+            def run(self, cmd: list[str]) -> str:
+                raise RuntimeError("simulated ip failure")
+
+        tid = _insert_topology(
+            topo_session,
+            spec={
+                "bridge_name": "dnfail1",
+                "cidr": "10.2.0.0/24",
+                "gateway_ip": "10.2.0.1",
+            },
+        )
+        adapter = DbTopologyAdapter(
+            topo_session,
+            command_runner=FailRunner(),
+            apply_linux_bridge=True,
+        )
+        out = adapter.ensure_node_topology(topology_id=tid, node_id="n-fail")
+        assert out.status == TopologyRuntimeStatus.DEGRADED
+        row = topo_session.get(TopologyRuntime, out.topology_runtime_id)
+        assert row is not None
+        assert row.last_error_code == "BRIDGE_OS"
+        assert row.last_error_message is not None
+        assert "simulated" in row.last_error_message
+
+    def test_second_ensure_still_syncs_bridge(self, topo_session: Session) -> None:
+        calls: list[list[str]] = []
+
+        class RecRunner:
+            def run(self, cmd: list[str]) -> str:
+                calls.append(list(cmd))
+                return ""
+
+        tid = _insert_topology(
+            topo_session,
+            spec={
+                "bridge_name": "dnidmp1",
+                "cidr": "10.3.0.0/24",
+                "gateway_ip": "10.3.0.1",
+            },
+        )
+        adapter = DbTopologyAdapter(
+            topo_session,
+            command_runner=RecRunner(),
+            apply_linux_bridge=True,
+        )
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-dup")
+        n1 = len(calls)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-dup")
+        assert len(calls) > n1
+
+    def test_incomplete_runtime_degraded_without_ip(self, topo_session: Session) -> None:
+        class FailRunner:
+            def run(self, cmd: list[str]) -> str:
+                raise AssertionError(f"unexpected ip call: {cmd}")
+
+        tid = _insert_topology(topo_session)
+        now = datetime.now(timezone.utc)
+        row = TopologyRuntime(
+            topology_id=tid,
+            node_id="bad",
+            status=TopologyRuntimeStatus.READY,
+            bridge_name="brincompl",
+            cidr="10.0.0.0/24",
+            gateway_ip=None,
+            managed_by_agent=True,
+            created_at=now,
+            updated_at=now,
+        )
+        topo_session.add(row)
+        topo_session.commit()
+        topo_session.refresh(row)
+
+        adapter = DbTopologyAdapter(
+            topo_session,
+            command_runner=FailRunner(),
+            apply_linux_bridge=True,
+        )
+        out = adapter.ensure_node_topology(topology_id=tid, node_id="bad")
+        assert out.status == TopologyRuntimeStatus.DEGRADED
+        assert out.topology_runtime_id == row.topology_runtime_id
+        r2 = topo_session.get(TopologyRuntime, row.topology_runtime_id)
+        assert r2 is not None
+        assert r2.last_error_code == "INCOMPLETE_RUNTIME"
 
 
 class TestAllocateWorkspaceIP:

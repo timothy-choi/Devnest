@@ -1,13 +1,16 @@
 """
-DB-backed ``TopologyAdapter`` (V1): control-plane state for node bridge, IP leases, attachments.
+DB-backed ``TopologyAdapter`` (V1): node bridge + control-plane state for IP leases and attachments.
 
-Linux bridge/iptables and ``netns_ref`` consumption are extension points; this slice persists rows only.
+``ensure_node_topology`` applies node-local Linux bridge setup (see ``system.bridge_ops``) unless
+disabled via ``apply_linux_bridge=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE=1``.
+Attachment / netns work remains separate.
 """
 
 from __future__ import annotations
 
 import hashlib
 import ipaddress
+import os
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select
@@ -97,7 +100,8 @@ def _node_bridge_plan(topology: Topology, node_id: str) -> tuple[str, str, str]:
         gateway_ip = str(hosts[0])
     bridge_raw = spec.get("bridge_name")
     if isinstance(bridge_raw, str) and bridge_raw.strip():
-        bridge_name = bridge_raw.strip()[:64]
+        # Must fit Linux IFNAMSIZ (15 chars); matches ``bridge_ops`` validation.
+        bridge_name = bridge_raw.strip()[:15]
     else:
         bridge_name = _bridge_name_for(topology.topology_id or 0, node_id)
     return bridge_name, cidr, gateway_ip
@@ -141,6 +145,15 @@ def _iter_candidate_workspace_hosts(cidr: str, gateway_ip: str) -> list[ipaddres
     return out
 
 
+def _apply_linux_bridge_env_default() -> bool:
+    """When true, ``ensure_node_topology`` runs ``ip`` bridge setup on the host."""
+    return os.environ.get("DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE", "").lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 class DbTopologyAdapter(TopologyAdapter):
     """
     Persist ``TopologyRuntime``, ``IpAllocation``, and ``TopologyAttachment`` for V1 node_bridge.
@@ -148,8 +161,80 @@ class DbTopologyAdapter(TopologyAdapter):
     Pass a request-scoped or unit-of-work ``Session``; each public method commits on success.
     """
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        command_runner: "CommandRunner | None" = None,
+        apply_linux_bridge: bool | None = None,
+    ) -> None:
         self._session = session
+        self._command_runner = command_runner
+        self._apply_linux_bridge = (
+            apply_linux_bridge if apply_linux_bridge is not None else _apply_linux_bridge_env_default()
+        )
+
+    def _sync_linux_node_bridge(self, row: TopologyRuntime) -> None:
+        """
+        Ensure bridge exists, is up, and has gateway/cidr address; update row status and error fields.
+
+        On failure: ``DEGRADED`` + ``last_error_*`` (still commits). On success: ``READY`` and clears errors.
+        """
+        from .system.bridge_ops import ensure_bridge_address, ensure_bridge_exists, ensure_bridge_up
+        from .system.command_runner import CommandRunner
+
+        now = datetime.now(timezone.utc)
+        runner = self._command_runner or CommandRunner()
+
+        if not self._apply_linux_bridge:
+            row.status = TopologyRuntimeStatus.READY
+            row.last_error_code = None
+            row.last_error_message = None
+            row.last_checked_at = now
+            row.updated_at = now
+            self._session.add(row)
+            self._session.commit()
+            self._session.refresh(row)
+            return
+
+        br, cidr, gw = row.bridge_name, row.cidr, row.gateway_ip
+        if not (br and str(br).strip() and cidr and str(cidr).strip() and gw and str(gw).strip()):
+            row.status = TopologyRuntimeStatus.DEGRADED
+            row.last_error_code = "INCOMPLETE_RUNTIME"
+            row.last_error_message = "topology runtime missing bridge_name, cidr, or gateway_ip"
+            row.last_checked_at = now
+            row.updated_at = now
+            self._session.add(row)
+            self._session.commit()
+            self._session.refresh(row)
+            return
+
+        try:
+            ensure_bridge_exists(br, runner=runner)
+            ensure_bridge_up(br, runner=runner)
+            ensure_bridge_address(br, str(gw).strip(), str(cidr).strip(), runner=runner)
+        except ValueError as e:
+            row.status = TopologyRuntimeStatus.DEGRADED
+            row.last_error_code = "BRIDGE_CONFIG"
+            row.last_error_message = str(e)[:2048]
+        except RuntimeError as e:
+            row.status = TopologyRuntimeStatus.DEGRADED
+            row.last_error_code = "BRIDGE_OS"
+            row.last_error_message = str(e)[:2048]
+        else:
+            row.status = TopologyRuntimeStatus.READY
+            row.last_error_code = None
+            row.last_error_message = None
+
+        row.last_checked_at = now
+        row.updated_at = now
+        self._session.add(row)
+        try:
+            self._session.commit()
+        except Exception as e:
+            self._session.rollback()
+            raise TopologyRuntimeCreateError(f"failed to persist topology runtime after bridge sync: {e}") from e
+        self._session.refresh(row)
 
     def ensure_node_topology(self, *, topology_id: int, node_id: str) -> EnsureNodeTopologyResult:
         if not node_id or not node_id.strip():
@@ -164,6 +249,7 @@ class DbTopologyAdapter(TopologyAdapter):
         )
         existing = self._session.exec(stmt).first()
         if existing is not None:
+            self._sync_linux_node_bridge(existing)
             return _runtime_to_ensure_result(existing)
 
         try:
@@ -193,6 +279,7 @@ class DbTopologyAdapter(TopologyAdapter):
             raise TopologyRuntimeCreateError(f"failed to persist topology runtime: {e}") from e
         self._session.refresh(row)
         assert row.topology_runtime_id is not None
+        self._sync_linux_node_bridge(row)
         return _runtime_to_ensure_result(row)
 
     def allocate_workspace_ip(

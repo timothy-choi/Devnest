@@ -32,7 +32,7 @@ class TopologyAdapter(ABC):
     ``{workspace_ip}:8080`` (workspace IDE). Implementations may persist via ``models`` tables;
     callers own orchestration order: ensure runtime → allocate IP → attach → probes.
 
-    This ABC defines contracts only; no Linux bridge/iptables execution lives here.
+    This ABC defines contracts only; concrete adapters may perform node-local bridge setup (V1).
     """
 
     @abstractmethod
