@@ -50,7 +50,7 @@ class DetachWorkspaceResult:
 
 @dataclass(frozen=True)
 class CheckTopologyResult:
-    """Outcome of ``check_topology``; ``healthy`` is False when runtime is missing, incomplete, or not READY."""
+    """Outcome of ``check_topology``; ``healthy`` is False when ``issues`` is non-empty (DB and/or live bridge)."""
 
     healthy: bool
     status: TopologyRuntimeStatus
@@ -63,7 +63,7 @@ class CheckTopologyResult:
 
 @dataclass(frozen=True)
 class CheckAttachmentResult:
-    """Outcome of ``check_attachment``."""
+    """Outcome of ``check_attachment``; ``healthy`` is False when ``issues`` is non-empty (DB and/or live veth)."""
 
     healthy: bool
     status: TopologyAttachmentStatus

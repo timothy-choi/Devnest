@@ -227,6 +227,21 @@ class TestAllocateWorkspaceIP:
         with pytest.raises(TopologyRuntimeNotFoundError):
             adapter.allocate_workspace_ip(topology_id=tid, node_id="missing", workspace_id=1)
 
+    def test_raises_when_runtime_not_ready(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.88.0/24", "gateway_ip": "10.77.88.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        out = adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        row = topo_session.get(TopologyRuntime, out.topology_runtime_id)
+        assert row is not None
+        row.status = TopologyRuntimeStatus.DEGRADED
+        topo_session.add(row)
+        topo_session.commit()
+        with pytest.raises(WorkspaceIPAllocationError, match="not READY"):
+            adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=1)
+
     def test_exhaustion_when_only_one_host_available(self, topo_session: Session) -> None:
         tid = _insert_topology(
             topo_session,

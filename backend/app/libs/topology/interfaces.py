@@ -58,7 +58,7 @@ class TopologyAdapter(ABC):
 
         Raises:
             TopologyRuntimeNotFoundError: Runtime not present; caller should run ``ensure_node_topology`` first.
-            WorkspaceIPAllocationError: Pool exhausted or lease conflict.
+            WorkspaceIPAllocationError: Runtime not READY, pool exhausted, or lease conflict.
         """
 
     @abstractmethod

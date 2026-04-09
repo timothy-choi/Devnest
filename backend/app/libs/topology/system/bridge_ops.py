@@ -171,7 +171,7 @@ def ensure_bridge_address(
     except ValueError as e:
         raise ValueError(f"invalid cidr: {cidr!r}") from e
     if net.version != 4:
-        raise ValueError("V1 bridge ops support IPv4 CIDR only")
+        raise ValueError("V1 bridge ops only support IPv4 CIDR")
 
     try:
         ip = ipaddress.ip_address(gateway_ip)

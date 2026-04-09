@@ -361,6 +361,11 @@ class DbTopologyAdapter(TopologyAdapter):
             raise TopologyRuntimeNotFoundError(
                 f"no topology runtime for topology_id={topology_id} node_id={node_id!r}",
             )
+        if runtime.status != TopologyRuntimeStatus.READY:
+            raise WorkspaceIPAllocationError(
+                f"topology runtime is not READY (status={runtime.status.value}); "
+                "cannot allocate workspace IP until bridge/sync is healthy",
+            )
         if not runtime.cidr or not runtime.gateway_ip:
             raise WorkspaceIPAllocationError("topology runtime missing cidr or gateway_ip")
         alloc_stmt = select(IpAllocation).where(
