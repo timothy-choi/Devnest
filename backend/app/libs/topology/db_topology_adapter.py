@@ -301,6 +301,33 @@ def _pick_first_free_host(
     return None
 
 
+def _runtime_consistency_issues(*, cidr: str | None, gateway_ip: str | None) -> list[str]:
+    issues: list[str] = []
+    if not (cidr and str(cidr).strip()):
+        return issues
+    try:
+        net_any = ipaddress.ip_network(str(cidr).strip(), strict=False)
+    except ValueError as e:
+        issues.append(f"runtime: cidr is invalid ({e})")
+        return issues
+    if not isinstance(net_any, ipaddress.IPv4Network):
+        issues.append("runtime: cidr is not IPv4")
+        return issues
+
+    if gateway_ip and str(gateway_ip).strip():
+        try:
+            g_any = ipaddress.ip_address(str(gateway_ip).strip())
+        except ValueError as e:
+            issues.append(f"runtime: gateway_ip is invalid ({e})")
+            return issues
+        if not isinstance(g_any, ipaddress.IPv4Address):
+            issues.append("runtime: gateway_ip is not IPv4")
+            return issues
+        if g_any not in net_any:
+            issues.append("runtime: gateway_ip is not within cidr")
+    return issues
+
+
 def _apply_linux_bridge_env_default() -> bool:
     """When true, ``ensure_node_topology`` runs ``ip`` bridge setup on the host."""
     return os.environ.get("DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE", "").lower() not in (
@@ -457,6 +484,18 @@ class DbTopologyAdapter(TopologyAdapter):
         spec_cidr, spec_gateway_ip, bridge_name = _node_bridge_plan(topo, node_id)
         now = datetime.now(timezone.utc)
 
+        # Idempotency fast-path: if the runtime row is already complete, keep it stable and avoid DB writes.
+        if existing is not None and (
+            existing.bridge_name
+            and str(existing.bridge_name).strip()
+            and existing.cidr
+            and str(existing.cidr).strip()
+            and existing.gateway_ip
+            and str(existing.gateway_ip).strip()
+        ):
+            self._sync_linux_node_bridge(existing)
+            return _runtime_to_ensure_result(existing)
+
         # (Re)assign CIDR/gateway if missing; otherwise keep stable.
         for attempt in range(_ENSURE_NODE_CIDR_MAX_ATTEMPTS):
             try:
@@ -484,15 +523,21 @@ class DbTopologyAdapter(TopologyAdapter):
                     )
                     self._session.add(row)
                 else:
+                    changed = False
                     if not (existing.bridge_name and str(existing.bridge_name).strip()):
                         existing.bridge_name = bridge_name
+                        changed = True
                     if not (existing.cidr and str(existing.cidr).strip()):
                         existing.cidr = cidr
+                        changed = True
                     if not (existing.gateway_ip and str(existing.gateway_ip).strip()):
                         existing.gateway_ip = gateway_ip
-                    existing.updated_at = now
-                    self._session.add(existing)
-                self._session.commit()
+                        changed = True
+                    if changed:
+                        existing.updated_at = now
+                        self._session.add(existing)
+                if self._session.new or self._session.dirty:
+                    self._session.commit()
                 break
             except IntegrityError as exc:
                 # Concurrency safety:
@@ -684,6 +729,7 @@ class DbTopologyAdapter(TopologyAdapter):
             TopologyAttachment.workspace_id == workspace_id,
         )
         att = self._session.exec(att_stmt).first()
+        att_was_new = att is None
 
         internal_endpoint = f"{workspace_ip}:{WORKSPACE_IDE_CONTAINER_PORT}"
         if (
@@ -762,13 +808,26 @@ class DbTopologyAdapter(TopologyAdapter):
         assert att.attachment_id is not None
 
         if not self._apply_linux_attachment:
-            att.status = TopologyAttachmentStatus.ATTACHED
-            att.updated_at = datetime.now(timezone.utc)
-            self._session.add(att)
             try:
+                att.status = TopologyAttachmentStatus.ATTACHED
+                att.updated_at = datetime.now(timezone.utc)
+                self._session.add(att)
                 self._session.commit()
             except Exception as e:
+                # If we can't persist ATTACHED, leave the system retryable:
+                # - mark the attachment FAILED (no dangling ATTACHING row)
+                # - release the IP lease only when this call created the attachment row
                 self._session.rollback()
+                self._attach_failure_best_effort(
+                    topology_id=topology_id,
+                    node_id=node_id,
+                    workspace_id=workspace_id,
+                    attachment_id=att.attachment_id,
+                    interface_host=host_if,
+                    workspace_ip=workspace_ip,
+                    release_ip=att_was_new,
+                    error=f"persist attach failed: {e}",
+                )
                 raise WorkspaceAttachmentError(f"failed to persist topology attachment: {e}") from e
             self._session.refresh(att)
             return AttachWorkspaceResult(
@@ -791,24 +850,38 @@ class DbTopologyAdapter(TopologyAdapter):
                 netns_ref=netns_clean,
             )
         except (RuntimeError, ValueError) as e:
-            fail_at = datetime.now(timezone.utc)
-            att.status = TopologyAttachmentStatus.FAILED
-            att.updated_at = fail_at
-            self._session.add(att)
-            try:
-                self._session.commit()
-            except Exception as ce:
-                self._session.rollback()
-                raise WorkspaceAttachmentError(f"failed to persist attachment failure state: {ce}") from ce
+            self._session.rollback()
+            self._attach_failure_best_effort(
+                topology_id=topology_id,
+                node_id=node_id,
+                workspace_id=workspace_id,
+                attachment_id=att.attachment_id,
+                interface_host=host_if,
+                workspace_ip=workspace_ip,
+                release_ip=att_was_new,
+                error=f"linux attach failed: {e}",
+            )
             raise WorkspaceAttachmentError(f"linux attach failed: {e}") from e
 
-        att.status = TopologyAttachmentStatus.ATTACHED
-        att.updated_at = datetime.now(timezone.utc)
-        self._session.add(att)
         try:
+            att.status = TopologyAttachmentStatus.ATTACHED
+            att.updated_at = datetime.now(timezone.utc)
+            self._session.add(att)
             self._session.commit()
         except Exception as e:
+            # Linux attach succeeded but DB update failed. Best-effort rollback so the system is retryable:
+            # remove host veth, mark FAILED, and release IP if this call created the attachment row.
             self._session.rollback()
+            self._attach_failure_best_effort(
+                topology_id=topology_id,
+                node_id=node_id,
+                workspace_id=workspace_id,
+                attachment_id=att.attachment_id,
+                interface_host=host_if,
+                workspace_ip=workspace_ip,
+                release_ip=att_was_new,
+                error=f"persist attach failed after linux wiring: {e}",
+            )
             raise WorkspaceAttachmentError(f"failed to persist topology attachment: {e}") from e
         self._session.refresh(att)
         return AttachWorkspaceResult(
@@ -818,6 +891,60 @@ class DbTopologyAdapter(TopologyAdapter):
             gateway_ip=runtime.gateway_ip,
             internal_endpoint=internal_endpoint,
         )
+
+    def _attach_failure_best_effort(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+        attachment_id: int,
+        interface_host: str | None,
+        workspace_ip: str,
+        release_ip: bool,
+        error: str,
+    ) -> None:
+        """Best-effort rollback for attach failures after ATTACHING is persisted."""
+        # 1) Best-effort host veth cleanup (idempotent).
+        if self._apply_linux_attachment:
+            try:
+                self._linux_detach_host_veth(
+                    topology_id=topology_id,
+                    node_id=node_id,
+                    workspace_id=workspace_id,
+                    interface_host=interface_host,
+                )
+            except Exception:
+                pass
+
+        # 2) Mark attachment FAILED so we never leave ATTACHING stuck.
+        try:
+            att = self._session.get(TopologyAttachment, attachment_id)
+            if att is not None:
+                att.status = TopologyAttachmentStatus.FAILED
+                att.updated_at = datetime.now(timezone.utc)
+                self._session.add(att)
+                self._session.commit()
+        except Exception:
+            self._session.rollback()
+
+        # 3) Release IP lease if this call created the attachment and never completed.
+        if not release_ip:
+            return
+        try:
+            alloc_stmt = select(IpAllocation).where(
+                IpAllocation.topology_id == topology_id,
+                IpAllocation.node_id == node_id,
+                IpAllocation.workspace_id == workspace_id,
+                IpAllocation.released_at.is_(None),  # type: ignore[union-attr]
+            )
+            alloc = self._session.exec(alloc_stmt).first()
+            if alloc is not None and (alloc.ip or "") == workspace_ip:
+                alloc.released_at = datetime.now(timezone.utc)
+                self._session.add(alloc)
+                self._session.commit()
+        except Exception:
+            self._session.rollback()
 
     def _linux_detach_host_veth(
         self,
@@ -906,14 +1033,6 @@ class DbTopologyAdapter(TopologyAdapter):
             raise TopologyDeleteError("node_id is required")
         node_id = node_id.strip()[:128]
 
-        rt_stmt = select(TopologyRuntime).where(
-            TopologyRuntime.topology_id == topology_id,
-            TopologyRuntime.node_id == node_id,
-        )
-        runtime = self._session.exec(rt_stmt).first()
-        if runtime is None:
-            return
-
         blocking_attachment = select(TopologyAttachment).where(
             TopologyAttachment.topology_id == topology_id,
             TopologyAttachment.node_id == node_id,
@@ -924,6 +1043,25 @@ class DbTopologyAdapter(TopologyAdapter):
                 "cannot delete topology runtime: non-DETACHED attachments remain "
                 "(detach workspaces first)",
             )
+
+        rt_stmt = select(TopologyRuntime).where(
+            TopologyRuntime.topology_id == topology_id,
+            TopologyRuntime.node_id == node_id,
+        )
+        runtime = self._session.exec(rt_stmt).first()
+        if runtime is None:
+            # Idempotent cleanup: if only DETACHED rows remain, remove them (no IP state touched).
+            att_delete_stmt = select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == topology_id,
+                TopologyAttachment.node_id == node_id,
+            )
+            for att in self._session.exec(att_delete_stmt).all():
+                self._session.delete(att)
+            try:
+                self._session.commit()
+            except Exception:
+                self._session.rollback()
+            return
 
         bridge_name = str(runtime.bridge_name).strip() if runtime.bridge_name else ""
         if self._apply_linux_bridge and bridge_name:
@@ -980,6 +1118,7 @@ class DbTopologyAdapter(TopologyAdapter):
                 f"db: runtime status is {row.status.value}, expected READY for V1 healthy",
             )
         assert row.topology_runtime_id is not None
+        runtime_issues = _runtime_consistency_issues(cidr=row.cidr, gateway_ip=row.gateway_ip)
 
         linux_issues: list[str] = []
         if self._apply_linux_bridge:
@@ -1012,6 +1151,8 @@ class DbTopologyAdapter(TopologyAdapter):
                     linux_issues.append(f"linux: bridge check skipped or invalid ({e})")
 
         issues = tuple(db_issues + linux_issues)
+        # Keep stable ordering: DB -> runtime consistency -> linux
+        issues = tuple(db_issues + runtime_issues + linux_issues)
         healthy = len(issues) == 0
         return CheckTopologyResult(
             healthy=healthy,
@@ -1072,6 +1213,34 @@ class DbTopologyAdapter(TopologyAdapter):
                 "db: workspace_ip on attachment does not match active lease ip",
             )
 
+        # Runtime consistency checks (do not require Linux access).
+        runtime_stmt = select(TopologyRuntime).where(
+            TopologyRuntime.topology_id == topology_id,
+            TopologyRuntime.node_id == node_id,
+        )
+        runtime = self._session.exec(runtime_stmt).first()
+        runtime_issues: list[str] = []
+        if runtime is None:
+            runtime_issues.append("runtime: topology runtime not found for this node")
+        else:
+            runtime_issues.extend(_runtime_consistency_issues(cidr=runtime.cidr, gateway_ip=runtime.gateway_ip))
+            if (
+                att.workspace_ip
+                and runtime.cidr
+                and str(runtime.cidr).strip()
+                and not any(i.startswith("runtime: cidr is") for i in runtime_issues)
+            ):
+                try:
+                    net_any = ipaddress.ip_network(str(runtime.cidr).strip(), strict=False)
+                    ip_any = ipaddress.ip_address(str(att.workspace_ip).strip())
+                    if isinstance(net_any, ipaddress.IPv4Network) and isinstance(ip_any, ipaddress.IPv4Address):
+                        if ip_any not in net_any:
+                            runtime_issues.append("runtime: workspace_ip is not within runtime cidr")
+                    else:
+                        runtime_issues.append("runtime: workspace_ip/cidr family mismatch")
+                except ValueError as e:
+                    runtime_issues.append(f"runtime: workspace_ip/cidr validation failed ({e})")
+
         ws_ip = att.workspace_ip
         internal = f"{ws_ip}:{WORKSPACE_IDE_CONTAINER_PORT}" if ws_ip else None
 
@@ -1111,7 +1280,7 @@ class DbTopologyAdapter(TopologyAdapter):
                 except ValueError as e:
                     linux_issues.append(f"linux: host interface check failed ({e})")
 
-        issues = tuple(db_issues + linux_issues)
+        issues = tuple(db_issues + runtime_issues + linux_issues)
         healthy = len(issues) == 0
         assert att.attachment_id is not None
         return CheckAttachmentResult(

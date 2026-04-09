@@ -6,6 +6,7 @@ See ``README.md`` for host requirements. Does not publish workspace IDE to a fix
 
 from __future__ import annotations
 
+import ipaddress
 import subprocess
 import uuid
 
@@ -81,6 +82,63 @@ def test_ensure_node_topology_creates_bridge_on_host(
         assert exists, f"bridge {bridge!r} missing on host after ensure_node_topology"
     finally:
         _force_cleanup_node_bridge(linux_topology_adapter, tid, node_id, bridge)
+
+
+def test_ensure_node_topology_auto_assigns_node_subnet_and_gateway(
+    linux_net_admin_or_skip: None,
+    linux_topology_adapter,
+    topology_sqlite_session: Session,
+) -> None:
+    """
+    With no spec cidr/gateway, Topology V1 auto-allocates a /20 from 10.128.0.0/9 and gateway is first usable.
+    """
+    bridge = f"b{uuid.uuid4().hex[:6]}"
+    tid = seed_topology(topology_sqlite_session, spec={"bridge_name": bridge})
+    node_id = f"node-{uuid.uuid4().hex[:8]}"
+    try:
+        out = linux_topology_adapter.ensure_node_topology(topology_id=tid, node_id=node_id)
+        assert out.status == TopologyRuntimeStatus.READY
+        assert out.cidr == "10.128.0.0/20"
+        assert out.gateway_ip == "10.128.0.1"
+        net = ipaddress.ip_network(out.cidr, strict=False)
+        assert ipaddress.ip_address(out.gateway_ip) in net
+        exists, _out = ip_link_show_dev(out.bridge_name or bridge)
+        assert exists
+    finally:
+        _force_cleanup_node_bridge(linux_topology_adapter, tid, node_id, bridge)
+
+
+def test_ensure_node_topology_auto_allocates_distinct_subnets_per_node(
+    linux_net_admin_or_skip: None,
+    linux_topology_adapter,
+    topology_sqlite_session: Session,
+) -> None:
+    tid = seed_topology(topology_sqlite_session)
+    node_a = f"node-{uuid.uuid4().hex[:6]}-a"
+    node_b = f"node-{uuid.uuid4().hex[:6]}-b"
+    # Best-effort cleanup uses the bridge from runtime; we still try to clean both nodes.
+    a = None
+    b = None
+    try:
+        a = linux_topology_adapter.ensure_node_topology(topology_id=tid, node_id=node_a)
+        b = linux_topology_adapter.ensure_node_topology(topology_id=tid, node_id=node_b)
+        assert a.cidr != b.cidr
+        assert a.gateway_ip != b.gateway_ip
+        assert a.cidr == "10.128.0.0/20"
+        assert b.cidr == "10.128.16.0/20"
+        ok_a, _ = ip_link_show_dev(str(a.bridge_name).strip())
+        ok_b, _ = ip_link_show_dev(str(b.bridge_name).strip())
+        assert ok_a and ok_b
+    finally:
+        # Use bridge names from results for cleanup if we got that far.
+        if a is not None and a.bridge_name:
+            _force_cleanup_node_bridge(linux_topology_adapter, tid, node_a, str(a.bridge_name).strip())
+        else:
+            linux_topology_adapter.delete_topology(topology_id=tid, node_id=node_a)
+        if b is not None and b.bridge_name:
+            _force_cleanup_node_bridge(linux_topology_adapter, tid, node_b, str(b.bridge_name).strip())
+        else:
+            linux_topology_adapter.delete_topology(topology_id=tid, node_id=node_b)
 
 
 def test_allocate_workspace_ip_reuses_lease_and_unique_ips(

@@ -374,6 +374,57 @@ class TestAttachWorkspace:
         assert row is not None
         assert row.container_id == "new-cid"
 
+    def test_attach_persist_failure_marks_failed_and_releases_ip_when_new(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.90.0/24", "gateway_ip": "10.77.90.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session, apply_linux_attachment=False)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=123)
+
+        real_commit = topo_session.commit
+
+        def flaky_commit():
+            # Fail only when we are trying to persist ATTACHED.
+            for obj in list(topo_session.new) + list(topo_session.dirty):
+                if isinstance(obj, TopologyAttachment) and obj.status == TopologyAttachmentStatus.ATTACHED:
+                    raise RuntimeError("simulated commit failure")
+            return real_commit()
+
+        topo_session.commit = flaky_commit  # type: ignore[method-assign]
+        with pytest.raises(WorkspaceAttachmentError, match="failed to persist topology attachment"):
+            adapter.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=123,
+                container_id="cid-x",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip=ip.workspace_ip,
+            )
+
+        # Attachment row should not be left ATTACHING.
+        att = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.node_id == "n1",
+                TopologyAttachment.workspace_id == 123,
+            ),
+        ).first()
+        assert att is not None
+        assert att.status == TopologyAttachmentStatus.FAILED
+
+        # IP lease should be released since attach never completed and attachment was created in this call.
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.node_id == "n1",
+                IpAllocation.workspace_id == 123,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is not None
+
     def test_rejects_mismatched_workspace_ip(self, topo_session: Session) -> None:
         tid = _insert_topology(topo_session)
         adapter = DbTopologyAdapter(topo_session)
@@ -690,6 +741,41 @@ class TestDeleteTopology:
         )
         d_ad.delete_topology(topology_id=tid, node_id="n-rm")
         assert any(c[:4] == ["ip", "link", "del", "dev"] for c in calls)
+
+    def test_delete_idempotent_when_called_twice(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.74.0/24", "gateway_ip": "10.77.74.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        adapter.delete_topology(topology_id=tid, node_id="n1")
+        # Second call should not raise.
+        adapter.delete_topology(topology_id=tid, node_id="n1")
+
+    def test_raises_if_runtime_missing_but_active_attachments_exist(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.75.0/24", "gateway_ip": "10.77.75.1"},
+        )
+        now = datetime.now(timezone.utc)
+        topo_session.add(
+            TopologyAttachment(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=1,
+                container_id="c1",
+                status=TopologyAttachmentStatus.ATTACHED,
+                workspace_ip="10.77.75.11",
+                bridge_name="brx",
+                gateway_ip="10.77.75.1",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        topo_session.commit()
+        with pytest.raises(TopologyDeleteError, match="non-DETACHED"):
+            DbTopologyAdapter(topo_session).delete_topology(topology_id=tid, node_id="n1")
 
 
 class TestCheckTopology:
