@@ -146,7 +146,7 @@ def _gateway_as_address(cidr: str, gateway_ip: str) -> ipaddress.IPv4Address:
 
 
 # Retries after IntegrityError (concurrent allocate on same workspace or same chosen IP).
-_ALLOCATE_IP_MAX_ATTEMPTS = 5
+_ALLOCATE_IP_MAX_ATTEMPTS = 24
 
 
 def _iter_candidate_workspace_hosts(cidr: str, gateway_ip: str) -> list[ipaddress.IPv4Address]:
@@ -161,6 +161,24 @@ def _iter_candidate_workspace_hosts(cidr: str, gateway_ip: str) -> list[ipaddres
             continue
         out.append(h)
     return out
+
+
+def _pick_first_free_host(
+    candidates: list[ipaddress.IPv4Address],
+    used_ips: set[ipaddress.IPv4Address],
+    *,
+    scan_offset: int,
+) -> ipaddress.IPv4Address | None:
+    """Return first unused host in ``candidates``, scanning from ``scan_offset`` (wraps). ``scan_offset`` 0 preserves V1 order."""
+    n = len(candidates)
+    if n == 0:
+        return None
+    offset = scan_offset % n
+    for i in range(n):
+        h = candidates[(offset + i) % n]
+        if h not in used_ips:
+            return h
+    return None
 
 
 def _apply_linux_bridge_env_default() -> bool:
@@ -381,9 +399,11 @@ class DbTopologyAdapter(TopologyAdapter):
                     node_id=node_id,
                     workspace_id=workspace_id,
                     runtime=runtime,
+                    retry_index=attempt,
                 )
             except IntegrityError as exc:
                 self._session.rollback()
+                self._session.expire_all()
                 if attempt + 1 >= _ALLOCATE_IP_MAX_ATTEMPTS:
                     raise WorkspaceIPAllocationError(
                         "IP allocation hit repeated database conflicts (likely concurrent requests); "
@@ -397,6 +417,7 @@ class DbTopologyAdapter(TopologyAdapter):
         node_id: str,
         workspace_id: int,
         runtime: TopologyRuntime,
+        retry_index: int = 0,
     ) -> AllocateWorkspaceIPResult:
         alloc_stmt = select(IpAllocation).where(
             IpAllocation.topology_id == topology_id,
@@ -414,13 +435,18 @@ class DbTopologyAdapter(TopologyAdapter):
             IpAllocation.released_at.is_(None),  # type: ignore[union-attr]
         )
         used_ips = {ipaddress.ip_address(s) for s in self._session.exec(used_stmt).all()}
-        chosen: ipaddress.IPv4Address | None = None
-        for h in candidates:
-            if h not in used_ips:
-                chosen = h
-                break
-        if chosen is None:
+        if not candidates:
             raise WorkspaceIPAllocationError("no free IPv4 addresses in topology CIDR")
+        scan_offset = 0
+        if retry_index > 0:
+            # Spread concurrent retries: otherwise every loser re-picks the same "first free" host.
+            scan_offset = (retry_index * 10_007 + workspace_id * 31 + sum(map(ord, node_id))) % len(
+                candidates,
+            )
+        maybe_chosen = _pick_first_free_host(candidates, used_ips, scan_offset=scan_offset)
+        if maybe_chosen is None:
+            raise WorkspaceIPAllocationError("no free IPv4 addresses in topology CIDR")
+        chosen = maybe_chosen
 
         now = datetime.now(timezone.utc)
         ip_str = str(chosen)
