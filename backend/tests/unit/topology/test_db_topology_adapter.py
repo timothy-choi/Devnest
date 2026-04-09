@@ -212,8 +212,8 @@ class TestAllocateWorkspaceIP:
         adapter.ensure_node_topology(topology_id=tid, node_id="n1")
         w1 = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=1)
         w2 = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=2)
-        assert w1.workspace_ip == "10.77.2.2"
-        assert w2.workspace_ip == "10.77.2.3"
+        assert w1.workspace_ip == "10.77.2.11"
+        assert w2.workspace_ip == "10.77.2.12"
         assert "10.77.2.1" not in (w1.workspace_ip, w2.workspace_ip)
         ips = topo_session.exec(
             select(IpAllocation.ip).where(

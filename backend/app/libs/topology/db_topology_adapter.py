@@ -61,6 +61,10 @@ _V1_MODE = "node_bridge"
 _V1_PARENT_POOL_CIDR = "10.128.0.0/9"
 _V1_CHILD_PREFIXLEN = 20
 
+# Reserve the first N usable host IPs in each runtime CIDR for infra (in addition to the gateway).
+# With the default gateway as the first usable host, this typically makes workspace allocation start at .11.
+_V1_INFRA_RESERVED_USABLE_HOSTS = 10
+
 # Retries after IntegrityError when persisting a runtime CIDR (concurrent ensure calls).
 _ENSURE_NODE_CIDR_MAX_ATTEMPTS = 16
 
@@ -251,16 +255,31 @@ _ALLOCATE_IP_MAX_ATTEMPTS = 24
 
 
 def _iter_candidate_workspace_hosts(cidr: str, gateway_ip: str) -> list[ipaddress.IPv4Address]:
-    """Usable host addresses: network hosts minus gateway (network/broadcast already excluded by .hosts())."""
+    """Workspace host candidates: skip gateway and reserve the first N usable host IPs for infra."""
     net = ipaddress.ip_network(cidr, strict=False)
     gw = _gateway_as_address(cidr, gateway_ip)
     out: list[ipaddress.IPv4Address] = []
+    usable_idx = 0
     for h in net.hosts():
         if not isinstance(h, ipaddress.IPv4Address):
             continue
+        usable_idx += 1
         if h == gw:
             continue
+        # Reserve early usable host IPs (1-based) regardless of which is chosen as gateway.
+        # If the subnet is too small to accommodate the reservation, fall back to "no reservation"
+        # rather than making the pool unusable.
+        if usable_idx <= _V1_INFRA_RESERVED_USABLE_HOSTS:
+            continue
         out.append(h)
+    if not out and usable_idx > 0 and usable_idx <= _V1_INFRA_RESERVED_USABLE_HOSTS:
+        # Retry without infra reservation for tiny CIDRs (/30 etc.), still skipping gateway.
+        for h in net.hosts():
+            if not isinstance(h, ipaddress.IPv4Address):
+                continue
+            if h == gw:
+                continue
+            out.append(h)
     return out
 
 
