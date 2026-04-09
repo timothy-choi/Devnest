@@ -159,9 +159,8 @@ def ensure_bridge_address(
     """
     Ensure the bridge has the gateway IP address for the given CIDR (idempotent best-effort).
 
-    Uses: ``ip addr add <gateway_ip>/<prefixlen> dev <bridge_name>``.
-    If the address already exists, the kernel may return an error containing "File exists";
-    we treat that as success.
+    Uses ``ip -4 addr show`` to skip ``ip addr add`` when the address is already present, and
+    re-checks after add failures (duplicate-address text differs across iproute2 versions).
     """
     br = _validate_linux_ifname(bridge_name)
     r = runner or CommandRunner()
@@ -182,11 +181,13 @@ def ensure_bridge_address(
         raise ValueError(f"gateway_ip {gateway_ip!r} not in cidr {cidr!r}")
 
     addr = f"{ip}/{net.prefixlen}"
+    gw_s = gateway_ip.strip()
+    if check_bridge_has_ipv4_address(br, gw_s, cidr, runner=r):
+        return
     try:
         r.run(["ip", "addr", "add", addr, "dev", br])
-    except RuntimeError as e:
-        # Best-effort idempotency without a separate parse step.
-        if "File exists" in str(e):
+    except RuntimeError:
+        if check_bridge_has_ipv4_address(br, gw_s, cidr, runner=r):
             return
         raise
 
