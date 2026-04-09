@@ -126,6 +126,7 @@ def test_ensure_node_topology_auto_allocates_distinct_subnets_per_node(
         assert a.gateway_ip != b.gateway_ip
         assert a.cidr == "10.128.0.0/20"
         assert b.cidr == "10.128.16.0/20"
+        assert str(a.bridge_name).strip() != str(b.bridge_name).strip()
         ok_a, _ = ip_link_show_dev(str(a.bridge_name).strip())
         ok_b, _ = ip_link_show_dev(str(b.bridge_name).strip())
         assert ok_a and ok_b

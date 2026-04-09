@@ -12,10 +12,13 @@ otherwise it updates attachment DB state only. IP leases are not released (V1).
 
 ``check_topology`` / ``check_attachment`` append ``linux: …`` issues when the corresponding
 ``apply_linux_*`` flag is enabled (see env ``DEVNEST_TOPOLOGY_SKIP_LINUX_*``); otherwise they
-evaluate persisted state only. Issue strings prefixed with ``db:`` describe control-plane rows.
+evaluate persisted state only. Issue prefixes: ``db:`` (rows/fields), ``runtime:`` (CIDR/gateway
+consistency), ``linux:`` (host ``ip`` checks). Unexpected ``RuntimeError`` from ``ip`` is surfaced
+as ``linux:`` issues instead of aborting the check.
 
 ``delete_topology`` removes the ``TopologyRuntime`` row (and node-local attachment rows) when no
-non-``DETACHED`` attachments exist; it optionally deletes the Linux bridge when bridge sync is enabled.
+non-``DETACHED`` attachments exist, commits, then optionally deletes the Linux bridge when bridge sync
+is enabled (so DB state is not lost if bridge removal fails).
 """
 
 from __future__ import annotations
@@ -165,9 +168,19 @@ def _allocate_child_subnet(
     *,
     topology_id: int,
     node_id: str,
+    retry_index: int = 0,
 ) -> ipaddress.IPv4Network:
     used = _list_used_runtime_networks(session, topology_id=topology_id, exclude_node_id=node_id)
-    for child in _iter_pool_child_subnets():
+    children = _iter_pool_child_subnets()
+    n = len(children)
+    if n == 0:
+        raise TopologyRuntimeCreateError(f"parent pool {_V1_PARENT_POOL_CIDR!r} produced no /{_V1_CHILD_PREFIXLEN} children")
+    # Rotate scan only on retry (attempt 0 keeps first-free child for stable defaults).
+    start = 0
+    if retry_index > 0:
+        start = (retry_index * 7919 + topology_id * 17 + sum(map(ord, node_id))) % n
+    for k in range(n):
+        child = children[(start + k) % n]
         if not _net_overlaps_any(child, used):
             return child
     raise TopologyRuntimeCreateError(
@@ -183,6 +196,7 @@ def _choose_runtime_cidr_and_gateway(
     existing: TopologyRuntime | None,
     spec_cidr: str | None,
     spec_gateway_ip: str | None,
+    pool_retry_index: int = 0,
 ) -> tuple[str, str]:
     # 1) Existing runtime with CIDR: reuse (and fill missing gateway if needed).
     if existing is not None and existing.cidr and str(existing.cidr).strip():
@@ -214,7 +228,12 @@ def _choose_runtime_cidr_and_gateway(
         return str(net), str(_first_usable_host(net))
 
     # 3) Auto allocate from parent pool.
-    net = _allocate_child_subnet(session, topology_id=topology_id, node_id=node_id)
+    net = _allocate_child_subnet(
+        session,
+        topology_id=topology_id,
+        node_id=node_id,
+        retry_index=pool_retry_index,
+    )
     if spec_gateway_ip is not None:
         try:
             g = ipaddress.ip_address(spec_gateway_ip)
@@ -224,6 +243,17 @@ def _choose_runtime_cidr_and_gateway(
             raise TopologyRuntimeCreateError(f"gateway_ip {g} not in allocated subnet {net}")
         return str(net), str(g)
     return str(net), str(_first_usable_host(net))
+
+
+def _runtime_row_complete(row: TopologyRuntime) -> bool:
+    return bool(
+        row.bridge_name
+        and str(row.bridge_name).strip()
+        and row.cidr
+        and str(row.cidr).strip()
+        and row.gateway_ip
+        and str(row.gateway_ip).strip()
+    )
 
 
 def _runtime_to_ensure_result(row: TopologyRuntime) -> EnsureNodeTopologyResult:
@@ -485,19 +515,15 @@ class DbTopologyAdapter(TopologyAdapter):
         now = datetime.now(timezone.utc)
 
         # Idempotency fast-path: if the runtime row is already complete, keep it stable and avoid DB writes.
-        if existing is not None and (
-            existing.bridge_name
-            and str(existing.bridge_name).strip()
-            and existing.cidr
-            and str(existing.cidr).strip()
-            and existing.gateway_ip
-            and str(existing.gateway_ip).strip()
-        ):
+        if existing is not None and _runtime_row_complete(existing):
             self._sync_linux_node_bridge(existing)
             return _runtime_to_ensure_result(existing)
 
         # (Re)assign CIDR/gateway if missing; otherwise keep stable.
         for attempt in range(_ENSURE_NODE_CIDR_MAX_ATTEMPTS):
+            existing = self._session.exec(stmt).first()
+            if existing is not None and _runtime_row_complete(existing):
+                break
             try:
                 cidr, gateway_ip = _choose_runtime_cidr_and_gateway(
                     self._session,
@@ -506,6 +532,7 @@ class DbTopologyAdapter(TopologyAdapter):
                     existing=existing,
                     spec_cidr=spec_cidr,
                     spec_gateway_ip=spec_gateway_ip,
+                    pool_retry_index=attempt,
                 )
                 if existing is None:
                     row = TopologyRuntime(
@@ -549,7 +576,6 @@ class DbTopologyAdapter(TopologyAdapter):
                     raise TopologyRuntimeCreateError(
                         "failed to allocate a unique runtime CIDR after repeated DB conflicts",
                     ) from exc
-                existing = self._session.exec(stmt).first()
                 continue
             except TopologyRuntimeCreateError:
                 self._session.rollback()
@@ -558,7 +584,7 @@ class DbTopologyAdapter(TopologyAdapter):
                 self._session.rollback()
                 raise TopologyRuntimeCreateError(f"failed to persist topology runtime: {e}") from e
 
-        row = existing if existing is not None else self._session.exec(stmt).first()
+        row = self._session.exec(stmt).first()
         if row is None:
             raise TopologyRuntimeCreateError("failed to ensure topology runtime row")
         self._session.refresh(row)
@@ -596,12 +622,25 @@ class DbTopologyAdapter(TopologyAdapter):
                     topology_id=topology_id,
                     node_id=node_id,
                     workspace_id=workspace_id,
-                    runtime=runtime,
                     retry_index=attempt,
                 )
             except IntegrityError as exc:
                 self._session.rollback()
                 self._session.expire_all()
+                runtime = self._session.exec(rt_stmt).first()
+                if runtime is None:
+                    raise TopologyRuntimeNotFoundError(
+                        f"no topology runtime for topology_id={topology_id} node_id={node_id!r}",
+                    ) from exc
+                if runtime.status != TopologyRuntimeStatus.READY:
+                    raise WorkspaceIPAllocationError(
+                        f"topology runtime is not READY (status={runtime.status.value}); "
+                        "cannot allocate workspace IP until bridge/sync is healthy",
+                    ) from exc
+                if not runtime.cidr or not runtime.gateway_ip:
+                    raise WorkspaceIPAllocationError(
+                        "topology runtime missing cidr or gateway_ip",
+                    ) from exc
                 if attempt + 1 >= _ALLOCATE_IP_MAX_ATTEMPTS:
                     raise WorkspaceIPAllocationError(
                         "IP allocation hit repeated database conflicts (likely concurrent requests); "
@@ -614,9 +653,27 @@ class DbTopologyAdapter(TopologyAdapter):
         topology_id: int,
         node_id: str,
         workspace_id: int,
-        runtime: TopologyRuntime,
         retry_index: int = 0,
     ) -> AllocateWorkspaceIPResult:
+        # Re-load runtime each attempt so CIDR/gateway reflect DB after rollback/retry.
+        rt_stmt = select(TopologyRuntime).where(
+            TopologyRuntime.topology_id == topology_id,
+            TopologyRuntime.node_id == node_id,
+        )
+        fresh = self._session.exec(rt_stmt).first()
+        if fresh is None:
+            raise TopologyRuntimeNotFoundError(
+                f"no topology runtime for topology_id={topology_id} node_id={node_id!r}",
+            )
+        runtime = fresh
+        if runtime.status != TopologyRuntimeStatus.READY:
+            raise WorkspaceIPAllocationError(
+                f"topology runtime is not READY (status={runtime.status.value}); "
+                "cannot allocate workspace IP until bridge/sync is healthy",
+            )
+        if not runtime.cidr or not runtime.gateway_ip:
+            raise WorkspaceIPAllocationError("topology runtime missing cidr or gateway_ip")
+
         alloc_stmt = select(IpAllocation).where(
             IpAllocation.topology_id == topology_id,
             IpAllocation.node_id == node_id,
@@ -1064,17 +1121,6 @@ class DbTopologyAdapter(TopologyAdapter):
             return
 
         bridge_name = str(runtime.bridge_name).strip() if runtime.bridge_name else ""
-        if self._apply_linux_bridge and bridge_name:
-            from .system.bridge_ops import remove_bridge_if_exists
-            from .system.command_runner import CommandRunner
-
-            r = self._command_runner or CommandRunner()
-            try:
-                remove_bridge_if_exists(bridge_name, runner=r)
-            except ValueError as e:
-                raise TopologyDeleteError(f"cannot delete bridge {bridge_name!r}: {e}") from e
-            except RuntimeError as e:
-                raise TopologyDeleteError(f"linux bridge removal failed: {e}") from e
 
         att_delete_stmt = select(TopologyAttachment).where(
             TopologyAttachment.topology_id == topology_id,
@@ -1088,6 +1134,19 @@ class DbTopologyAdapter(TopologyAdapter):
         except Exception as e:
             self._session.rollback()
             raise TopologyDeleteError(f"failed to persist topology deletion: {e}") from e
+
+        # Remove Linux bridge after DB commit so control-plane state is not lost if bridge removal fails.
+        if self._apply_linux_bridge and bridge_name:
+            from .system.bridge_ops import remove_bridge_if_exists
+            from .system.command_runner import CommandRunner
+
+            r = self._command_runner or CommandRunner()
+            try:
+                remove_bridge_if_exists(bridge_name, runner=r)
+            except ValueError as e:
+                raise TopologyDeleteError(f"cannot delete bridge {bridge_name!r}: {e}") from e
+            except RuntimeError as e:
+                raise TopologyDeleteError(f"linux bridge removal failed: {e}") from e
 
     def check_topology(self, *, topology_id: int, node_id: str) -> CheckTopologyResult:
         node_id = node_id.strip()[:128]
@@ -1149,8 +1208,9 @@ class DbTopologyAdapter(TopologyAdapter):
                             )
                 except ValueError as e:
                     linux_issues.append(f"linux: bridge check skipped or invalid ({e})")
+                except RuntimeError as e:
+                    linux_issues.append(f"linux: bridge check failed ({e})")
 
-        issues = tuple(db_issues + linux_issues)
         # Keep stable ordering: DB -> runtime consistency -> linux
         issues = tuple(db_issues + runtime_issues + linux_issues)
         healthy = len(issues) == 0
@@ -1278,6 +1338,8 @@ class DbTopologyAdapter(TopologyAdapter):
                             "linux: host veth is not enslaved to expected topology bridge",
                         )
                 except ValueError as e:
+                    linux_issues.append(f"linux: host interface check failed ({e})")
+                except RuntimeError as e:
                     linux_issues.append(f"linux: host interface check failed ({e})")
 
         issues = tuple(db_issues + runtime_issues + linux_issues)
