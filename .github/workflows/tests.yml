@@ -133,5 +133,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run system tests
-        run: pytest tests/system -v
+      - name: Run system tests (excluding topology Linux)
+        run: pytest tests/system -v --ignore=tests/system/topology
+
+      - name: Run topology V1 Linux system tests (root for CAP_NET_ADMIN)
+        run: sudo env "PATH=$PATH" pytest tests/system/topology -v -m topology_linux

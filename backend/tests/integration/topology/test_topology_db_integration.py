@@ -1,4 +1,7 @@
-"""Integration tests: topology V1 persistence on PostgreSQL (worker-isolated DB)."""
+"""Integration tests: topology V1 persistence on PostgreSQL (worker-isolated DB).
+
+Live bridge/veth/netns behavior is covered under ``tests/system/topology/`` (Linux + Docker).
+"""
 
 from __future__ import annotations
 
