@@ -26,6 +26,9 @@ class TopologyRuntime(SQLModel, table=True):
     __tablename__ = "topology_runtime"
     __table_args__ = (
         UniqueConstraint("topology_id", "node_id", name="uq_topology_runtime_topology_node"),
+        # V1 safety: ensure a topology doesn't assign the same runtime subnet to two nodes.
+        # (Multiple NULLs are allowed, so this does not constrain partially-populated rows.)
+        UniqueConstraint("topology_id", "cidr", name="uq_topology_runtime_topology_cidr"),
     )
 
     topology_runtime_id: int | None = Field(default=None, primary_key=True)

@@ -56,7 +56,13 @@ from .results import (
 )
 
 _V1_MODE = "node_bridge"
-_DEFAULT_CIDR = "10.77.0.0/24"
+
+# V1 default CIDR allocator: each node gets a stable /20 out of the parent pool.
+_V1_PARENT_POOL_CIDR = "10.128.0.0/9"
+_V1_CHILD_PREFIXLEN = 20
+
+# Retries after IntegrityError when persisting a runtime CIDR (concurrent ensure calls).
+_ENSURE_NODE_CIDR_MAX_ATTEMPTS = 16
 
 
 def _bridge_name_for(topology_id: int, node_id: str) -> str:
@@ -75,9 +81,9 @@ def _spec_mode(spec: dict) -> str:
     return str(m)
 
 
-def _node_bridge_plan(topology: Topology, node_id: str) -> tuple[str, str, str]:
+def _node_bridge_plan(topology: Topology, node_id: str) -> tuple[str | None, str | None, str]:
     """
-    Return (bridge_name, cidr, gateway_ip) for V1 node_bridge.
+    Return (spec_cidr, spec_gateway_ip, bridge_name) for V1 node_bridge.
 
     Optional ``spec_json`` keys: ``bridge_name``, ``cidr``, ``gateway_ip``, ``mode``.
     """
@@ -87,38 +93,133 @@ def _node_bridge_plan(topology: Topology, node_id: str) -> tuple[str, str, str]:
         raise TopologyRuntimeCreateError(
             f"topology V1 supports mode {_V1_MODE!r} only; got {mode!r}",
         )
-    cidr = spec.get("cidr")
-    if not isinstance(cidr, str) or not cidr.strip():
-        cidr = _DEFAULT_CIDR
-    else:
-        cidr = cidr.strip()
-    try:
-        network = ipaddress.ip_network(cidr, strict=False)
-    except ValueError as e:
-        raise TopologyRuntimeCreateError(f"invalid cidr in topology spec: {cidr!r}") from e
-    if network.version != 4:
-        raise TopologyRuntimeCreateError("V1 IP allocation supports IPv4 CIDR only")
-    hosts = list(network.hosts())
-    if not hosts:
-        raise TopologyRuntimeCreateError(f"no usable hosts in CIDR {cidr!r}")
+    cidr_raw = spec.get("cidr")
+    spec_cidr = cidr_raw.strip() if isinstance(cidr_raw, str) and cidr_raw.strip() else None
     gw_raw = spec.get("gateway_ip")
-    if isinstance(gw_raw, str) and gw_raw.strip():
-        try:
-            gw = ipaddress.ip_address(gw_raw.strip())
-        except ValueError as e:
-            raise TopologyRuntimeCreateError(f"invalid gateway_ip in spec: {gw_raw!r}") from e
-        if gw not in network:
-            raise TopologyRuntimeCreateError(f"gateway_ip {gw} not in network {network}")
-        gateway_ip = str(gw)
-    else:
-        gateway_ip = str(hosts[0])
+    spec_gateway_ip = gw_raw.strip() if isinstance(gw_raw, str) and gw_raw.strip() else None
     bridge_raw = spec.get("bridge_name")
     if isinstance(bridge_raw, str) and bridge_raw.strip():
         # Must fit Linux IFNAMSIZ (15 chars); matches ``bridge_ops`` validation.
         bridge_name = bridge_raw.strip()[:15]
     else:
         bridge_name = _bridge_name_for(topology.topology_id or 0, node_id)
-    return bridge_name, cidr, gateway_ip
+    return spec_cidr, spec_gateway_ip, bridge_name
+
+
+def _parse_ipv4_network(*, cidr: str, ctx: str) -> ipaddress.IPv4Network:
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError as e:
+        raise TopologyRuntimeCreateError(f"invalid cidr {ctx}: {cidr!r}") from e
+    if not isinstance(net, ipaddress.IPv4Network):
+        raise TopologyRuntimeCreateError("V1 runtime CIDR must be IPv4")
+    return net
+
+
+def _first_usable_host(net: ipaddress.IPv4Network) -> ipaddress.IPv4Address:
+    for h in net.hosts():
+        if isinstance(h, ipaddress.IPv4Address):
+            return h
+    raise TopologyRuntimeCreateError(f"no usable hosts in CIDR {str(net)!r}")
+
+
+def _list_used_runtime_networks(
+    session: Session,
+    *,
+    topology_id: int,
+    exclude_node_id: str | None = None,
+) -> list[ipaddress.IPv4Network]:
+    stmt = select(TopologyRuntime.cidr, TopologyRuntime.node_id).where(TopologyRuntime.topology_id == topology_id)
+    out: list[ipaddress.IPv4Network] = []
+    for cidr, node in session.exec(stmt).all():
+        if exclude_node_id is not None and node == exclude_node_id:
+            continue
+        if not cidr or not str(cidr).strip():
+            continue
+        try:
+            net_any = ipaddress.ip_network(str(cidr).strip(), strict=False)
+        except ValueError:
+            # Be conservative: if DB contains a malformed CIDR, ignore it for allocation purposes
+            # (it shouldn't happen, but we don't want ensure to crash unrelated nodes).
+            continue
+        if isinstance(net_any, ipaddress.IPv4Network):
+            out.append(net_any)
+    return out
+
+
+def _net_overlaps_any(net: ipaddress.IPv4Network, used: list[ipaddress.IPv4Network]) -> bool:
+    return any(net.overlaps(u) for u in used)
+
+
+def _iter_pool_child_subnets() -> list[ipaddress.IPv4Network]:
+    parent = _parse_ipv4_network(cidr=_V1_PARENT_POOL_CIDR, ctx="for V1 parent pool")
+    return list(parent.subnets(new_prefix=_V1_CHILD_PREFIXLEN))
+
+
+def _allocate_child_subnet(
+    session: Session,
+    *,
+    topology_id: int,
+    node_id: str,
+) -> ipaddress.IPv4Network:
+    used = _list_used_runtime_networks(session, topology_id=topology_id, exclude_node_id=node_id)
+    for child in _iter_pool_child_subnets():
+        if not _net_overlaps_any(child, used):
+            return child
+    raise TopologyRuntimeCreateError(
+        f"no free /{_V1_CHILD_PREFIXLEN} subnets remaining in parent pool {_V1_PARENT_POOL_CIDR!r}",
+    )
+
+
+def _choose_runtime_cidr_and_gateway(
+    session: Session,
+    *,
+    topology_id: int,
+    node_id: str,
+    existing: TopologyRuntime | None,
+    spec_cidr: str | None,
+    spec_gateway_ip: str | None,
+) -> tuple[str, str]:
+    # 1) Existing runtime with CIDR: reuse (and fill missing gateway if needed).
+    if existing is not None and existing.cidr and str(existing.cidr).strip():
+        net = _parse_ipv4_network(cidr=str(existing.cidr).strip(), ctx="on existing runtime")
+        if existing.gateway_ip and str(existing.gateway_ip).strip():
+            gw = str(existing.gateway_ip).strip()
+            g = ipaddress.ip_address(gw)
+            if g not in net:
+                raise TopologyRuntimeCreateError(f"existing gateway_ip {gw!r} not in runtime CIDR {str(net)!r}")
+            return str(net), gw
+        return str(net), str(_first_usable_host(net))
+
+    # 2) Spec CIDR: validate and require non-overlap with other nodes in this topology.
+    if spec_cidr is not None:
+        net = _parse_ipv4_network(cidr=spec_cidr, ctx="in topology spec")
+        used = _list_used_runtime_networks(session, topology_id=topology_id, exclude_node_id=node_id)
+        if _net_overlaps_any(net, used):
+            raise TopologyRuntimeCreateError(
+                f"spec cidr {str(net)!r} conflicts with an existing topology runtime CIDR",
+            )
+        if spec_gateway_ip is not None:
+            try:
+                g = ipaddress.ip_address(spec_gateway_ip)
+            except ValueError as e:
+                raise TopologyRuntimeCreateError(f"invalid gateway_ip in spec: {spec_gateway_ip!r}") from e
+            if g not in net:
+                raise TopologyRuntimeCreateError(f"gateway_ip {g} not in network {net}")
+            return str(net), str(g)
+        return str(net), str(_first_usable_host(net))
+
+    # 3) Auto allocate from parent pool.
+    net = _allocate_child_subnet(session, topology_id=topology_id, node_id=node_id)
+    if spec_gateway_ip is not None:
+        try:
+            g = ipaddress.ip_address(spec_gateway_ip)
+        except ValueError as e:
+            raise TopologyRuntimeCreateError(f"invalid gateway_ip in spec: {spec_gateway_ip!r}") from e
+        if g not in net:
+            raise TopologyRuntimeCreateError(f"gateway_ip {g} not in allocated subnet {net}")
+        return str(net), str(g)
+    return str(net), str(_first_usable_host(net))
 
 
 def _runtime_to_ensure_result(row: TopologyRuntime) -> EnsureNodeTopologyResult:
@@ -333,37 +434,70 @@ class DbTopologyAdapter(TopologyAdapter):
             TopologyRuntime.node_id == node_id,
         )
         existing = self._session.exec(stmt).first()
-        if existing is not None:
-            self._sync_linux_node_bridge(existing)
-            return _runtime_to_ensure_result(existing)
 
-        try:
-            bridge_name, cidr, gateway_ip = _node_bridge_plan(topo, node_id)
-        except TopologyRuntimeCreateError:
-            self._session.rollback()
-            raise
+        spec_cidr, spec_gateway_ip, bridge_name = _node_bridge_plan(topo, node_id)
         now = datetime.now(timezone.utc)
-        row = TopologyRuntime(
-            topology_id=topology_id,
-            node_id=node_id,
-            status=TopologyRuntimeStatus.READY,
-            bridge_name=bridge_name,
-            cidr=cidr,
-            gateway_ip=gateway_ip,
-            nat_enabled=None,
-            iptables_profile=None,
-            managed_by_agent=True,
-            created_at=now,
-            updated_at=now,
-        )
-        self._session.add(row)
-        try:
-            self._session.commit()
-        except Exception as e:
-            self._session.rollback()
-            raise TopologyRuntimeCreateError(f"failed to persist topology runtime: {e}") from e
+
+        # (Re)assign CIDR/gateway if missing; otherwise keep stable.
+        for attempt in range(_ENSURE_NODE_CIDR_MAX_ATTEMPTS):
+            try:
+                cidr, gateway_ip = _choose_runtime_cidr_and_gateway(
+                    self._session,
+                    topology_id=topology_id,
+                    node_id=node_id,
+                    existing=existing,
+                    spec_cidr=spec_cidr,
+                    spec_gateway_ip=spec_gateway_ip,
+                )
+                if existing is None:
+                    row = TopologyRuntime(
+                        topology_id=topology_id,
+                        node_id=node_id,
+                        status=TopologyRuntimeStatus.READY,
+                        bridge_name=bridge_name,
+                        cidr=cidr,
+                        gateway_ip=gateway_ip,
+                        nat_enabled=None,
+                        iptables_profile=None,
+                        managed_by_agent=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    self._session.add(row)
+                else:
+                    if not (existing.bridge_name and str(existing.bridge_name).strip()):
+                        existing.bridge_name = bridge_name
+                    if not (existing.cidr and str(existing.cidr).strip()):
+                        existing.cidr = cidr
+                    if not (existing.gateway_ip and str(existing.gateway_ip).strip()):
+                        existing.gateway_ip = gateway_ip
+                    existing.updated_at = now
+                    self._session.add(existing)
+                self._session.commit()
+                break
+            except IntegrityError as exc:
+                # Concurrency safety:
+                # - uq_topology_runtime_topology_node: another worker created the row; reload and continue.
+                # - uq_topology_runtime_topology_cidr: another worker claimed the same CIDR; retry auto-alloc.
+                self._session.rollback()
+                self._session.expire_all()
+                if attempt + 1 >= _ENSURE_NODE_CIDR_MAX_ATTEMPTS:
+                    raise TopologyRuntimeCreateError(
+                        "failed to allocate a unique runtime CIDR after repeated DB conflicts",
+                    ) from exc
+                existing = self._session.exec(stmt).first()
+                continue
+            except TopologyRuntimeCreateError:
+                self._session.rollback()
+                raise
+            except Exception as e:
+                self._session.rollback()
+                raise TopologyRuntimeCreateError(f"failed to persist topology runtime: {e}") from e
+
+        row = existing if existing is not None else self._session.exec(stmt).first()
+        if row is None:
+            raise TopologyRuntimeCreateError("failed to ensure topology runtime row")
         self._session.refresh(row)
-        assert row.topology_runtime_id is not None
         self._sync_linux_node_bridge(row)
         return _runtime_to_ensure_result(row)
 

@@ -53,13 +53,24 @@ class TestEnsureNodeTopology:
         out = adapter.ensure_node_topology(topology_id=tid, node_id="node-a")
         assert out.topology_runtime_id is not None
         assert out.status == TopologyRuntimeStatus.READY
-        assert out.cidr == "10.77.0.0/24"
-        assert out.gateway_ip == "10.77.0.1"
+        assert out.cidr == "10.128.0.0/20"
+        assert out.gateway_ip == "10.128.0.1"
         assert out.bridge_name is not None
         row = topo_session.get(TopologyRuntime, out.topology_runtime_id)
         assert row is not None
         assert row.topology_id == tid
         assert row.node_id == "node-a"
+
+    def test_auto_allocates_distinct_subnets_per_node(self, topo_session: Session) -> None:
+        tid = _insert_topology(topo_session)
+        adapter = DbTopologyAdapter(topo_session)
+        a = adapter.ensure_node_topology(topology_id=tid, node_id="node-a")
+        b = adapter.ensure_node_topology(topology_id=tid, node_id="node-b")
+        assert a.cidr != b.cidr
+        assert a.gateway_ip != b.gateway_ip
+        # Deterministic "next-free /20" allocation from 10.128.0.0/9
+        assert a.cidr == "10.128.0.0/20"
+        assert b.cidr == "10.128.16.0/20"
 
     def test_idempotent_returns_same_runtime(self, topo_session: Session) -> None:
         tid = _insert_topology(topo_session)
@@ -146,7 +157,7 @@ class TestEnsureNodeTopologyLinuxBridge:
     def test_incomplete_runtime_degraded_without_ip(self, topo_session: Session) -> None:
         class FailRunner:
             def run(self, cmd: list[str]) -> str:
-                raise AssertionError(f"unexpected ip call: {cmd}")
+                raise RuntimeError("simulated ip failure")
 
         tid = _insert_topology(topo_session)
         now = datetime.now(timezone.utc)
@@ -175,7 +186,7 @@ class TestEnsureNodeTopologyLinuxBridge:
         assert out.topology_runtime_id == row.topology_runtime_id
         r2 = topo_session.get(TopologyRuntime, row.topology_runtime_id)
         assert r2 is not None
-        assert r2.last_error_code == "INCOMPLETE_RUNTIME"
+        assert r2.last_error_code == "BRIDGE_OS"
 
 
 class TestAllocateWorkspaceIP:
