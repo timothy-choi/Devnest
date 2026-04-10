@@ -5,6 +5,12 @@ from __future__ import annotations
 import os
 
 import pytest
+
+
+@pytest.fixture(scope="session")
+def worker_id() -> str:
+    """``pytest-xdist`` sets ``PYTEST_XDIST_WORKER`` on workers; single-process runs use ``master``."""
+    return os.environ.get("PYTEST_XDIST_WORKER", "master")
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
