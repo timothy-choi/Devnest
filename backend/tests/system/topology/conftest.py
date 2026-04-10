@@ -53,7 +53,7 @@ def linux_net_admin_or_skip() -> None:
     if add.returncode != 0:
         pytest.skip(
             "Cannot create a test bridge (needs CAP_NET_ADMIN). "
-            "Run: sudo pytest tests/system/topology -m topology_linux\n"
+            "Run: sudo pytest tests/system/topology -m 'topology_linux or topology_linux_core'\n"
             f"ip stderr: {add.stderr.strip()}",
         )
     subprocess.run(["ip", "link", "del", "dev", name], capture_output=True, timeout=10)

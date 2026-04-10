@@ -82,12 +82,12 @@ jobs:
       - name: Mypy (static types)
         run: mypy app
 
-      # Full tree except topology_linux (sudo step in full-test-suite). Includes slow,
+      # Full tree except privileged topology markers (sudo in full-test-suite). Includes slow,
       # topology_heavy, concurrency, failure_path, workspace_image — all excluded from merge-time CI.
       - name: Pytest with coverage
         run: |
           pytest --cov=app --cov-report=xml:coverage.xml --cov-report=term-missing \
-            -m "not topology_linux"
+            -m "not topology_linux and not topology_linux_core"
 
       - name: Finalize coverage XML
         run: |
@@ -155,11 +155,10 @@ jobs:
             sleep 1
           done
 
-      # Superset of: pytest -m "slow or topology_heavy or concurrency or failure_path or topology_linux"
-      # — we run `not topology_linux` here then topology_linux under sudo (CAP_NET_ADMIN).
-      - name: Run all tests (merge-time + heavy markers; topology_linux in next step)
+      # Privileged topology tests run under sudo next (topology_linux suite + topology_linux_core).
+      - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
         run: |
-          pytest tests -v -m "not topology_linux" \
+          pytest tests -v -m "not topology_linux and not topology_linux_core" \
             --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
 
       - name: Finalize suite coverage XML
@@ -171,7 +170,7 @@ jobs:
           coverage xml -o nightly-full-tests-coverage.xml
 
       - name: Run Linux topology tests (elevated privileges)
-        run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux"
+        run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux or topology_linux_core"
 
       - name: Upload full-suite coverage artifact
         uses: actions/upload-artifact@v4

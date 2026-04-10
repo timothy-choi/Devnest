@@ -19,9 +19,11 @@ concurrency:
   cancel-in-progress: true
 
 # --- Merge-time tier (fast PR signal) ---
-# Excludes pytest markers: slow, topology_heavy, concurrency, failure_path, topology_linux.
-# System job also excludes workspace_image (full workspace image build). Real Linux bridge/veth
-# tests (topology_linux) run only in nightly.yml under sudo — not on every push/PR.
+# Excludes pytest markers: slow, topology_heavy, concurrency, failure_path, topology_linux,
+# topology_linux_core (in the non-sudo pytest pass). System job then runs sudo pytest for
+# topology_linux_core only (one runtime+topology+probe happy path). Full topology_linux suite
+# stays in nightly.yml under sudo.
+# System job also excludes workspace_image (full workspace image build).
 #
 # --- Nightly tier ---
 # See nightly.yml: full suite including heavy markers + topology_linux + workspace_image.
@@ -67,7 +69,7 @@ jobs:
       - name: Pytest with coverage
         continue-on-error: true
         # Unit tests only; integration/system need Postgres/Docker in downstream jobs.
-        run: pytest tests/unit -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux" --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
+        run: pytest tests/unit -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -102,7 +104,7 @@ jobs:
         run: pip install coverage pytest-cov
 
       - name: Run unit tests
-        run: pytest tests/unit -v -n auto -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux" --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
+        run: pytest tests/unit -v -n auto -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
 
       - name: Finalize unit coverage (combine workers if needed, then XML + report)
         run: |
@@ -174,7 +176,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: pytest tests/integration -v -n 2 -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux" --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
+        run: pytest tests/integration -v -n 2 -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
 
       - name: Finalize integration coverage (combine workers if needed, then XML + report)
         run: |
@@ -247,10 +249,13 @@ jobs:
             sleep 1
           done
 
-      # Docker + DB system tests only; excludes topology_linux (nightly sudo job) and
-      # workspace_image (long Dockerfile build). Same marker exclusions as unit/integration.
-      - name: Run system tests (merge-time tier)
-        run: pytest tests/system -v -m "not topology_linux and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-append --cov-report=term-missing
+      # Docker + DB system tests only; excludes privileged topology markers (sudo steps below)
+      # and workspace_image (long Dockerfile build). Same marker exclusions as unit/integration.
+      - name: Run system tests (merge-time tier, non-sudo)
+        run: pytest tests/system -v -m "not topology_linux and not topology_linux_core and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-append --cov-report=term-missing
+
+      - name: Run Linux topology core happy-path (sudo, CAP_NET_ADMIN)
+        run: sudo -E "$(which python)" -m pytest tests/system/topology/test_runtime_topology_probe_happy_path.py -v -m "topology_linux_core" --cov=app --cov-append --cov-report=term-missing
 
       - name: Finalize system coverage (XML + report)
         run: |

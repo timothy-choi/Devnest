@@ -4,7 +4,8 @@ Exercises the same shape of flow as production (without the orchestrator): runti
 running workspace-like container listening on ``WORKSPACE_IDE_CONTAINER_PORT``, topology wires
 bridge + veth + netns, then the probe runner rolls up container + topology + TCP reachability.
 
-Requires Linux + CAP_NET_ADMIN + Docker (``topology_linux``). See ``README.md`` in this folder.
+Requires Linux + CAP_NET_ADMIN + Docker. Marked ``topology_linux_core`` (merge-time representative);
+see ``README.md`` in this folder.
 
 Uses ``nginx:alpine`` explicitly (bind-mounted ``conf.d`` snippet listening on ``WORKSPACE_IDE_CONTAINER_PORT``)
 so the service probe matches production’s in-container IDE port without pulling the full workspace image.
@@ -35,7 +36,7 @@ from tests.system.topology.test_topology_v1_linux import (
     seed_topology,
 )
 
-pytestmark = [pytest.mark.system, pytest.mark.topology_linux]
+pytestmark = [pytest.mark.system, pytest.mark.topology_linux_core]
 
 _WORKSPACE_LISTENER_IMAGE = "nginx:alpine"
 
