@@ -35,6 +35,12 @@ def runner(mock_runtime: MagicMock, mock_topology: MagicMock) -> DefaultProbeRun
 
 
 class TestCheckContainerRunning:
+    def test_empty_container_id(self, runner: DefaultProbeRunner) -> None:
+        out = runner.check_container_running(container_id="  ")
+        assert not out.healthy
+        assert _issue_codes(out) == [ProbeIssueCode.PROBE_EXECUTION_FAILED.value]
+        assert out.issues[0].component == "probe"
+
     def test_running_container(self, runner: DefaultProbeRunner, mock_runtime: MagicMock) -> None:
         mock_runtime.inspect_container.return_value = ContainerInspectionResult(
             exists=True,
@@ -130,6 +136,13 @@ class TestCheckTopologyState:
         assert ProbeIssueCode.TOPOLOGY_ATTACHMENT_MISSING.value in _issue_codes(out)
         assert ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value in _issue_codes(out)
 
+    def test_invalid_ids_probe_component(self, runner: DefaultProbeRunner, mock_topology: MagicMock) -> None:
+        out = runner.check_topology_state(topology_id="x", node_id="n1", workspace_id="1")
+        assert not out.healthy
+        assert out.issues[0].code == ProbeIssueCode.PROBE_EXECUTION_FAILED.value
+        assert out.issues[0].component == "probe"
+        mock_topology.check_topology.assert_not_called()
+
     def test_missing_workspace_ip(self, runner: DefaultProbeRunner, mock_topology: MagicMock) -> None:
         mock_topology.check_topology.return_value = CheckTopologyResult(
             healthy=True,
@@ -185,6 +198,11 @@ class TestCheckServiceReachable:
             out = runner.check_service_reachable(workspace_ip="192.0.2.2", port=8080)
         assert not out.healthy
         assert _issue_codes(out) == [ProbeIssueCode.SERVICE_UNREACHABLE.value]
+
+    def test_invalid_timeout_seconds(self, runner: DefaultProbeRunner) -> None:
+        out = runner.check_service_reachable(workspace_ip="127.0.0.1", port=8080, timeout_seconds=float("nan"))
+        assert not out.healthy
+        assert _issue_codes(out) == [ProbeIssueCode.SERVICE_CONNECT_ERROR.value]
 
 
 class TestCheckWorkspaceHealth:
@@ -299,6 +317,7 @@ class TestCheckWorkspaceHealth:
         assert not out.service_healthy
         assert ProbeIssueCode.TOPOLOGY_UNHEALTHY.value in _issue_codes(out)
         assert ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value in _issue_codes(out)
+        assert _issue_codes(out).count(ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value) == 1
 
     def test_service_unhealthy(
         self,

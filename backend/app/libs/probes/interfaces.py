@@ -45,8 +45,9 @@ class ProbeRunner(ABC):
         """
         Verify topology runtime and attachment health for this workspace on ``node_id``.
 
-        ``expected_port`` is the in-container service port used to build ``internal_endpoint``
-        (e.g. ``{workspace_ip}:{expected_port}``) when attachment data is healthy.
+        ``expected_port`` defaults to ``8080`` to match the workspace IDE port; it is used only to
+        build ``internal_endpoint`` as ``{workspace_ip}:{expected_port}`` (not sent to the topology
+        adapter).
         """
         ...
 
@@ -58,7 +59,7 @@ class ProbeRunner(ABC):
         port: int = 8080,
         timeout_seconds: float = 2.0,
     ) -> ServiceProbeResult:
-        """Verify TCP (or HTTP) reachability to ``workspace_ip:port`` within ``timeout_seconds``."""
+        """V1: TCP connect reachability to ``workspace_ip:port`` within ``timeout_seconds`` (no HTTP)."""
         ...
 
     @abstractmethod

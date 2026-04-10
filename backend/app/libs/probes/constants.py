@@ -1,4 +1,8 @@
-"""Stable V1 issue codes for ``HealthIssue.code`` (probe runner; read-only)."""
+"""Stable V1 issue codes for ``HealthIssue.code`` (probe runner; read-only).
+
+``HealthIssue.component`` conventions: ``runtime`` (container inspect), ``topology`` (adapter
+health semantics), ``service`` (TCP reachability), ``probe`` (invalid probe input or runner I/O).
+"""
 
 from enum import Enum
 

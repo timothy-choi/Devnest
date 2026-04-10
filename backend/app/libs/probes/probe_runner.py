@@ -2,11 +2,15 @@
 Default ``ProbeRunner`` implementation: read-only checks via injected adapters.
 
 All ``ProbeRunner`` methods are implemented: granular checks plus aggregate ``check_workspace_health``.
+
+``HealthIssue.component``: ``runtime`` / ``topology`` / ``service`` reflect subsystem checks;
+``probe`` marks invalid probe parameters or adapter exceptions surfaced as ``PROBE_EXECUTION_FAILED``.
 """
 
 from __future__ import annotations
 
 import errno
+import math
 import socket
 import time
 
@@ -92,8 +96,8 @@ class DefaultProbeRunner(ProbeRunner):
                 container_state=None,
                 issues=(
                     HealthIssue(
-                        code=ProbeIssueCode.RUNTIME_CONTAINER_STATE_UNKNOWN.value,
-                        component="runtime",
+                        code=ProbeIssueCode.PROBE_EXECUTION_FAILED.value,
+                        component="probe",
                         message="container_id is empty",
                         severity=HealthIssueSeverity.ERROR,
                     ),
@@ -193,7 +197,7 @@ class DefaultProbeRunner(ProbeRunner):
                 issues=(
                     HealthIssue(
                         code=ProbeIssueCode.PROBE_EXECUTION_FAILED.value,
-                        component="topology",
+                        component="probe",
                         message="topology_id and workspace_id must be non-negative integers",
                         severity=HealthIssueSeverity.ERROR,
                     ),
@@ -335,7 +339,7 @@ class DefaultProbeRunner(ProbeRunner):
                     message=f"invalid port: {port}",
                 ),
             )
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             return ServiceProbeResult(
                 healthy=False,
                 workspace_ip=ip,
@@ -343,7 +347,7 @@ class DefaultProbeRunner(ProbeRunner):
                 latency_ms=None,
                 issues=_service_issue(
                     code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
-                    message=f"timeout_seconds must be positive, got {timeout_seconds!r}",
+                    message=f"timeout_seconds must be a finite positive value, got {timeout_seconds!r}",
                 ),
             )
 
@@ -452,14 +456,19 @@ class DefaultProbeRunner(ProbeRunner):
             service_issues = svc.issues
         else:
             service_healthy = False
-            service_issues = (
-                HealthIssue(
-                    code=ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value,
-                    component="topology",
-                    message="service probe skipped: no workspace_ip from topology probe",
-                    severity=HealthIssueSeverity.ERROR,
-                ),
-            )
+            missing_ip_code = ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value
+            if any(i.code == missing_ip_code for i in topo.issues):
+                # Topology probe already reported missing IP; avoid duplicate roll-up issue.
+                service_issues: tuple[HealthIssue, ...] = ()
+            else:
+                service_issues = (
+                    HealthIssue(
+                        code=missing_ip_code,
+                        component="topology",
+                        message="service probe skipped: no workspace_ip from topology probe",
+                        severity=HealthIssueSeverity.ERROR,
+                    ),
+                )
 
         all_issues = (*ctr.issues, *topo.issues, *service_issues)
         runtime_healthy = ctr.healthy

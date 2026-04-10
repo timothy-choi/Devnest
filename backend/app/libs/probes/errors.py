@@ -6,4 +6,4 @@ class ProbeError(Exception):
 
 
 class ServiceProbeExecutionError(ProbeError):
-    """The service reachability check could not run (e.g. I/O error); not an ``unhealthy`` outcome."""
+    """Reserved for rare cases where a service probe cannot run; V1 ``DefaultProbeRunner`` returns ``ServiceProbeResult`` instead."""

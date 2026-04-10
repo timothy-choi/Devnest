@@ -16,7 +16,12 @@ class HealthIssueSeverity(str, Enum):
 
 @dataclass(frozen=True)
 class HealthIssue:
-    """Single verification finding; prefer stable ``code`` values from ``ProbeIssueCode``."""
+    """
+    Single verification finding; prefer stable ``code`` values from ``ProbeIssueCode``.
+
+    ``component`` is a short label (e.g. ``runtime``, ``topology``, ``service``, ``probe``); see
+    ``constants`` module docstring.
+    """
 
     code: str
     component: str
