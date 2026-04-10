@@ -218,7 +218,7 @@ class DefaultProbeRunner(ProbeRunner):
                 issues=(
                     HealthIssue(
                         code=ProbeIssueCode.PROBE_EXECUTION_FAILED.value,
-                        component="topology",
+                        component="probe",
                         message=f"{step} failed: {exc}",
                         severity=HealthIssueSeverity.ERROR,
                     ),

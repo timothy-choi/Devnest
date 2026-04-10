@@ -9,6 +9,7 @@ import pytest
 
 from app.libs.probes import DefaultProbeRunner, ProbeIssueCode
 from app.libs.runtime.interfaces import RuntimeAdapter
+from app.libs.topology.errors import TopologyHealthCheckError
 from app.libs.runtime.models import ContainerInspectionResult
 from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.models.enums import TopologyAttachmentStatus, TopologyRuntimeStatus
@@ -142,6 +143,17 @@ class TestCheckTopologyState:
         assert out.issues[0].code == ProbeIssueCode.PROBE_EXECUTION_FAILED.value
         assert out.issues[0].component == "probe"
         mock_topology.check_topology.assert_not_called()
+
+    def test_check_topology_raises_uses_probe_component(
+        self,
+        runner: DefaultProbeRunner,
+        mock_topology: MagicMock,
+    ) -> None:
+        mock_topology.check_topology.side_effect = TopologyHealthCheckError("unavailable")
+        out = runner.check_topology_state(topology_id="1", node_id="n1", workspace_id="2")
+        assert not out.healthy
+        assert out.issues[0].code == ProbeIssueCode.PROBE_EXECUTION_FAILED.value
+        assert out.issues[0].component == "probe"
 
     def test_missing_workspace_ip(self, runner: DefaultProbeRunner, mock_topology: MagicMock) -> None:
         mock_topology.check_topology.return_value = CheckTopologyResult(
