@@ -284,27 +284,32 @@ jobs:
       - name: Install coverage tools
         run: pip install coverage pytest-cov
 
+      # Artifacts keep repo-relative paths (e.g. backend/.coverage.unit). Downloading
+      # into backend/ would nest as backend/backend/...; use a prefix and combine explicitly.
       - name: Download unit coverage
         uses: actions/download-artifact@v4
         with:
           name: coverage-unit
-          path: backend
+          path: coverage-downloads/unit
 
       - name: Download integration coverage
         uses: actions/download-artifact@v4
         with:
           name: coverage-integration
-          path: backend
+          path: coverage-downloads/integration
 
       - name: Download system coverage
         uses: actions/download-artifact@v4
         with:
           name: coverage-system
-          path: backend
+          path: coverage-downloads/system
 
       - name: Combine coverage and generate unified report
         run: |
-          coverage combine .coverage.unit .coverage.integration .coverage.system
+          coverage combine \
+            "${{ github.workspace }}/coverage-downloads/unit/backend/.coverage.unit" \
+            "${{ github.workspace }}/coverage-downloads/integration/backend/.coverage.integration" \
+            "${{ github.workspace }}/coverage-downloads/system/backend/.coverage.system"
           coverage xml -o coverage.xml
           coverage report
 
