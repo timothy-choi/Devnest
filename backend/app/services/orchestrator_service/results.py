@@ -29,3 +29,14 @@ class WorkspaceStopResult:
     container_state: Optional[str] = None
     topology_detached: Optional[bool] = None
     issues: Optional[List[str]] = None
+
+
+@dataclass
+class WorkspaceDeleteResult:
+    workspace_id: str
+    success: bool
+    container_deleted: Optional[bool] = None
+    topology_detached: Optional[bool] = None
+    topology_deleted: Optional[bool] = None
+    container_id: Optional[str] = None
+    issues: Optional[List[str]] = None

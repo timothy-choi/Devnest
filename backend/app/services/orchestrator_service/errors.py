@@ -17,3 +17,9 @@ class WorkspaceStopError(OrchestratorError):
     """Raised when workspace stop flow fails unexpectedly."""
 
     pass
+
+
+class WorkspaceDeleteError(OrchestratorError):
+    """Raised when workspace delete flow fails unexpectedly."""
+
+    pass
