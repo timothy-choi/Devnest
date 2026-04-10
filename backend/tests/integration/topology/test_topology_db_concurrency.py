@@ -11,11 +11,18 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import NamedTuple
 
+import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from app.libs.topology import DbTopologyAdapter
 from app.libs.topology.models import IpAllocation, Topology, TopologyRuntime
+
+pytestmark = [
+    pytest.mark.concurrency,
+    pytest.mark.slow,
+    pytest.mark.topology_heavy,
+]
 
 
 def _seed_topology(session: Session, *, name: str, spec: dict | None = None) -> int:

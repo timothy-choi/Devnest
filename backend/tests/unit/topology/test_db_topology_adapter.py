@@ -312,6 +312,8 @@ class TestAllocateWorkspaceIP:
             topo_session.commit()
         topo_session.rollback()
 
+    @pytest.mark.concurrency
+    @pytest.mark.slow
     def test_concurrent_allocations_yield_distinct_ips(self, tmp_path: Path) -> None:
         db_path = tmp_path / "alloc_concurrent.db"
         engine = create_engine(
@@ -398,6 +400,8 @@ class TestAttachWorkspace:
         assert row is not None
         assert row.container_id == "new-cid"
 
+    @pytest.mark.failure_path
+    @pytest.mark.slow
     def test_attach_persist_failure_marks_failed_and_releases_ip_when_new(self, topo_session: Session) -> None:
         tid = _insert_topology(
             topo_session,
@@ -510,6 +514,8 @@ class TestAttachWorkspace:
                 workspace_ip=ip.workspace_ip,
             )
 
+    @pytest.mark.failure_path
+    @pytest.mark.slow
     def test_linux_attach_failure_persists_failed(self, topo_session: Session) -> None:
         class FailRunner:
             def run(self, cmd: list[str]) -> str:
@@ -553,6 +559,8 @@ class TestAttachWorkspace:
         assert lease is not None
         assert lease.released_at is not None
 
+    @pytest.mark.failure_path
+    @pytest.mark.slow
     def test_linux_attach_fails_after_veth_and_bridge_runs_host_cleanup(
         self,
         topo_session: Session,
@@ -598,6 +606,8 @@ class TestAttachWorkspace:
         assert lease is not None
         assert lease.released_at is not None
 
+    @pytest.mark.failure_path
+    @pytest.mark.slow
     def test_linux_attach_failure_on_reattach_does_not_release_existing_lease(
         self,
         topo_session: Session,
@@ -652,6 +662,8 @@ class TestAttachWorkspace:
         assert lease.released_at is None
         assert lease.ip == ip.workspace_ip
 
+    @pytest.mark.failure_path
+    @pytest.mark.slow
     def test_linux_attach_success_persist_attached_failure_best_effort_cleanup(
         self,
         topo_session: Session,
@@ -709,6 +721,8 @@ class TestAttachWorkspace:
         assert lease is not None
         assert lease.released_at is not None
 
+    @pytest.mark.failure_path
+    @pytest.mark.slow
     def test_attach_persist_attaching_row_failure_leaves_no_stale_row(
         self,
         topo_session: Session,
@@ -759,6 +773,8 @@ class TestAttachWorkspace:
         assert lease.released_at is None
         assert lease.ip == ip.workspace_ip
 
+    @pytest.mark.failure_path
+    @pytest.mark.slow
     def test_linux_attach_success_persist_attached_failure_reattach_preserves_lease(
         self,
         topo_session: Session,
@@ -1111,6 +1127,37 @@ class TestDeleteTopology:
         topo_session.commit()
         with pytest.raises(TopologyDeleteError, match="non-DETACHED"):
             DbTopologyAdapter(topo_session).delete_topology(topology_id=tid, node_id="n1")
+
+    def test_delete_preserves_ip_allocation_rows(self, topo_session: Session) -> None:
+        """``delete_topology`` does not remove ``IpAllocation`` rows (V1 lease table is separate)."""
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.76.0/24", "gateway_ip": "10.77.76.1", "bridge_name": "br-ipkeep"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n-ip")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n-ip", workspace_id=76)
+        adapter.attach_workspace(
+            topology_id=tid,
+            node_id="n-ip",
+            workspace_id=76,
+            container_id="c76",
+            netns_ref="/ns",
+            workspace_ip=ip.workspace_ip,
+        )
+        adapter.detach_workspace(topology_id=tid, node_id="n-ip", workspace_id=76)
+        adapter.delete_topology(topology_id=tid, node_id="n-ip")
+
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.node_id == "n-ip",
+                IpAllocation.workspace_id == 76,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is None
+        assert lease.ip == ip.workspace_ip
 
 
 class TestCheckTopology:

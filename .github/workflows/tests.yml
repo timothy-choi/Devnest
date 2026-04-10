@@ -18,6 +18,10 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Default CI excludes "heavy" pytest markers (see backend/pytest.ini): slow, topology_heavy,
+# concurrency, failure_path. System job also skips workspace_image (Docker image build) and
+# topology_linux (sudo step). Nightly workflow runs the full suite including heavy tests.
+
 jobs:
   quality-checks:
     name: quality-checks
@@ -59,7 +63,7 @@ jobs:
       - name: Pytest with coverage
         continue-on-error: true
         # Unit tests only; integration/system need Postgres/Docker in downstream jobs.
-        run: pytest tests/unit --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
+        run: pytest tests/unit -m "not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -94,7 +98,7 @@ jobs:
         run: pip install coverage pytest-cov
 
       - name: Run unit tests
-        run: pytest tests/unit -v -n auto --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
+        run: pytest tests/unit -v -n auto -m "not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
 
       - name: Finalize unit coverage (combine workers if needed, then XML + report)
         run: |
@@ -166,7 +170,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: pytest tests/integration -v -n 2 --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
+        run: pytest tests/integration -v -n 2 -m "not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
 
       - name: Finalize integration coverage (combine workers if needed, then XML + report)
         run: |
@@ -240,7 +244,7 @@ jobs:
           done
 
       - name: Run non-topology system tests
-        run: pytest tests/system -v -m "not topology_linux" --cov=app --cov-append --cov-report=term-missing
+        run: pytest tests/system -v -m "not topology_linux and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-append --cov-report=term-missing
 
       - name: Run topology Linux system tests
         run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux" --cov=app --cov-append --cov-report=term-missing

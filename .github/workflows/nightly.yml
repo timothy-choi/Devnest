@@ -1,5 +1,8 @@
 name: Nightly Full Validation
 
+# Runs the full test tree including heavy markers (concurrency, topology_heavy, failure_path,
+# slow) and workspace_image builds. Default CI in tests.yml excludes those for faster PRs.
+
 on:
   schedule:
     - cron: "0 2 * * *"
@@ -76,6 +79,7 @@ jobs:
         run: mypy app
 
       # topology_linux needs CAP_NET_ADMIN; run under sudo in full-test-suite.
+      # Includes heavy-tier tests (concurrency, failure_path, etc.); see backend/pytest.ini.
       # Integration tests require PostgreSQL (service above). System tests use the host Docker daemon.
       - name: Pytest with coverage
         run: |
@@ -148,7 +152,7 @@ jobs:
             sleep 1
           done
 
-      - name: Run all tests (excluding topology_linux)
+      - name: Run all tests (excluding topology_linux; includes heavy-tier markers)
         run: |
           pytest tests -v -m "not topology_linux" \
             --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
