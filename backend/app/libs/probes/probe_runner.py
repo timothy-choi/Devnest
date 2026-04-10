@@ -1,11 +1,14 @@
 """
 Default ``ProbeRunner`` implementation: read-only checks via injected adapters.
 
-``check_container_running`` and ``check_topology_state`` are implemented; service and aggregate
-workspace probes are not yet.
+All ``ProbeRunner`` methods are implemented: granular checks plus aggregate ``check_workspace_health``.
 """
 
 from __future__ import annotations
+
+import errno
+import socket
+import time
 
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology.errors import AttachmentHealthCheckError, TopologyHealthCheckError
@@ -40,6 +43,33 @@ def _endpoint_or_none(*, workspace_ip: str | None, port: int) -> str | None:
     if port < 1 or port > 65535:
         return None
     return f"{ip}:{port}"
+
+
+# Errnos treated as "refused / unreachable" for V1 TCP probe (platform-dependent sets overlap).
+_OSR_UNREACHABLE_ERRNOS: frozenset[int] = frozenset(
+    {
+        errno.ECONNREFUSED,
+        errno.EHOSTUNREACH,
+        errno.ENETUNREACH,
+        errno.ENETDOWN,
+        errno.EHOSTDOWN,
+    },
+)
+
+
+def _service_issue(
+    *,
+    code: ProbeIssueCode,
+    message: str,
+) -> tuple[HealthIssue, ...]:
+    return (
+        HealthIssue(
+            code=code.value,
+            component="service",
+            message=message,
+            severity=HealthIssueSeverity.ERROR,
+        ),
+    )
 
 
 class DefaultProbeRunner(ProbeRunner):
@@ -282,7 +312,116 @@ class DefaultProbeRunner(ProbeRunner):
         port: int = 8080,
         timeout_seconds: float = 2.0,
     ) -> ServiceProbeResult:
-        raise NotImplementedError("check_service_reachable is not implemented yet")
+        ip = (workspace_ip or "").strip()
+        if not ip:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=None,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
+                    message="workspace_ip is empty",
+                ),
+            )
+        if port < 1 or port > 65535:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
+                    message=f"invalid port: {port}",
+                ),
+            )
+        if timeout_seconds <= 0:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
+                    message=f"timeout_seconds must be positive, got {timeout_seconds!r}",
+                ),
+            )
+
+        sock: socket.socket | None = None
+        try:
+            t0 = time.perf_counter()
+            sock = socket.create_connection((ip, port), timeout=timeout_seconds)
+            t1 = time.perf_counter()
+            latency_ms = (t1 - t0) * 1000.0
+            return ServiceProbeResult(
+                healthy=True,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=latency_ms,
+                issues=(),
+            )
+        except (socket.timeout, TimeoutError):
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_TIMEOUT,
+                    message=f"TCP connect to {ip!r}:{port} timed out after {timeout_seconds}s",
+                ),
+            )
+        except ConnectionRefusedError:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_UNREACHABLE,
+                    message=f"TCP connect to {ip!r}:{port} refused",
+                ),
+            )
+        except OSError as e:
+            if isinstance(e, socket.gaierror):
+                return ServiceProbeResult(
+                    healthy=False,
+                    workspace_ip=ip,
+                    port=port,
+                    latency_ms=None,
+                    issues=_service_issue(
+                        code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
+                        message=f"TCP connect address resolution failed for {ip!r}:{port}: {e}",
+                    ),
+                )
+            eno = getattr(e, "errno", None)
+            if eno in _OSR_UNREACHABLE_ERRNOS:
+                return ServiceProbeResult(
+                    healthy=False,
+                    workspace_ip=ip,
+                    port=port,
+                    latency_ms=None,
+                    issues=_service_issue(
+                        code=ProbeIssueCode.SERVICE_UNREACHABLE,
+                        message=f"TCP connect to {ip!r}:{port} unreachable: {e}",
+                    ),
+                )
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
+                    message=f"TCP connect to {ip!r}:{port} failed: {e}",
+                ),
+            )
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def check_workspace_health(
         self,
@@ -294,4 +433,47 @@ class DefaultProbeRunner(ProbeRunner):
         expected_port: int = 8080,
         timeout_seconds: float = 2.0,
     ) -> WorkspaceHealthResult:
-        raise NotImplementedError("check_workspace_health is not implemented yet")
+        ctr = self.check_container_running(container_id=container_id)
+        topo = self.check_topology_state(
+            topology_id=topology_id,
+            node_id=node_id,
+            workspace_id=workspace_id,
+            expected_port=expected_port,
+        )
+
+        ws_ip = (topo.workspace_ip or "").strip()
+        if ws_ip:
+            svc = self.check_service_reachable(
+                workspace_ip=ws_ip,
+                port=expected_port,
+                timeout_seconds=timeout_seconds,
+            )
+            service_healthy = svc.healthy
+            service_issues = svc.issues
+        else:
+            service_healthy = False
+            service_issues = (
+                HealthIssue(
+                    code=ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value,
+                    component="topology",
+                    message="service probe skipped: no workspace_ip from topology probe",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            )
+
+        all_issues = (*ctr.issues, *topo.issues, *service_issues)
+        runtime_healthy = ctr.healthy
+        topology_healthy = topo.healthy
+        healthy = runtime_healthy and topology_healthy and service_healthy
+
+        return WorkspaceHealthResult(
+            workspace_id=topo.workspace_id,
+            healthy=healthy,
+            runtime_healthy=runtime_healthy,
+            topology_healthy=topology_healthy,
+            service_healthy=service_healthy,
+            container_state=ctr.container_state,
+            workspace_ip=topo.workspace_ip,
+            internal_endpoint=topo.internal_endpoint,
+            issues=all_issues,
+        )
