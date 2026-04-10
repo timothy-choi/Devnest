@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from .results import WorkspaceBringUpResult
+from .results import WorkspaceBringUpResult, WorkspaceStopResult
 
 
 class OrchestratorService(ABC):
@@ -17,9 +17,14 @@ class OrchestratorService(ABC):
     ) -> WorkspaceBringUpResult:
         """Provision or start a workspace runtime."""
 
-    def stop_workspace_runtime(self, *, workspace_id: str) -> None:
-        """Stop a workspace container without removing it."""
-        raise NotImplementedError
+    @abstractmethod
+    def stop_workspace_runtime(
+        self,
+        *,
+        workspace_id: str,
+        requested_by: str | None = None,
+    ) -> WorkspaceStopResult:
+        """Detach topology and stop the workspace container."""
 
     def delete_workspace_runtime(self, *, workspace_id: str) -> None:
         """Remove workspace container and release runtime resources."""

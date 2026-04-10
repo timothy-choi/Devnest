@@ -19,3 +19,13 @@ class WorkspaceBringUpResult:
     internal_endpoint: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
+
+
+@dataclass
+class WorkspaceStopResult:
+    workspace_id: str
+    success: bool
+    container_id: Optional[str] = None
+    container_state: Optional[str] = None
+    topology_detached: Optional[bool] = None
+    issues: Optional[List[str]] = None

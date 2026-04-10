@@ -15,9 +15,9 @@ from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyError
 from app.libs.topology.interfaces import TopologyAdapter
 
-from .errors import WorkspaceBringUpError
+from .errors import WorkspaceBringUpError, WorkspaceStopError
 from .interfaces import OrchestratorService
-from .results import WorkspaceBringUpResult
+from .results import WorkspaceBringUpResult, WorkspaceStopResult
 
 # Docker container name: start with alphanumeric; allow [a-zA-Z0-9_.-]
 _CONTAINER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
@@ -41,6 +41,11 @@ def _parse_topology_workspace_id(workspace_id: str) -> int:
     if v < 0:
         raise WorkspaceBringUpError(f"workspace_id must be non-negative: {v}")
     return v
+
+
+def _issues_or_none(issues: list[str]) -> list[str] | None:
+    cleaned = [str(x).strip() for x in issues if str(x).strip()]
+    return cleaned or None
 
 
 class DefaultOrchestratorService(OrchestratorService):
@@ -167,4 +172,75 @@ class DefaultOrchestratorService(OrchestratorService):
             internal_endpoint=health.internal_endpoint or attach_res.internal_endpoint,
             probe_healthy=health.healthy,
             issues=issue_msgs,
+        )
+
+    def stop_workspace_runtime(
+        self,
+        *,
+        workspace_id: str,
+        requested_by: str | None = None,
+    ) -> WorkspaceStopResult:
+        _ = requested_by  # TODO: persist audit trail / emit stop event
+
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise WorkspaceStopError("workspace_id is empty")
+
+        ws_int = _parse_topology_workspace_id(wid)
+        container_ref = _sanitize_container_name(wid)
+
+        issues: list[str] = []
+
+        # 1) Load current runtime state (no DB model yet; inspect by deterministic container name).
+        # TODO: load persisted runtime placement (container_id/node_id/topology_id) from Workspace_runtime.
+        try:
+            ins = self._runtime_adapter.inspect_container(container_id=container_ref)
+        except Exception as e:
+            raise WorkspaceStopError(f"inspect_container failed: {e}") from e
+
+        container_id = (ins.container_id or container_ref).strip() or None
+        container_state_before = (ins.container_state or "").strip() or None
+
+        # 2) Detach from topology (best-effort; stop can still proceed even if detach fails).
+        topology_detached: bool | None = None
+        try:
+            det = self._topology_service.detach_workspace(
+                topology_id=self._topology_id,
+                node_id=self._node_id,
+                workspace_id=ws_int,
+            )
+            topology_detached = bool(det.detached)
+        except TopologyError as e:
+            topology_detached = False
+            issues.append(f"topology:detach_failed:{e}")
+        except Exception as e:
+            raise WorkspaceStopError(f"unexpected detach failure: {e}") from e
+
+        # 3) Stop container (best-effort).
+        stopped_state: str | None = None
+        stop_success: bool = False
+        if container_id is None:
+            issues.append("runtime:container_id_missing")
+        else:
+            try:
+                stop_res = self._runtime_adapter.stop_container(container_id=container_id)
+                stop_success = bool(stop_res.success)
+                stopped_state = (stop_res.container_state or "").strip() or None
+                if not stop_res.success:
+                    issues.append(f"runtime:stop_failed:{stop_res.message or 'stop_container returned success=False'}")
+            except RuntimeAdapterError as e:
+                issues.append(f"runtime:stop_failed:{e}")
+            except Exception as e:
+                raise WorkspaceStopError(f"unexpected stop failure: {e}") from e
+
+        # TODO: persist runtime stop outcome (container_state, timestamps) to Workspace_runtime.
+
+        success = bool(stop_success and topology_detached is not False)
+        return WorkspaceStopResult(
+            workspace_id=wid,
+            success=success,
+            container_id=container_id,
+            container_state=stopped_state or container_state_before,
+            topology_detached=topology_detached,
+            issues=_issues_or_none(issues),
         )
