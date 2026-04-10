@@ -17,6 +17,7 @@ from app.libs.topology.models.enums import TopologyAttachmentStatus
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.topology_heavy,
+    pytest.mark.failure_path,
 ]
 
 

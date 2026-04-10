@@ -1,7 +1,11 @@
 name: Nightly Full Validation
 
-# Runs the full test tree including heavy markers (concurrency, topology_heavy, failure_path,
-# slow) and workspace_image builds. Default CI in tests.yml excludes those for faster PRs.
+# Nightly tier: runs the full repository test tree without merge-time marker exclusions.
+# That includes every unmarked (merge-time) test plus heavy markers:
+#   slow | topology_heavy | concurrency | failure_path | topology_linux
+# and workspace_image (system workspace Dockerfile). Push/PR workflow (tests.yml) excludes those
+# markers (and workspace_image / topology_linux) so CI stays fast; this job catches regressions
+# in stress, failure-injection, privileged networking, and image builds.
 
 on:
   schedule:
@@ -78,9 +82,8 @@ jobs:
       - name: Mypy (static types)
         run: mypy app
 
-      # topology_linux needs CAP_NET_ADMIN; run under sudo in full-test-suite.
-      # Includes heavy-tier tests (concurrency, failure_path, etc.); see backend/pytest.ini.
-      # Integration tests require PostgreSQL (service above). System tests use the host Docker daemon.
+      # Full tree except topology_linux (sudo step in full-test-suite). Includes slow,
+      # topology_heavy, concurrency, failure_path, workspace_image — all excluded from merge-time CI.
       - name: Pytest with coverage
         run: |
           pytest --cov=app --cov-report=xml:coverage.xml --cov-report=term-missing \
@@ -152,7 +155,9 @@ jobs:
             sleep 1
           done
 
-      - name: Run all tests (excluding topology_linux; includes heavy-tier markers)
+      # Superset of: pytest -m "slow or topology_heavy or concurrency or failure_path or topology_linux"
+      # — we run `not topology_linux` here then topology_linux under sudo (CAP_NET_ADMIN).
+      - name: Run all tests (merge-time + heavy markers; topology_linux in next step)
         run: |
           pytest tests -v -m "not topology_linux" \
             --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
