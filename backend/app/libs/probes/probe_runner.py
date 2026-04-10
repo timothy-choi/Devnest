@@ -1,13 +1,15 @@
 """
 Default ``ProbeRunner`` implementation: read-only checks via injected adapters.
 
-Only ``check_container_running`` is implemented; other methods raise ``NotImplementedError``
-until topology/service probes are added.
+``check_container_running`` and ``check_topology_state`` are implemented; service and aggregate
+workspace probes are not yet.
 """
 
 from __future__ import annotations
 
 from app.libs.runtime.interfaces import RuntimeAdapter
+from app.libs.topology.errors import AttachmentHealthCheckError, TopologyHealthCheckError
+from app.libs.topology.interfaces import TopologyAdapter
 
 from .constants import ProbeIssueCode
 from .interfaces import ProbeRunner
@@ -21,11 +23,31 @@ from .results import (
 )
 
 
-class DefaultProbeRunner(ProbeRunner):
-    """Probe runner backed by ``RuntimeAdapter`` (and later topology) for inspection-only checks."""
+def _parse_non_negative_int(raw: str) -> int | None:
+    try:
+        v = int(str(raw).strip(), 10)
+    except (TypeError, ValueError):
+        return None
+    if v < 0:
+        return None
+    return v
 
-    def __init__(self, *, runtime: RuntimeAdapter) -> None:
+
+def _endpoint_or_none(*, workspace_ip: str | None, port: int) -> str | None:
+    ip = (workspace_ip or "").strip()
+    if not ip:
+        return None
+    if port < 1 or port > 65535:
+        return None
+    return f"{ip}:{port}"
+
+
+class DefaultProbeRunner(ProbeRunner):
+    """Probe runner backed by ``RuntimeAdapter`` and ``TopologyAdapter`` for inspection-only checks."""
+
+    def __init__(self, *, runtime: RuntimeAdapter, topology: TopologyAdapter) -> None:
         self._runtime = runtime
+        self._topology = topology
 
     def check_container_running(
         self,
@@ -126,7 +148,132 @@ class DefaultProbeRunner(ProbeRunner):
         workspace_id: str,
         expected_port: int = 8080,
     ) -> TopologyProbeResult:
-        raise NotImplementedError("check_topology_state is not implemented yet")
+        nid = (node_id or "").strip()[:128]
+        tid = _parse_non_negative_int(topology_id)
+        wid = _parse_non_negative_int(workspace_id)
+
+        def _bad_ids_result() -> TopologyProbeResult:
+            return TopologyProbeResult(
+                healthy=False,
+                topology_id=tid if tid is not None else 0,
+                workspace_id=wid if wid is not None else 0,
+                node_id=nid,
+                workspace_ip=None,
+                internal_endpoint=None,
+                issues=(
+                    HealthIssue(
+                        code=ProbeIssueCode.PROBE_EXECUTION_FAILED.value,
+                        component="topology",
+                        message="topology_id and workspace_id must be non-negative integers",
+                        severity=HealthIssueSeverity.ERROR,
+                    ),
+                ),
+            )
+
+        if tid is None or wid is None:
+            return _bad_ids_result()
+
+        def _exec_failed(*, step: str, exc: BaseException) -> TopologyProbeResult:
+            return TopologyProbeResult(
+                healthy=False,
+                topology_id=tid,
+                node_id=nid,
+                workspace_id=wid,
+                workspace_ip=None,
+                internal_endpoint=None,
+                issues=(
+                    HealthIssue(
+                        code=ProbeIssueCode.PROBE_EXECUTION_FAILED.value,
+                        component="topology",
+                        message=f"{step} failed: {exc}",
+                        severity=HealthIssueSeverity.ERROR,
+                    ),
+                ),
+            )
+
+        try:
+            topo_res = self._topology.check_topology(topology_id=tid, node_id=nid)
+        except TopologyHealthCheckError as e:
+            return _exec_failed(step="check_topology", exc=e)
+        except Exception as e:
+            return _exec_failed(step="check_topology", exc=e)
+
+        try:
+            att_res = self._topology.check_attachment(
+                topology_id=tid,
+                node_id=nid,
+                workspace_id=wid,
+            )
+        except AttachmentHealthCheckError as e:
+            return _exec_failed(step="check_attachment", exc=e)
+        except Exception as e:
+            return _exec_failed(step="check_attachment", exc=e)
+
+        issues: list[HealthIssue] = []
+
+        if not topo_res.healthy:
+            detail = "; ".join(topo_res.issues) if topo_res.issues else "topology runtime unhealthy"
+            issues.append(
+                HealthIssue(
+                    code=ProbeIssueCode.TOPOLOGY_UNHEALTHY.value,
+                    component="topology",
+                    message=detail,
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            )
+
+        if not att_res.healthy:
+            detail = "; ".join(att_res.issues) if att_res.issues else "attachment unhealthy"
+            issues.append(
+                HealthIssue(
+                    code=ProbeIssueCode.TOPOLOGY_ATTACHMENT_MISSING.value,
+                    component="topology",
+                    message=detail,
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            )
+
+        ws_ip = (att_res.workspace_ip or "").strip() or None
+        if not ws_ip:
+            issues.append(
+                HealthIssue(
+                    code=ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value,
+                    component="topology",
+                    message="workspace_ip is not set on attachment or lease",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            )
+
+        internal_endpoint = _endpoint_or_none(workspace_ip=ws_ip, port=expected_port)
+        if internal_endpoint is None and ws_ip:
+            issues.append(
+                HealthIssue(
+                    code=ProbeIssueCode.TOPOLOGY_INTERNAL_ENDPOINT_MISSING.value,
+                    component="topology",
+                    message=f"cannot derive internal endpoint (invalid expected_port={expected_port})",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            )
+        elif internal_endpoint is None and not ws_ip:
+            issues.append(
+                HealthIssue(
+                    code=ProbeIssueCode.TOPOLOGY_INTERNAL_ENDPOINT_MISSING.value,
+                    component="topology",
+                    message="cannot derive internal endpoint without workspace_ip",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            )
+
+        healthy = len(issues) == 0
+        return TopologyProbeResult(
+            healthy=healthy,
+            topology_id=tid,
+            node_id=nid,
+            workspace_id=wid,
+            workspace_ip=ws_ip,
+            internal_endpoint=internal_endpoint,
+            issues=tuple(issues),
+        )
 
     def check_service_reachable(
         self,
