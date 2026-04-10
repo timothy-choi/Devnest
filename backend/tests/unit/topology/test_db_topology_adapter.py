@@ -421,15 +421,18 @@ class TestAttachWorkspace:
             return real_commit()
 
         topo_session.commit = flaky_commit  # type: ignore[method-assign]
-        with pytest.raises(WorkspaceAttachmentError, match="failed to persist topology attachment"):
-            adapter.attach_workspace(
-                topology_id=tid,
-                node_id="n1",
-                workspace_id=123,
-                container_id="cid-x",
-                netns_ref="/proc/1/ns/net",
-                workspace_ip=ip.workspace_ip,
-            )
+        try:
+            with pytest.raises(WorkspaceAttachmentError, match="failed to persist topology attachment"):
+                adapter.attach_workspace(
+                    topology_id=tid,
+                    node_id="n1",
+                    workspace_id=123,
+                    container_id="cid-x",
+                    netns_ref="/proc/1/ns/net",
+                    workspace_ip=ip.workspace_ip,
+                )
+        finally:
+            topo_session.commit = real_commit  # type: ignore[method-assign]
 
         # Attachment row should not be left ATTACHING.
         att = topo_session.exec(

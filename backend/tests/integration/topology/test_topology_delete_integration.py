@@ -92,6 +92,8 @@ def test_delete_topology_blocked_when_workspace_attached(db_session: Session) ->
     with pytest.raises(TopologyDeleteError, match="non-DETACHED"):
         adapter.delete_topology(topology_id=tid, node_id="n-block")
 
+    db_session.expire_all()
+
     rt_after = db_session.exec(
         select(TopologyRuntime).where(
             TopologyRuntime.topology_id == tid,

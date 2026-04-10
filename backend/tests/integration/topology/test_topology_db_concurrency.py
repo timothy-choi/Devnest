@@ -24,6 +24,9 @@ pytestmark = [
     pytest.mark.topology_heavy,
 ]
 
+# Cap worker count so we do not exhaust the SQLAlchemy pool (default pool is small on many setups).
+_MAX_POOL_WORKERS = 8
+
 
 def _seed_topology(session: Session, *, name: str, spec: dict | None = None) -> int:
     t = Topology(name=name, version="v1", spec_json=spec or {})
@@ -50,10 +53,11 @@ def test_concurrent_ensure_node_topology_auto_pool_unique_non_overlapping_cidrs(
         with Session(test_engine) as s2:
             DbTopologyAdapter(s2).ensure_node_topology(topology_id=tid, node_id=nid)
 
-    with ThreadPoolExecutor(max_workers=len(node_ids)) as pool:
+    workers = min(_MAX_POOL_WORKERS, len(node_ids))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = [pool.submit(ensure_one, nid) for nid in node_ids]
         for f in as_completed(futs):
-            f.result()
+            f.result()  # propagate worker exceptions; barrier prevents partial completion hangs
 
     with Session(test_engine) as s:
         rows = s.exec(
@@ -93,7 +97,8 @@ def test_concurrent_ensure_node_topology_same_node_idempotent(
             assert out.cidr == "10.88.50.0/24"
             return str(out.cidr)
 
-    with ThreadPoolExecutor(max_workers=n_calls) as pool:
+    workers = min(_MAX_POOL_WORKERS, n_calls)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         cidrs = list(pool.map(ensure_once, range(n_calls)))
 
     assert len(set(cidrs)) == 1
@@ -142,12 +147,15 @@ def test_concurrent_allocate_workspace_ip_distinct_active_ips(
             )
             return _AllocOutcome(wid, res.workspace_ip, res.leased_existing)
 
-    with ThreadPoolExecutor(max_workers=min(12, len(workspace_ids))) as pool:
+    workers = min(_MAX_POOL_WORKERS, len(workspace_ids))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         outcomes = list(pool.map(allocate, workspace_ids))
 
+    assert [o.workspace_id for o in outcomes] == workspace_ids
     ips = [o.workspace_ip for o in outcomes]
     assert len(ips) == len(workspace_ids)
     assert len(set(ips)) == len(workspace_ids), f"duplicate workspace_ip in outcomes: {ips}"
+    assert not any(o.leased_existing for o in outcomes), "first-time allocates should not all be lease reuse"
 
     with Session(test_engine) as s:
         rows = s.exec(
@@ -190,7 +198,8 @@ def test_concurrent_allocate_workspace_ip_same_workspace_converges_single_ip(
             )
             return _AllocOutcome(wid, res.workspace_ip, res.leased_existing)
 
-    with ThreadPoolExecutor(max_workers=n_calls) as pool:
+    workers = min(_MAX_POOL_WORKERS, n_calls)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         outcomes = list(pool.map(allocate_same, range(n_calls)))
 
     assert len({o.workspace_ip for o in outcomes}) == 1

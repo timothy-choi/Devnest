@@ -71,6 +71,8 @@ class TestCheckContainerRunning:
         out = runner.check_container_running(container_id="gone")
         assert not out.healthy
         assert _issue_codes(out) == [ProbeIssueCode.RUNTIME_CONTAINER_MISSING.value]
+        assert out.issues[0].component == "runtime"
+        assert "exist" in out.issues[0].message.lower()
 
     def test_stopped_container(self, runner: DefaultProbeRunner, mock_runtime: MagicMock) -> None:
         mock_runtime.inspect_container.return_value = ContainerInspectionResult(
