@@ -42,7 +42,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install quality tools
-        run: pip install ruff black mypy pytest pytest-cov
+        run: pip install ruff black mypy pytest pytest-cov coverage
 
       - name: Ruff (lint)
         continue-on-error: true
@@ -59,13 +59,13 @@ jobs:
       - name: Pytest with coverage
         continue-on-error: true
         # Unit tests only; integration/system need Postgres/Docker in downstream jobs.
-        run: pytest tests/unit --cov=app --cov-report=xml --cov-report=term-missing
+        run: pytest tests/unit --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-xml
-          path: backend/coverage.xml
+          name: coverage-quality
+          path: backend/coverage-quality.xml
           if-no-files-found: warn
 
   unit-tests:
@@ -90,8 +90,28 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install coverage tools
+        run: pip install coverage pytest-cov
+
       - name: Run unit tests
-        run: pytest tests/unit -v -n auto
+        run: pytest tests/unit -v -n auto --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
+
+      - name: Prepare unit coverage data for aggregation
+        run: |
+          if ls .coverage.* 1> /dev/null 2>&1; then
+            coverage combine
+          fi
+          test -f .coverage
+          cp .coverage .coverage.unit
+
+      - name: Upload unit coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: |
+            backend/coverage-unit.xml
+            backend/.coverage.unit
+          if-no-files-found: error
 
   integration-tests:
     name: Integration Tests
@@ -133,6 +153,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install coverage tools
+        run: pip install coverage pytest-cov
+
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
@@ -144,7 +167,24 @@ jobs:
           done
 
       - name: Run integration tests
-        run: pytest tests/integration -v -n 2
+        run: pytest tests/integration -v -n 2 --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
+
+      - name: Prepare integration coverage data for aggregation
+        run: |
+          if ls .coverage.* 1> /dev/null 2>&1; then
+            coverage combine
+          fi
+          test -f .coverage
+          cp .coverage .coverage.integration
+
+      - name: Upload integration coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: |
+            backend/coverage-integration.xml
+            backend/.coverage.integration
+          if-no-files-found: error
 
   system-tests:
     name: System Tests
@@ -171,6 +211,8 @@ jobs:
 
     env:
       DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+      # Absolute path so sudo pytest appends to the same file as the non-sudo run.
+      COVERAGE_FILE: ${{ github.workspace }}/backend/.coverage.system
 
     steps:
       - name: Checkout repository
@@ -186,6 +228,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install coverage tools
+        run: pip install coverage pytest-cov
+
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
@@ -197,7 +242,75 @@ jobs:
           done
 
       - name: Run non-topology system tests
-        run: pytest tests/system -v -m "not topology_linux"
+        run: pytest tests/system -v -m "not topology_linux" --cov=app --cov-append --cov-report=term-missing
 
       - name: Run topology Linux system tests
-        run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux"
+        run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux" --cov=app --cov-append --cov-report=term-missing
+
+      - name: Write system coverage XML
+        run: |
+          test -f .coverage.system
+          coverage xml --data-file=.coverage.system -o coverage-system.xml
+          coverage report --data-file=.coverage.system
+
+      - name: Upload system coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-system
+          path: |
+            backend/coverage-system.xml
+            backend/.coverage.system
+          if-no-files-found: error
+
+  coverage-report:
+    name: coverage-report
+    needs: [unit-tests, integration-tests, system-tests]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install coverage tools
+        run: pip install coverage pytest-cov
+
+      - name: Download unit coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-unit
+          path: backend
+
+      - name: Download integration coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-integration
+          path: backend
+
+      - name: Download system coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-system
+          path: backend
+
+      - name: Combine coverage and generate unified report
+        run: |
+          coverage combine .coverage.unit .coverage.integration .coverage.system
+          coverage xml -o coverage.xml
+          coverage report
+
+      - name: Upload combined coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-combined
+          path: backend/coverage.xml
+          if-no-files-found: error
