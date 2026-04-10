@@ -6,8 +6,10 @@ bridge + veth + netns, then the probe runner rolls up container + topology + TCP
 
 Requires Linux + CAP_NET_ADMIN + Docker (``topology_linux``). See ``README.md`` in this folder.
 
-Uses ``nginx:alpine`` explicitly (bind-mounted ``nginx.conf`` listening on ``WORKSPACE_IDE_CONTAINER_PORT``)
+Uses ``nginx:alpine`` explicitly (bind-mounted ``conf.d`` snippet listening on ``WORKSPACE_IDE_CONTAINER_PORT``)
 so the service probe matches production’s in-container IDE port without pulling the full workspace image.
+Replacing the image’s main ``nginx.conf`` can break startup; a drop-in under ``/etc/nginx/conf.d/`` keeps the
+default top-level config (``daemon off``, includes, etc.) intact.
 """
 
 from __future__ import annotations
@@ -56,6 +58,30 @@ def _wait_tcp_connect(host: str, port: int, *, deadline_s: float = 20.0) -> None
     pytest.fail(msg)
 
 
+def _wait_container_init_pid_visible(
+    runtime: DockerRuntimeAdapter,
+    container_id: str,
+    *,
+    deadline_s: float = 30.0,
+) -> None:
+    """Block until Docker reports a running init PID that exists under ``/proc`` on this host."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < deadline_s:
+        ins = runtime.inspect_container(container_id=container_id)
+        if (
+            ins.exists
+            and ins.container_state == "running"
+            and ins.pid is not None
+            and ins.pid > 0
+            and Path(f"/proc/{ins.pid}").exists()
+        ):
+            return
+        time.sleep(0.1)
+    pytest.fail(
+        f"container {container_id!r} never had a live host PID under /proc within {deadline_s}s",
+    )
+
+
 def test_runtime_ensure_topology_attach_probe_workspace_health_happy_path(
     linux_net_admin_or_skip: None,
     linux_topology_adapter,
@@ -63,9 +89,9 @@ def test_runtime_ensure_topology_attach_probe_workspace_health_happy_path(
     docker_client,
 ) -> None:
     """
-    1. Runtime: ensure + start container (``nginx:alpine`` on 8080 via bind-mounted config).
-    2. Runtime: ``container_id`` + ``get_container_netns_ref`` for topology attach.
-    3. Topology: ``ensure_node_topology`` → ``allocate_workspace_ip`` → ``attach_workspace``.
+    1. Runtime: ensure + start container (``nginx:alpine`` on 8080 via ``conf.d`` drop-in).
+    2. Topology: ``ensure_node_topology`` → ``allocate_workspace_ip``.
+    3. Topology: ``get_container_netns_ref`` immediately before ``attach_workspace`` (fresh PID / netns).
     4. Probe: ``check_workspace_health`` → healthy with ``internal_endpoint == workspace_ip:8080``.
     """
     cidr, gw = _unique_ipv4_subnet()
@@ -83,18 +109,13 @@ def test_runtime_ensure_topology_attach_probe_workspace_health_happy_path(
     try:
         project = base / "project"
         project.mkdir(parents=True, exist_ok=True)
-        nginx_conf = base / "nginx.conf"
-        nginx_conf.write_text(
-            "daemon off;\n"
-            "pid /tmp/nginx-e2e.pid;\n"
-            "events { worker_connections 16; }\n"
-            "http {\n"
-            "  server {\n"
-            f"    listen {WORKSPACE_IDE_CONTAINER_PORT};\n"
-            "    location / {\n"
-            "      add_header Content-Type text/plain;\n"
-            "      return 200 'ok\\n';\n"
-            "    }\n"
+        nginx_dropin = base / "devnest-e2e.conf"
+        nginx_dropin.write_text(
+            "server {\n"
+            f"  listen {WORKSPACE_IDE_CONTAINER_PORT} default_server;\n"
+            "  location / {\n"
+            "    add_header Content-Type text/plain;\n"
+            "    return 200 'ok\\n';\n"
             "  }\n"
             "}\n",
             encoding="utf-8",
@@ -111,8 +132,8 @@ def test_runtime_ensure_topology_attach_probe_workspace_health_happy_path(
             labels={"devnest.system_test": "runtime_topology_probe"},
             extra_bind_mounts=(
                 WorkspaceExtraBindMountSpec(
-                    host_path=str(nginx_conf),
-                    container_path="/etc/nginx/nginx.conf",
+                    host_path=str(nginx_dropin),
+                    container_path="/etc/nginx/conf.d/99-devnest-e2e.conf",
                     read_only=True,
                 ),
             ),
@@ -121,10 +142,7 @@ def test_runtime_ensure_topology_attach_probe_workspace_health_happy_path(
         started = runtime.start_container(container_id=ensured.container_id)
         assert started.success is True
         assert started.container_state == "running"
-
-        netns = runtime.get_container_netns_ref(container_id=ensured.container_id)
-        assert netns.netns_ref.startswith("/proc/")
-        assert netns.netns_ref.endswith("/ns/net")
+        _wait_container_init_pid_visible(runtime, ensured.container_id)
 
         linux_topology_adapter.ensure_node_topology(topology_id=tid, node_id=node_id)
         ip_res = linux_topology_adapter.allocate_workspace_ip(
@@ -132,6 +150,9 @@ def test_runtime_ensure_topology_attach_probe_workspace_health_happy_path(
             node_id=node_id,
             workspace_id=ws_id,
         )
+        netns = runtime.get_container_netns_ref(container_id=ensured.container_id)
+        assert netns.netns_ref.startswith("/proc/")
+        assert netns.netns_ref.endswith("/ns/net")
         linux_topology_adapter.attach_workspace(
             topology_id=tid,
             node_id=node_id,
