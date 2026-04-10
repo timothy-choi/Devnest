@@ -140,10 +140,14 @@ def attach_host_if_to_bridge(host_if: str, bridge_name: str, *, runner: CommandR
     Attach the host veth leg to a bridge and bring it up.
 
     ``ip link set dev <host_if> master <bridge>`` then ``ip link set dev <host_if> up``.
+    Idempotent when the interface is already enslaved to ``bridge_name`` (still ensures UP).
     """
     h = _validate_ifname(host_if, label="host_if")
     br = _validate_ifname(bridge_name, label="bridge")
     r = runner or CommandRunner()
+    if check_host_veth_enslaved_to_bridge(h, br, runner=r):
+        r.run(["ip", "link", "set", "dev", h, "up"])
+        return
     r.run(["ip", "link", "set", "dev", h, "master", br])
     r.run(["ip", "link", "set", "dev", h, "up"])
 

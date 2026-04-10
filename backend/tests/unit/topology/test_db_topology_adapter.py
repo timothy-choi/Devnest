@@ -441,6 +441,36 @@ class TestAttachWorkspace:
             )
         assert ip.workspace_ip != "10.0.0.99"
 
+    def test_rejects_lease_ip_outside_runtime_cidr(self, topo_session: Session) -> None:
+        """Corrupt or hand-inserted leases must not attach if IP is outside the runtime CIDR."""
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.80.0/24", "gateway_ip": "10.77.80.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        now = datetime.now(timezone.utc)
+        topo_session.add(
+            IpAllocation(
+                node_id="n1",
+                topology_id=tid,
+                workspace_id=80,
+                ip="10.99.0.10",
+                leased_at=now,
+                released_at=None,
+            ),
+        )
+        topo_session.commit()
+        with pytest.raises(WorkspaceAttachmentError, match="not within runtime CIDR"):
+            adapter.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=80,
+                container_id="c80",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip="10.99.0.10",
+            )
+
     def test_rejects_invalid_netns_ref(self, topo_session: Session) -> None:
         tid = _insert_topology(topo_session)
         adapter = DbTopologyAdapter(topo_session, apply_linux_attachment=True)

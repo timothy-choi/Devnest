@@ -650,6 +650,11 @@ class DbTopologyAdapter(TopologyAdapter):
                         "IP allocation hit repeated database conflicts (likely concurrent requests); "
                         f"giving up after {_ALLOCATE_IP_MAX_ATTEMPTS} attempts",
                     ) from exc
+                continue
+
+        raise WorkspaceIPAllocationError(
+            "internal error: IP allocation loop exited without result or handled exception",
+        )
 
     def _allocate_workspace_ip_attempt(
         self,
@@ -783,6 +788,20 @@ class DbTopologyAdapter(TopologyAdapter):
             raise WorkspaceAttachmentError(
                 "workspace_ip must match an active allocation; call allocate_workspace_ip first",
             )
+        try:
+            ws_addr = ipaddress.ip_address(workspace_ip)
+            rt_net = ipaddress.ip_network(str(runtime.cidr).strip(), strict=False)
+            if not isinstance(ws_addr, ipaddress.IPv4Address) or not isinstance(
+                rt_net,
+                ipaddress.IPv4Network,
+            ):
+                raise WorkspaceAttachmentError("V1 attach requires IPv4 workspace_ip and runtime CIDR")
+            if ws_addr not in rt_net:
+                raise WorkspaceAttachmentError(
+                    f"workspace_ip {workspace_ip!r} is not within runtime CIDR {runtime.cidr!r}",
+                )
+        except ValueError as e:
+            raise WorkspaceAttachmentError(f"invalid workspace_ip or runtime cidr: {e}") from e
 
         att_stmt = select(TopologyAttachment).where(
             TopologyAttachment.topology_id == topology_id,
