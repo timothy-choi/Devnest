@@ -46,6 +46,30 @@ def _insert_topology(session: Session, *, spec: dict | None = None) -> int:
     return t.topology_id
 
 
+class _RecordingLinuxRunner:
+    """Fake ``CommandRunner`` for attach tests: records argv; optional failure at veth netns move."""
+
+    def __init__(self, *, fail_on_netns_move: bool = False) -> None:
+        self.commands: list[list[str]] = []
+        self._fail_on_netns_move = fail_on_netns_move
+
+    def run(self, cmd: list[str]) -> str:
+        argv = list(cmd)
+        self.commands.append(argv)
+        # ``move_container_if_to_netns``: ip link set dev <if> netns <pid>
+        if self._fail_on_netns_move and len(argv) >= 7 and argv[5] == "netns":
+            raise RuntimeError("simulated netns move failure")
+        return ""
+
+
+def _assert_host_veth_del_recorded(commands: list[list[str]], host_if: str) -> None:
+    # ``remove_veth_if_exists``: ``ip link del dev <host_if>``
+    assert any(
+        len(c) >= 5 and c[0] == "ip" and c[1] == "link" and c[2] == "del" and c[3] == "dev" and c[4] == host_if
+        for c in commands
+    ), f"expected `ip link del dev {host_if}` in recorded commands: {commands}"
+
+
 class TestEnsureNodeTopology:
     def test_creates_runtime_when_missing(self, topo_session: Session) -> None:
         tid = _insert_topology(topo_session)
@@ -519,6 +543,287 @@ class TestAttachWorkspace:
         ).first()
         assert row is not None
         assert row.status == TopologyAttachmentStatus.FAILED
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.node_id == "n1",
+                IpAllocation.workspace_id == 40,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is not None
+
+    def test_linux_attach_fails_after_veth_and_bridge_runs_host_cleanup(
+        self,
+        topo_session: Session,
+    ) -> None:
+        """Mid-pipeline Linux failure triggers ``_run_linux_attach`` veth cleanup plus FAILED + lease release."""
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.41.0/24", "gateway_ip": "10.77.41.1", "bridge_name": "br-mid"},
+        )
+        runner = _RecordingLinuxRunner(fail_on_netns_move=True)
+        adapter = DbTopologyAdapter(
+            topo_session,
+            command_runner=runner,
+            apply_linux_attachment=True,
+        )
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=41)
+        host_if, _ = _veth_pair_names(tid, "n1", 41)
+        with pytest.raises(WorkspaceAttachmentError, match="linux attach failed"):
+            adapter.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=41,
+                container_id="c-mid",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip=ip.workspace_ip,
+            )
+        _assert_host_veth_del_recorded(runner.commands, host_if)
+        att = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 41,
+            ),
+        ).first()
+        assert att is not None
+        assert att.status == TopologyAttachmentStatus.FAILED
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.workspace_id == 41,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is not None
+
+    def test_linux_attach_failure_on_reattach_does_not_release_existing_lease(
+        self,
+        topo_session: Session,
+    ) -> None:
+        """Updating an existing attachment: Linux failure must not release the IP (retryable with same lease)."""
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.42.0/24", "gateway_ip": "10.77.42.1", "bridge_name": "br-re"},
+        )
+        stable = DbTopologyAdapter(topo_session, apply_linux_attachment=False)
+        stable.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = stable.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=42)
+        stable.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=42,
+            container_id="c-first",
+            netns_ref="/proc/1/ns/net",
+            workspace_ip=ip.workspace_ip,
+        )
+
+        runner = _RecordingLinuxRunner(fail_on_netns_move=True)
+        linux_ad = DbTopologyAdapter(
+            topo_session,
+            command_runner=runner,
+            apply_linux_attachment=True,
+        )
+        with pytest.raises(WorkspaceAttachmentError, match="linux attach failed"):
+            linux_ad.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=42,
+                container_id="c-second",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip=ip.workspace_ip,
+            )
+        att = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 42,
+            ),
+        ).first()
+        assert att is not None
+        assert att.status == TopologyAttachmentStatus.FAILED
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.workspace_id == 42,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is None
+        assert lease.ip == ip.workspace_ip
+
+    def test_linux_attach_success_persist_attached_failure_best_effort_cleanup(
+        self,
+        topo_session: Session,
+    ) -> None:
+        """When Linux wiring succeeds but persisting ATTACHED fails, best-effort removes host veth and releases lease."""
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.43.0/24", "gateway_ip": "10.77.43.1", "bridge_name": "br-db"},
+        )
+        runner = _RecordingLinuxRunner(fail_on_netns_move=False)
+        adapter = DbTopologyAdapter(
+            topo_session,
+            command_runner=runner,
+            apply_linux_attachment=True,
+        )
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=43)
+        host_if, _ = _veth_pair_names(tid, "n1", 43)
+
+        real_commit = topo_session.commit
+
+        def flaky_commit() -> None:
+            for obj in list(topo_session.new) + list(topo_session.dirty):
+                if isinstance(obj, TopologyAttachment) and obj.status == TopologyAttachmentStatus.ATTACHED:
+                    raise RuntimeError("simulated post-linux persist failure")
+            return real_commit()
+
+        topo_session.commit = flaky_commit  # type: ignore[method-assign]
+        with pytest.raises(WorkspaceAttachmentError, match="failed to persist topology attachment"):
+            adapter.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=43,
+                container_id="c-db",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip=ip.workspace_ip,
+            )
+        topo_session.commit = real_commit  # type: ignore[method-assign]
+
+        _assert_host_veth_del_recorded(runner.commands, host_if)
+        att = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 43,
+            ),
+        ).first()
+        assert att is not None
+        assert att.status == TopologyAttachmentStatus.FAILED
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.workspace_id == 43,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is not None
+
+    def test_attach_persist_attaching_row_failure_leaves_no_stale_row(
+        self,
+        topo_session: Session,
+    ) -> None:
+        """If persisting ATTACHING fails, no attachment row is left behind; lease stays active for retry."""
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.44.0/24", "gateway_ip": "10.77.44.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session, apply_linux_attachment=False)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=44)
+
+        real_commit = topo_session.commit
+
+        def flaky_commit() -> None:
+            for obj in list(topo_session.new) + list(topo_session.dirty):
+                if isinstance(obj, TopologyAttachment) and obj.status == TopologyAttachmentStatus.ATTACHING:
+                    raise RuntimeError("simulated attaching-row persist failure")
+            return real_commit()
+
+        topo_session.commit = flaky_commit  # type: ignore[method-assign]
+        with pytest.raises(WorkspaceAttachmentError, match="failed to persist topology attachment"):
+            adapter.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=44,
+                container_id="c-pre",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip=ip.workspace_ip,
+            )
+        topo_session.commit = real_commit  # type: ignore[method-assign]
+
+        row = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 44,
+            ),
+        ).first()
+        assert row is None
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.workspace_id == 44,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is None
+        assert lease.ip == ip.workspace_ip
+
+    def test_linux_attach_success_persist_attached_failure_reattach_preserves_lease(
+        self,
+        topo_session: Session,
+    ) -> None:
+        """Post-linux DB failure on an update path must not release IP (``release_ip=False`` for existing row)."""
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.45.0/24", "gateway_ip": "10.77.45.1", "bridge_name": "br-re2"},
+        )
+        stable = DbTopologyAdapter(topo_session, apply_linux_attachment=False)
+        stable.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = stable.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=45)
+        stable.attach_workspace(
+            topology_id=tid,
+            node_id="n1",
+            workspace_id=45,
+            container_id="c-a",
+            netns_ref="/proc/1/ns/net",
+            workspace_ip=ip.workspace_ip,
+        )
+
+        runner = _RecordingLinuxRunner(fail_on_netns_move=False)
+        linux_ad = DbTopologyAdapter(
+            topo_session,
+            command_runner=runner,
+            apply_linux_attachment=True,
+        )
+        real_commit = topo_session.commit
+
+        def flaky_commit() -> None:
+            for obj in list(topo_session.new) + list(topo_session.dirty):
+                if isinstance(obj, TopologyAttachment) and obj.status == TopologyAttachmentStatus.ATTACHED:
+                    raise RuntimeError("simulated post-linux persist failure on reattach")
+            return real_commit()
+
+        host_if, _ = _veth_pair_names(tid, "n1", 45)
+        topo_session.commit = flaky_commit  # type: ignore[method-assign]
+        with pytest.raises(WorkspaceAttachmentError, match="failed to persist topology attachment"):
+            linux_ad.attach_workspace(
+                topology_id=tid,
+                node_id="n1",
+                workspace_id=45,
+                container_id="c-b",
+                netns_ref="/proc/1/ns/net",
+                workspace_ip=ip.workspace_ip,
+            )
+        topo_session.commit = real_commit  # type: ignore[method-assign]
+
+        _assert_host_veth_del_recorded(runner.commands, host_if)
+        att = topo_session.exec(
+            select(TopologyAttachment).where(
+                TopologyAttachment.topology_id == tid,
+                TopologyAttachment.workspace_id == 45,
+            ),
+        ).first()
+        assert att is not None
+        assert att.status == TopologyAttachmentStatus.FAILED
+        lease = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.workspace_id == 45,
+            ),
+        ).first()
+        assert lease is not None
+        assert lease.released_at is None
 
 
 class TestDetachWorkspace:
