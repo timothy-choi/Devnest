@@ -96,21 +96,20 @@ jobs:
       - name: Run unit tests
         run: pytest tests/unit -v -n auto --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
 
-      - name: Prepare unit coverage data for aggregation
+      - name: Finalize unit coverage (combine workers if needed, then XML + report)
         run: |
           if ls .coverage.* 1> /dev/null 2>&1; then
             coverage combine
           fi
           test -f .coverage
-          cp .coverage .coverage.unit
+          coverage xml -o coverage-unit.xml
+          coverage report
 
-      - name: Upload unit coverage artifacts
+      - name: Upload unit coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-unit
-          path: |
-            backend/coverage-unit.xml
-            backend/.coverage.unit
+          path: backend/coverage-unit.xml
           if-no-files-found: error
 
   integration-tests:
@@ -169,21 +168,20 @@ jobs:
       - name: Run integration tests
         run: pytest tests/integration -v -n 2 --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
 
-      - name: Prepare integration coverage data for aggregation
+      - name: Finalize integration coverage (combine workers if needed, then XML + report)
         run: |
           if ls .coverage.* 1> /dev/null 2>&1; then
             coverage combine
           fi
           test -f .coverage
-          cp .coverage .coverage.integration
+          coverage xml -o coverage-integration.xml
+          coverage report
 
-      - name: Upload integration coverage artifacts
+      - name: Upload integration coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-integration
-          path: |
-            backend/coverage-integration.xml
-            backend/.coverage.integration
+          path: backend/coverage-integration.xml
           if-no-files-found: error
 
   system-tests:
@@ -247,75 +245,15 @@ jobs:
       - name: Run topology Linux system tests
         run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux" --cov=app --cov-append --cov-report=term-missing
 
-      - name: Write system coverage XML
+      - name: Finalize system coverage (XML + report)
         run: |
           test -f .coverage.system
           coverage xml --data-file=.coverage.system -o coverage-system.xml
           coverage report --data-file=.coverage.system
 
-      - name: Upload system coverage artifacts
+      - name: Upload system coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-system
-          path: |
-            backend/coverage-system.xml
-            backend/.coverage.system
-          if-no-files-found: error
-
-  coverage-report:
-    name: coverage-report
-    needs: [unit-tests, integration-tests, system-tests]
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/requirements.txt
-
-      - name: Install coverage tools
-        run: pip install coverage pytest-cov
-
-      # Artifacts keep repo-relative paths (e.g. backend/.coverage.unit). Downloading
-      # into backend/ would nest as backend/backend/...; use a prefix and combine explicitly.
-      - name: Download unit coverage
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-unit
-          path: coverage-downloads/unit
-
-      - name: Download integration coverage
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-integration
-          path: coverage-downloads/integration
-
-      - name: Download system coverage
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-system
-          path: coverage-downloads/system
-
-      - name: Combine coverage and generate unified report
-        run: |
-          coverage combine \
-            "${{ github.workspace }}/coverage-downloads/unit/backend/.coverage.unit" \
-            "${{ github.workspace }}/coverage-downloads/integration/backend/.coverage.integration" \
-            "${{ github.workspace }}/coverage-downloads/system/backend/.coverage.system"
-          coverage xml -o coverage.xml
-          coverage report
-
-      - name: Upload combined coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-combined
-          path: backend/coverage.xml
+          path: backend/coverage-system.xml
           if-no-files-found: error
