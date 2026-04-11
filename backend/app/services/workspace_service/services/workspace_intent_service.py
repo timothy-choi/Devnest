@@ -142,10 +142,13 @@ def _runtime_ready_for_access(ws: Workspace, rt: WorkspaceRuntime | None) -> boo
     return bool((rt.container_id or "").strip())
 
 
-def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
-    """Public URL clients would use via Traefik when ``DEVNEST_GATEWAY_ENABLED`` (DNS/TLS out of scope)."""
+def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
+    """Stored ``Workspace.public_host``, or default ``{id}.{base_domain}`` when gateway is on and runtime is ready."""
     from app.libs.common.config import get_settings
 
+    explicit = (ws.public_host or "").strip()
+    if explicit:
+        return explicit
     settings = get_settings()
     if not settings.devnest_gateway_enabled:
         return None
@@ -156,10 +159,20 @@ def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | 
     wid = ws.workspace_id
     if wid is None:
         return None
-    host = (ws.public_host or "").strip()
+    dom = (settings.devnest_base_domain or "app.devnest.local").strip().strip(".")
+    return f"{wid}.{dom}"
+
+
+def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
+    """Public URL clients would use via Traefik when ``DEVNEST_GATEWAY_ENABLED`` (DNS/TLS out of scope)."""
+    from app.libs.common.config import get_settings
+
+    settings = get_settings()
+    if not settings.devnest_gateway_enabled:
+        return None
+    host = _resolve_public_host_for_gateway_display(ws, rt)
     if not host:
-        dom = (settings.devnest_base_domain or "app.devnest.local").strip().strip(".")
-        host = f"{wid}.{dom}"
+        return None
     scheme = (settings.devnest_gateway_public_scheme or "http").strip().rstrip(":")
     return f"{scheme}://{host}/"
 
@@ -206,7 +219,7 @@ def get_workspace_access(
         status=ws.status,
         runtime_ready=True,
         endpoint_ref=ws.endpoint_ref,
-        public_host=ws.public_host,
+        public_host=_resolve_public_host_for_gateway_display(ws, rt),
         internal_endpoint=rt.internal_endpoint,
         gateway_url=_derive_gateway_url_v1(ws, rt),
         issues=issues,
@@ -254,7 +267,7 @@ def request_attach_workspace(
         runtime_ready=True,
         active_sessions_count=ws.active_sessions_count,
         endpoint_ref=ws.endpoint_ref,
-        public_host=ws.public_host,
+        public_host=_resolve_public_host_for_gateway_display(ws, rt),
         internal_endpoint=rt.internal_endpoint,
         gateway_url=_derive_gateway_url_v1(ws, rt),
         issues=issues,

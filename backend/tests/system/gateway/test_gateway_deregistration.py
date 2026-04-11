@@ -35,6 +35,7 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def _truncate_gateway_dereg_tables(workspace_control_plane_postgres_engine: Engine) -> None:
+    helpers.clear_all_registered_routes()
     with workspace_control_plane_postgres_engine.connect() as conn:
         for table in reversed(SQLModel.metadata.sorted_tables):
             conn.execute(text(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE'))

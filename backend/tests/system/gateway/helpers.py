@@ -78,6 +78,17 @@ def fetch_registered_routes() -> list[dict]:
     return data
 
 
+def clear_all_registered_routes() -> None:
+    """Remove every workspace route from route-admin (in-memory + file); use before DB TRUNCATE tests."""
+    base = route_admin_base_url()
+    for row in fetch_registered_routes():
+        wid = str(row.get("workspace_id") or "").strip()
+        if not wid:
+            continue
+        r = httpx.delete(f"{base}/routes/{wid}", timeout=15.0)
+        r.raise_for_status()
+
+
 def route_for_workspace(routes: list[dict], workspace_id: int) -> dict | None:
     sid = str(workspace_id)
     for row in routes:
