@@ -3,22 +3,33 @@
 Mutating flows: bring-up, stop, delete, restart, update (noop or restart-based). Read-only:
 ``check_workspace_runtime_health``. Placement (``topology_id``, ``node_id``, project base) is
 injected until scheduler / ``Workspace_runtime`` persistence exist.
+
+**Persistence boundary:** This package does not write ``Workspace`` / ``WorkspaceRuntime`` / ``WorkspaceJob``
+rows. Callers (typically :mod:`app.workers.workspace_job_worker.worker`) persist orchestration outcomes.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.libs.probes.interfaces import ProbeRunner
 from app.libs.runtime.errors import RuntimeAdapterError
 from app.libs.runtime.interfaces import RuntimeAdapter
-from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT, ContainerInspectionResult
+from app.libs.runtime.models import (
+    WORKSPACE_IDE_CONTAINER_PORT,
+    ContainerInspectionResult,
+    EnsureRunningRuntimeResult,
+    NetnsRefResult,
+)
 from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
 from app.libs.topology.interfaces import TopologyAdapter
+from app.libs.topology.results import AttachWorkspaceResult
 
 from .errors import (
     WorkspaceBringUpError,
@@ -40,6 +51,19 @@ from .results import (
 _CONTAINER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
 # Persisted on the workspace container when ``requested_config_version`` is supplied at bring-up / restart.
 _CONFIG_VERSION_LABEL = "devnest.config_version"
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _BringUpContext:
+    """Validated bring-up inputs and derived paths (no I/O beyond ``host_dir`` creation)."""
+
+    wid: str
+    ws_int: int
+    container_name: str
+    host_dir: Path
+    labels: dict[str, str]
 
 
 def _sanitize_container_name(workspace_id: str) -> str:
@@ -119,14 +143,12 @@ class DefaultOrchestratorService(OrchestratorService):
         )
         self._workspace_image = workspace_image
 
-    def bring_up_workspace_runtime(
+    def _bring_up_build_context(
         self,
-        *,
         workspace_id: str,
-        requested_config_version: int | None = None,
-    ) -> WorkspaceBringUpResult:
+        requested_config_version: int | None,
+    ) -> _BringUpContext:
         # TODO: reconcile with persisted Workspace_runtime row; container label is the V1 source of truth.
-
         wid = (workspace_id or "").strip()
         if not wid:
             raise WorkspaceBringUpError("workspace_id is empty")
@@ -146,20 +168,34 @@ class DefaultOrchestratorService(OrchestratorService):
         if requested_config_version is not None:
             labels[_CONFIG_VERSION_LABEL] = str(int(requested_config_version))
 
+        return _BringUpContext(
+            wid=wid,
+            ws_int=ws_int,
+            container_name=name,
+            host_dir=host_dir,
+            labels=labels,
+        )
+
+    def _bring_up_start_container(self, ctx: _BringUpContext) -> EnsureRunningRuntimeResult:
+        """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns)."""
         try:
-            running = ensure_running_runtime_only(
+            return ensure_running_runtime_only(
                 self._runtime_adapter,
-                name=name,
+                name=ctx.container_name,
                 image=self._workspace_image,
                 ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
-                labels=labels,
-                workspace_host_path=str(host_dir),
+                labels=ctx.labels,
+                workspace_host_path=str(ctx.host_dir),
             )
         except RuntimeAdapterError as e:
             raise WorkspaceBringUpError(f"runtime bring-up failed: {e}") from e
 
-        # TODO: persist container_id, image, ports, paths to Workspace_runtime (DB).
-
+    def _bring_up_attach_topology(
+        self,
+        ctx: _BringUpContext,
+        running: EnsureRunningRuntimeResult,
+    ) -> tuple[NetnsRefResult, AttachWorkspaceResult]:
+        """Ensure node topology, allocate IP, attach workspace veth to bridge."""
         try:
             self._topology_service.ensure_node_topology(
                 topology_id=self._topology_id,
@@ -168,25 +204,32 @@ class DefaultOrchestratorService(OrchestratorService):
             ip_res = self._topology_service.allocate_workspace_ip(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
-                workspace_id=ws_int,
+                workspace_id=ctx.ws_int,
             )
             netns = self._runtime_adapter.get_container_netns_ref(container_id=running.container_id)
             attach_res = self._topology_service.attach_workspace(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
-                workspace_id=ws_int,
+                workspace_id=ctx.ws_int,
                 container_id=running.container_id,
                 netns_ref=netns.netns_ref,
                 workspace_ip=ip_res.workspace_ip,
             )
         except TopologyError as e:
             raise WorkspaceBringUpError(f"topology bring-up failed: {e}") from e
+        return netns, attach_res
 
+    def _bring_up_run_probe(
+        self,
+        ctx: _BringUpContext,
+        running: EnsureRunningRuntimeResult,
+        netns: NetnsRefResult,
+        attach_res: AttachWorkspaceResult,
+    ) -> WorkspaceBringUpResult:
         # TODO: register attach_res.internal_endpoint with edge gateway / route tables.
-
         try:
             health = self._probe_runner.check_workspace_health(
-                workspace_id=wid,
+                workspace_id=ctx.wid,
                 topology_id=str(self._topology_id),
                 node_id=self._node_id,
                 container_id=running.container_id,
@@ -201,7 +244,7 @@ class DefaultOrchestratorService(OrchestratorService):
         )
 
         return WorkspaceBringUpResult(
-            workspace_id=wid,
+            workspace_id=ctx.wid,
             success=health.healthy,
             node_id=self._node_id,
             topology_id=str(self._topology_id),
@@ -214,24 +257,51 @@ class DefaultOrchestratorService(OrchestratorService):
             issues=_issues_or_none(issue_msgs),
         )
 
-    def stop_workspace_runtime(
+    def bring_up_workspace_runtime(
         self,
         *,
         workspace_id: str,
-        requested_by: str | None = None,
-    ) -> WorkspaceStopResult:
-        _ = requested_by  # TODO: persist audit trail / emit stop event
+        requested_config_version: int | None = None,
+    ) -> WorkspaceBringUpResult:
+        """
+        Start workspace container, wire topology attachment, run service probe.
 
-        wid = (workspace_id or "").strip()
-        if not wid:
-            raise WorkspaceStopError("workspace_id is empty")
+        Returns a :class:`WorkspaceBringUpResult` for the worker to persist on ``WorkspaceRuntime``.
+        """
+        ctx = self._bring_up_build_context(workspace_id, requested_config_version)
+        logger.info(
+            "orchestrator_bring_up_start",
+            extra={
+                "workspace_id": ctx.wid,
+                "requested_config_version": requested_config_version,
+                "topology_id": self._topology_id,
+                "node_id": self._node_id,
+            },
+        )
+        running = self._bring_up_start_container(ctx)
+        logger.debug(
+            "orchestrator_bring_up_runtime_running",
+            extra={"workspace_id": ctx.wid, "container_id": running.container_id},
+        )
+        netns, attach_res = self._bring_up_attach_topology(ctx, running)
+        result = self._bring_up_run_probe(ctx, running, netns, attach_res)
+        logger.info(
+            "orchestrator_bring_up_complete",
+            extra={
+                "workspace_id": ctx.wid,
+                "success": result.success,
+                "probe_healthy": result.probe_healthy,
+            },
+        )
+        return result
 
+    def _stop_load_inspection(
+        self,
+        wid: str,
+        container_ref: str,
+    ) -> tuple[int, str | None, str | None]:
+        """Inspect container by deterministic name; return topology int id, container_id, prior state."""
         ws_int = _parse_topology_workspace_id(wid)
-        container_ref = _sanitize_container_name(wid)
-
-        issues: list[str] = []
-
-        # 1) Load current runtime state (no DB model yet; inspect by deterministic container name).
         # TODO: load persisted runtime placement (container_id/node_id/topology_id) from Workspace_runtime.
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)
@@ -240,43 +310,79 @@ class DefaultOrchestratorService(OrchestratorService):
 
         container_id = (ins.container_id or container_ref).strip() or None
         container_state_before = (ins.container_state or "").strip() or None
+        return ws_int, container_id, container_state_before
 
-        # 2) Detach from topology (best-effort; stop can still proceed even if detach fails).
-        topology_detached: bool | None = None
+    def _stop_detach_topology_best_effort(self, ws_int: int, issues: list[str]) -> bool | None:
+        """Detach workspace from topology; failures become issue strings, not hard errors."""
         try:
             det = self._topology_service.detach_workspace(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
                 workspace_id=ws_int,
             )
-            topology_detached = bool(det.detached)
+            return bool(det.detached)
         except TopologyError as e:
-            topology_detached = False
             issues.append(f"topology:detach_failed:{e}")
+            return False
         except Exception as e:
             raise WorkspaceStopError(f"unexpected detach failure: {e}") from e
 
-        # 3) Stop container (best-effort).
-        stopped_state: str | None = None
-        stop_success: bool = False
+    def _stop_container_best_effort(
+        self,
+        container_id: str | None,
+        issues: list[str],
+    ) -> tuple[bool, str | None]:
+        """Stop container if we have an id; return (stop_success, reported container state)."""
         if container_id is None:
             issues.append("runtime:container_id_missing")
-        else:
-            try:
-                stop_res = self._runtime_adapter.stop_container(container_id=container_id)
-                stop_success = bool(stop_res.success)
-                stopped_state = (stop_res.container_state or "").strip() or None
-                if not stop_res.success:
-                    issues.append(f"runtime:stop_failed:{stop_res.message or 'stop_container returned success=False'}")
-            except RuntimeAdapterError as e:
-                issues.append(f"runtime:stop_failed:{e}")
-            except Exception as e:
-                raise WorkspaceStopError(f"unexpected stop failure: {e}") from e
+            return False, None
+        try:
+            stop_res = self._runtime_adapter.stop_container(container_id=container_id)
+            stop_success = bool(stop_res.success)
+            stopped_state = (stop_res.container_state or "").strip() or None
+            if not stop_res.success:
+                issues.append(
+                    f"runtime:stop_failed:{stop_res.message or 'stop_container returned success=False'}",
+                )
+            return stop_success, stopped_state
+        except RuntimeAdapterError as e:
+            issues.append(f"runtime:stop_failed:{e}")
+            return False, None
+        except Exception as e:
+            raise WorkspaceStopError(f"unexpected stop failure: {e}") from e
+
+    def stop_workspace_runtime(
+        self,
+        *,
+        workspace_id: str,
+        requested_by: str | None = None,
+    ) -> WorkspaceStopResult:
+        """
+        Detach topology (best-effort), stop container (best-effort).
+
+        Returns :class:`WorkspaceStopResult` for the worker to persist (e.g. cleared or stopped runtime).
+        """
+        _ = requested_by  # TODO: persist audit trail / emit stop event
+
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise WorkspaceStopError("workspace_id is empty")
+
+        container_ref = _sanitize_container_name(wid)
+        logger.info(
+            "orchestrator_stop_start",
+            extra={"workspace_id": wid, "topology_id": self._topology_id, "node_id": self._node_id},
+        )
+
+        issues: list[str] = []
+        ws_int, container_id, container_state_before = self._stop_load_inspection(wid, container_ref)
+        topology_detached = self._stop_detach_topology_best_effort(ws_int, issues)
+        stop_success, stopped_state = self._stop_container_best_effort(container_id, issues)
 
         # TODO: persist runtime stop outcome (container_state, timestamps) to Workspace_runtime.
 
         success = bool(stop_success and topology_detached is not False)
-        return WorkspaceStopResult(
+        result = WorkspaceStopResult(
             workspace_id=wid,
             success=success,
             container_id=container_id,
@@ -284,28 +390,22 @@ class DefaultOrchestratorService(OrchestratorService):
             topology_detached=topology_detached,
             issues=_issues_or_none(issues),
         )
+        logger.info(
+            "orchestrator_stop_complete",
+            extra={
+                "workspace_id": wid,
+                "success": result.success,
+                "topology_detached": result.topology_detached,
+            },
+        )
+        return result
 
-    def delete_workspace_runtime(
-        self,
-        *,
-        workspace_id: str,
-        requested_by: str | None = None,
-    ) -> WorkspaceDeleteResult:
-        _ = requested_by  # TODO: persist audit trail / emit delete event
-
-        wid = (workspace_id or "").strip()
-        if not wid:
-            raise WorkspaceDeleteError("workspace_id is empty")
-
+    def _delete_load_inspection(self, wid: str, container_ref: str) -> tuple[int, str | None]:
+        """Parse workspace id, inspect container; return topology int id and engine container_id."""
         try:
             ws_int = _parse_topology_workspace_id(wid)
         except WorkspaceBringUpError as e:
             raise WorkspaceDeleteError(str(e)) from e
-
-        container_ref = _sanitize_container_name(wid)
-        issues: list[str] = []
-
-        # 1) Load current runtime state (deterministic container name until Workspace_runtime exists).
         # TODO: load persisted container_id / placement from Workspace_runtime.
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)
@@ -313,60 +413,92 @@ class DefaultOrchestratorService(OrchestratorService):
             raise WorkspaceDeleteError(f"inspect_container failed: {e}") from e
 
         container_id = (ins.container_id or container_ref).strip() or None
+        return ws_int, container_id
 
-        # 2) Detach workspace from topology (best-effort; delete_container can still run).
-        topology_detached: bool | None = None
+    def _delete_detach_topology_best_effort(self, ws_int: int, issues: list[str]) -> bool | None:
         try:
             det = self._topology_service.detach_workspace(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
                 workspace_id=ws_int,
             )
-            topology_detached = bool(det.detached)
+            return bool(det.detached)
         except TopologyError as e:
-            topology_detached = False
             issues.append(f"topology:detach_failed:{e}")
+            return False
         except Exception as e:
             raise WorkspaceDeleteError(f"unexpected detach failure: {e}") from e
 
-        # 3) Remove container from the runtime engine.
-        container_deleted = False
-        final_state: str | None = None
+    def _delete_container_best_effort(
+        self,
+        container_id: str | None,
+        issues: list[str],
+    ) -> tuple[bool, str | None]:
         if container_id is None:
             issues.append("runtime:container_id_missing")
-        else:
-            try:
-                del_res = self._runtime_adapter.delete_container(container_id=container_id)
-                container_deleted = bool(del_res.success)
-                final_state = (del_res.container_state or "").strip() or None
-                if not del_res.success:
-                    issues.append(
-                        f"runtime:delete_failed:{del_res.message or 'delete_container returned success=False'}",
-                    )
-            except RuntimeAdapterError as e:
-                issues.append(f"runtime:delete_failed:{e}")
-            except Exception as e:
-                raise WorkspaceDeleteError(f"unexpected delete failure: {e}") from e
+            return False, None
+        try:
+            del_res = self._runtime_adapter.delete_container(container_id=container_id)
+            container_deleted = bool(del_res.success)
+            final_state = (del_res.container_state or "").strip() or None
+            if not del_res.success:
+                issues.append(
+                    f"runtime:delete_failed:{del_res.message or 'delete_container returned success=False'}",
+                )
+            return container_deleted, final_state
+        except RuntimeAdapterError as e:
+            issues.append(f"runtime:delete_failed:{e}")
+            return False, None
+        except Exception as e:
+            raise WorkspaceDeleteError(f"unexpected delete failure: {e}") from e
 
-        # 4) Optionally remove node-local topology runtime if the adapter considers it safe
-        # (e.g. no non-DETACHED attachments remain on this node).
-        topology_deleted: bool | None = False
+    def _delete_topology_runtime_best_effort(self, issues: list[str]) -> bool | None:
+        """Remove node-local topology runtime when safe (e.g. no non-DETACHED attachments)."""
         try:
             self._topology_service.delete_topology(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
             )
-            topology_deleted = True
+            return True
         except TopologyDeleteError as e:
-            topology_deleted = False
             issues.append(f"topology:delete_failed:{e}")
+            return False
         except Exception as e:
             raise WorkspaceDeleteError(f"unexpected topology delete failure: {e}") from e
+
+    def delete_workspace_runtime(
+        self,
+        *,
+        workspace_id: str,
+        requested_by: str | None = None,
+    ) -> WorkspaceDeleteResult:
+        """
+        Detach, delete container, optionally delete node topology runtime.
+
+        Returns :class:`WorkspaceDeleteResult` for the worker to clear ``WorkspaceRuntime`` on success.
+        """
+        _ = requested_by  # TODO: persist audit trail / emit delete event
+
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise WorkspaceDeleteError("workspace_id is empty")
+
+        container_ref = _sanitize_container_name(wid)
+        logger.info(
+            "orchestrator_delete_start",
+            extra={"workspace_id": wid, "topology_id": self._topology_id, "node_id": self._node_id},
+        )
+
+        issues: list[str] = []
+        ws_int, container_id = self._delete_load_inspection(wid, container_ref)
+        topology_detached = self._delete_detach_topology_best_effort(ws_int, issues)
+        container_deleted, _ = self._delete_container_best_effort(container_id, issues)
+        topology_deleted = self._delete_topology_runtime_best_effort(issues)
 
         # TODO: persist Workspace_runtime tombstone / gateway deregistration.
 
         success = bool(container_deleted and topology_detached is not False)
-        return WorkspaceDeleteResult(
+        result = WorkspaceDeleteResult(
             workspace_id=wid,
             success=success,
             container_deleted=container_deleted,
@@ -375,6 +507,16 @@ class DefaultOrchestratorService(OrchestratorService):
             container_id=container_id,
             issues=_issues_or_none(issues),
         )
+        logger.info(
+            "orchestrator_delete_complete",
+            extra={
+                "workspace_id": wid,
+                "success": result.success,
+                "container_deleted": result.container_deleted,
+                "topology_deleted": result.topology_deleted,
+            },
+        )
+        return result
 
     def restart_workspace_runtime(
         self,
@@ -383,6 +525,11 @@ class DefaultOrchestratorService(OrchestratorService):
         requested_by: str | None = None,
         requested_config_version: int | None = None,
     ) -> WorkspaceRestartResult:
+        """
+        Stop then bring-up workspace runtime (optional new ``requested_config_version`` label).
+
+        Returns :class:`WorkspaceRestartResult` aggregating stop and bring-up outcomes.
+        """
         _ = requested_by  # TODO: persist audit trail / emit restart event
 
         wid = (workspace_id or "").strip()
@@ -392,6 +539,16 @@ class DefaultOrchestratorService(OrchestratorService):
             _parse_topology_workspace_id(wid)
         except WorkspaceBringUpError as e:
             raise WorkspaceRestartError(str(e)) from e
+
+        logger.info(
+            "orchestrator_restart_start",
+            extra={
+                "workspace_id": wid,
+                "requested_config_version": requested_config_version,
+                "topology_id": self._topology_id,
+                "node_id": self._node_id,
+            },
+        )
 
         try:
             stop_res = self.stop_workspace_runtime(workspace_id=wid, requested_by=requested_by)
@@ -406,6 +563,10 @@ class DefaultOrchestratorService(OrchestratorService):
         nid = self._node_id
 
         if not stop_res.success:
+            logger.info(
+                "orchestrator_restart_complete",
+                extra={"workspace_id": wid, "success": False, "stop_success": False},
+            )
             return WorkspaceRestartResult(
                 workspace_id=wid,
                 success=False,
@@ -428,6 +589,10 @@ class DefaultOrchestratorService(OrchestratorService):
             )
         except WorkspaceBringUpError as e:
             issues.append(f"bringup:failed:{e}")
+            logger.info(
+                "orchestrator_restart_complete",
+                extra={"workspace_id": wid, "success": False, "stop_success": True, "bringup_success": False},
+            )
             return WorkspaceRestartResult(
                 workspace_id=wid,
                 success=False,
@@ -448,7 +613,7 @@ class DefaultOrchestratorService(OrchestratorService):
 
         # TODO: persist Workspace_runtime restart outcome (timestamps, container_id, probe result).
 
-        return WorkspaceRestartResult(
+        out = WorkspaceRestartResult(
             workspace_id=wid,
             success=bool(up_res.success),
             stop_success=True,
@@ -462,6 +627,16 @@ class DefaultOrchestratorService(OrchestratorService):
             probe_healthy=up_res.probe_healthy,
             issues=_issues_or_none(issues),
         )
+        logger.info(
+            "orchestrator_restart_complete",
+            extra={
+                "workspace_id": wid,
+                "success": out.success,
+                "stop_success": out.stop_success,
+                "bringup_success": out.bringup_success,
+            },
+        )
+        return out
 
     def update_workspace_runtime(
         self,
@@ -470,6 +645,11 @@ class DefaultOrchestratorService(OrchestratorService):
         requested_config_version: int,
         requested_by: str | None = None,
     ) -> WorkspaceUpdateResult:
+        """
+        If container config label matches ``requested_config_version``, health-check only (noop).
+
+        Otherwise restarts the workspace to apply the new version.
+        """
         _ = requested_by  # TODO: persist audit trail / emit update event
 
         if requested_config_version < 0:
@@ -494,6 +674,14 @@ class DefaultOrchestratorService(OrchestratorService):
         nid = self._node_id
 
         if current == requested_config_version:
+            logger.info(
+                "orchestrator_update_noop",
+                extra={
+                    "workspace_id": wid,
+                    "requested_config_version": requested_config_version,
+                    "current_config_version": current,
+                },
+            )
             return self._update_workspace_runtime_noop(
                 wid=wid,
                 ins=ins,
@@ -504,6 +692,14 @@ class DefaultOrchestratorService(OrchestratorService):
                 topology_id=tid,
             )
 
+        logger.info(
+            "orchestrator_update_restart",
+            extra={
+                "workspace_id": wid,
+                "requested_config_version": requested_config_version,
+                "current_config_version": current,
+            },
+        )
         try:
             r = self.restart_workspace_runtime(
                 workspace_id=wid,
@@ -519,7 +715,7 @@ class DefaultOrchestratorService(OrchestratorService):
 
         # TODO: persist applied config version to Workspace_runtime when DB model exists.
 
-        return WorkspaceUpdateResult(
+        ur = WorkspaceUpdateResult(
             workspace_id=wid,
             success=bool(r.success),
             current_config_version=current,
@@ -537,6 +733,11 @@ class DefaultOrchestratorService(OrchestratorService):
             probe_healthy=r.probe_healthy,
             issues=_issues_or_none(issues),
         )
+        logger.info(
+            "orchestrator_update_complete",
+            extra={"workspace_id": wid, "success": ur.success, "update_strategy": "restart"},
+        )
+        return ur
 
     def check_workspace_runtime_health(self, *, workspace_id: str) -> WorkspaceBringUpResult:
         """Inspect + ``ProbeRunner.check_workspace_health`` only (no start/stop/topology writes)."""

@@ -3,15 +3,23 @@
 V1: sequential processing, no row locks, no distributed lease. Multiple pollers may double-process
 the same job; production hardening should add ``FOR UPDATE SKIP LOCKED`` or equivalent.
 
-Gateway registration, SSE, reconcileRuntime, and EC2/scheduler integrations are intentionally
+**Persistence:** The worker is the system of record for :class:`~app.services.workspace_service.models.Workspace`,
+:class:`~app.services.workspace_service.models.WorkspaceJob`, and
+:class:`~app.services.workspace_service.models.WorkspaceRuntime` after orchestration. The orchestrator
+returns result DTOs only; this module maps them onto ORM rows and emits workspace stream events.
+
+Gateway registration, SSE transport, reconcileRuntime, and EC2/scheduler integrations are intentionally
 out of scope (see TODOs in orchestrator).
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select
+
+logger = logging.getLogger(__name__)
 
 from app.services.orchestrator_service.errors import (
     WorkspaceBringUpError,
@@ -99,6 +107,7 @@ def _health_from_probe(probe: bool | None) -> str:
 
 
 def _get_or_create_runtime(session: Session, workspace_id: int) -> WorkspaceRuntime:
+    """Return existing ``WorkspaceRuntime`` for ``workspace_id`` or insert a stub row."""
     row = session.exec(
         select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
     ).first()
@@ -122,6 +131,7 @@ def _apply_runtime_bringup_like(
     config_version: int,
     probe_healthy: bool | None,
 ) -> None:
+    """Persist placement + health snapshot after a successful bring-up / restart / update (running)."""
     rt = _get_or_create_runtime(session, workspace_id)
     ts = _now()
     rt.node_id = node_id
@@ -138,6 +148,7 @@ def _apply_runtime_bringup_like(
 
 
 def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceStopResult) -> None:
+    """Update runtime row after stop: container id/state if known; health unknown."""
     rt = _get_or_create_runtime(session, workspace_id)
     ts = _now()
     if result.container_id is not None:
@@ -150,6 +161,7 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
 
 
 def _clear_runtime_after_delete(session: Session, workspace_id: int) -> None:
+    """Tombstone runtime row when workspace is deleted (container cleared, state ``deleted``)."""
     row = session.exec(
         select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
     ).first()
@@ -203,6 +215,58 @@ def _touch_workspace(session: Session, ws: Workspace) -> None:
     session.add(ws)
 
 
+def _finalize_job_failed_workspace_error(
+    session: Session,
+    ws: Workspace,
+    job: WorkspaceJob,
+    *,
+    message: str,
+) -> None:
+    """Mark job failed, move workspace to ``ERROR`` with operational error code (orchestration outcome)."""
+    _mark_job_failed(session, job, message)
+    ws.status = WorkspaceStatus.ERROR.value
+    _workspace_set_error(ws, _ERROR_CODE_JOB, message)
+    _touch_workspace(session, ws)
+
+
+def _finalize_runtime_running_success(
+    session: Session,
+    ws: Workspace,
+    job: WorkspaceJob,
+    *,
+    config_version: int,
+    node_id: str | None,
+    topology_id: str | None,
+    container_id: str | None,
+    container_state: str | None,
+    internal_endpoint: str | None,
+    probe_healthy: bool | None,
+) -> None:
+    """
+    Shared success path for CREATE/START, RESTART, and UPDATE (restart path): persist runtime,
+    mark job succeeded, set workspace ``RUNNING`` and clear last error fields.
+    """
+    wid = ws.workspace_id
+    assert wid is not None
+    _apply_runtime_bringup_like(
+        session,
+        wid,
+        node_id=node_id,
+        topology_id=topology_id,
+        container_id=container_id,
+        container_state=container_state,
+        internal_endpoint=internal_endpoint,
+        config_version=config_version,
+        probe_healthy=probe_healthy,
+    )
+    _mark_job_succeeded(session, job)
+    ws.status = WorkspaceStatus.RUNNING.value
+    _workspace_clear_errors(ws)
+    ws.endpoint_ref = internal_endpoint or ws.endpoint_ref
+    ws.last_started = _now()
+    _touch_workspace(session, ws)
+
+
 def _finalize_bringup_result(
     session: Session,
     ws: Workspace,
@@ -214,30 +278,22 @@ def _finalize_bringup_result(
     wid = ws.workspace_id
     assert wid is not None
     if result.success:
-        _apply_runtime_bringup_like(
+        _finalize_runtime_running_success(
             session,
-            wid,
+            ws,
+            job,
+            config_version=config_version,
             node_id=result.node_id,
             topology_id=result.topology_id,
             container_id=result.container_id,
             container_state=result.container_state,
             internal_endpoint=result.internal_endpoint,
-            config_version=config_version,
             probe_healthy=result.probe_healthy,
         )
-        _mark_job_succeeded(session, job)
-        ws.status = WorkspaceStatus.RUNNING.value
-        _workspace_clear_errors(ws)
-        ws.endpoint_ref = result.internal_endpoint or ws.endpoint_ref
-        ws.last_started = _now()
-        _touch_workspace(session, ws)
         return
 
     msg = _format_issues(result.issues) or "Bring-up completed without success"
-    _mark_job_failed(session, job, msg)
-    ws.status = WorkspaceStatus.ERROR.value
-    _workspace_set_error(ws, _ERROR_CODE_JOB, msg)
-    _touch_workspace(session, ws)
+    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
 
 
 def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, result: WorkspaceStopResult) -> None:
@@ -253,10 +309,7 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
         return
 
     msg = _format_issues(result.issues) or "Stop completed without success"
-    _mark_job_failed(session, job, msg)
-    ws.status = WorkspaceStatus.ERROR.value
-    _workspace_set_error(ws, _ERROR_CODE_JOB, msg)
-    _touch_workspace(session, ws)
+    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
 
 
 def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, result: WorkspaceDeleteResult) -> None:
@@ -271,10 +324,7 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
         return
 
     msg = _format_issues(result.issues) or "Delete completed without success"
-    _mark_job_failed(session, job, msg)
-    ws.status = WorkspaceStatus.ERROR.value
-    _workspace_set_error(ws, _ERROR_CODE_JOB, msg)
-    _touch_workspace(session, ws)
+    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
 
 
 def _finalize_restart_result(
@@ -288,30 +338,22 @@ def _finalize_restart_result(
     wid = ws.workspace_id
     assert wid is not None
     if result.success:
-        _apply_runtime_bringup_like(
+        _finalize_runtime_running_success(
             session,
-            wid,
+            ws,
+            job,
+            config_version=config_version,
             node_id=result.node_id,
             topology_id=result.topology_id,
             container_id=result.container_id,
             container_state=result.container_state,
             internal_endpoint=result.internal_endpoint,
-            config_version=config_version,
             probe_healthy=result.probe_healthy,
         )
-        _mark_job_succeeded(session, job)
-        ws.status = WorkspaceStatus.RUNNING.value
-        _workspace_clear_errors(ws)
-        ws.endpoint_ref = result.internal_endpoint or ws.endpoint_ref
-        ws.last_started = _now()
-        _touch_workspace(session, ws)
         return
 
     msg = _format_issues(result.issues) or "Restart completed without success"
-    _mark_job_failed(session, job, msg)
-    ws.status = WorkspaceStatus.ERROR.value
-    _workspace_set_error(ws, _ERROR_CODE_JOB, msg)
-    _touch_workspace(session, ws)
+    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
 
 
 def _finalize_update_result(
@@ -324,30 +366,22 @@ def _finalize_update_result(
     assert wid is not None
     cfg_v = int(result.requested_config_version or job.requested_config_version)
     if result.success:
-        _apply_runtime_bringup_like(
+        _finalize_runtime_running_success(
             session,
-            wid,
+            ws,
+            job,
+            config_version=cfg_v,
             node_id=result.node_id,
             topology_id=result.topology_id,
             container_id=result.container_id,
             container_state=result.container_state,
             internal_endpoint=result.internal_endpoint,
-            config_version=cfg_v,
             probe_healthy=result.probe_healthy,
         )
-        _mark_job_succeeded(session, job)
-        ws.status = WorkspaceStatus.RUNNING.value
-        _workspace_clear_errors(ws)
-        ws.endpoint_ref = result.internal_endpoint or ws.endpoint_ref
-        ws.last_started = _now()
-        _touch_workspace(session, ws)
         return
 
     msg = _format_issues(result.issues) or "Update completed without success"
-    _mark_job_failed(session, job, msg)
-    ws.status = WorkspaceStatus.ERROR.value
-    _workspace_set_error(ws, _ERROR_CODE_JOB, msg)
-    _touch_workspace(session, ws)
+    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
 
 
 def _execute_job_body(
@@ -356,6 +390,7 @@ def _execute_job_body(
     ws: Workspace,
     job: WorkspaceJob,
 ) -> None:
+    """Dispatch ``job.job_type`` to the orchestrator and map the result to workspace/job/runtime rows."""
     wid = ws.workspace_id
     assert wid is not None
     wid_str = str(wid)
@@ -403,6 +438,7 @@ def _execute_job_body(
 
 
 def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: WorkspaceJob) -> None:
+    """Append ``JOB_SUCCEEDED`` / ``JOB_FAILED`` stream event after final job status is known."""
     # Persist job/workspace mutations before refresh so we do not reload stale pre-success rows from DB.
     session.flush()
     session.refresh(job)
@@ -434,13 +470,33 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
 
 
 def _process_one_job(session: Session, orchestrator: OrchestratorService, job: WorkspaceJob) -> None:
+    """
+    Run a single queued job: transition to ``RUNNING``, call orchestrator, persist outcomes, emit events.
+
+    Commits are owned by the caller (e.g. :func:`execute_workspace_job_tick`).
+    """
     wid = job.workspace_id
+    jid = job.workspace_job_id
+    jt = job.job_type
     ws = session.get(Workspace, wid)
     if ws is None:
+        logger.error(
+            "workspace_job_missing_workspace",
+            extra={"workspace_id": wid, "workspace_job_id": jid, "job_type": jt},
+        )
         _mark_job_running(session, job)
         _mark_job_failed(session, job, "Workspace row not found for job")
         return
 
+    logger.info(
+        "workspace_job_started",
+        extra={
+            "workspace_id": wid,
+            "workspace_job_id": jid,
+            "job_type": jt,
+            "attempt": int(job.attempt or 0) + 1,
+        },
+    )
     _mark_job_running(session, job)
     record_workspace_event(
         session,
@@ -458,16 +514,39 @@ def _process_one_job(session: Session, orchestrator: OrchestratorService, job: W
     try:
         _execute_job_body(session, orchestrator, ws, job)
     except _ORCHESTRATOR_EXCEPTIONS as e:
+        logger.warning(
+            "workspace_job_orchestrator_exception",
+            extra={
+                "workspace_id": wid,
+                "workspace_job_id": jid,
+                "job_type": jt,
+                "error": str(e),
+            },
+        )
         _mark_job_failed(session, job, str(e))
         ws.status = WorkspaceStatus.ERROR.value
         _workspace_set_error(ws, _ERROR_CODE_ORCH, str(e))
         _touch_workspace(session, ws)
     except UnsupportedWorkspaceJobTypeError as e:
+        logger.error(
+            "workspace_job_unsupported_type",
+            extra={"workspace_id": wid, "workspace_job_id": jid, "job_type": jt, "error": str(e)},
+        )
         _mark_job_failed(session, job, str(e))
         ws.status = WorkspaceStatus.ERROR.value
         _workspace_set_error(ws, _ERROR_CODE_JOB, str(e))
         _touch_workspace(session, ws)
 
+    logger.info(
+        "workspace_job_finished",
+        extra={
+            "workspace_id": wid,
+            "workspace_job_id": jid,
+            "job_type": jt,
+            "job_status": job.status,
+            "workspace_status": ws.status,
+        },
+    )
     _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
 
 
