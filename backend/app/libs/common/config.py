@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Service-to-service: required for POST /internal/notifications (header X-Internal-API-Key).
     internal_api_key: str = ""
 
+    # Workspace orchestrator (Docker): image for workspace containers; empty falls back to env then nginx:alpine.
+    workspace_container_image: str = ""
+    # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
+    workspace_projects_base: str = ""
+
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""
     smtp_port: int = 587

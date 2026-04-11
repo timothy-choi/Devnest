@@ -1,0 +1,186 @@
+name: Nightly Full Validation
+
+# Nightly tier: runs the full repository test tree without merge-time marker exclusions.
+# That includes every unmarked (merge-time) test plus heavy markers:
+#   slow | topology_heavy | concurrency | failure_path | topology_linux
+# and workspace_image (system workspace Dockerfile). Push/PR workflow (tests.yml) excludes those
+# markers (and workspace_image / topology_linux) so CI stays fast; this job catches regressions
+# in stress, failure-injection, privileged networking, and image builds.
+
+# Schedule: GitHub Actions cron is UTC-only (no timezone field).
+# `0 8 * * *` = 08:00 UTC daily ≈ midnight America/Los_Angeles during PST (UTC−8).
+# During PDT (UTC−7), the same cron runs at 01:00 Pacific. To target midnight PDT instead, use `0 7 * * *`.
+#
+# Scheduled workflows only run from the default branch (e.g. main). A copy of this file on another
+# branch will not trigger on a timer until it is merged to default. Use workflow_dispatch to test.
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality-checks:
+    name: quality-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: devnest_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U test -d devnest_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install quality tools
+        run: pip install ruff black mypy pytest pytest-cov
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Black (format check)
+        run: black --check .
+
+      - name: Mypy (static types)
+        run: mypy app
+
+      # Full tree except privileged topology markers (sudo in full-test-suite). Includes slow,
+      # topology_heavy, concurrency, failure_path, workspace_image — all excluded from merge-time CI.
+      - name: Pytest with coverage
+        run: |
+          pytest --cov=app --cov-report=xml:coverage.xml --cov-report=term-missing \
+            -m "not topology_linux and not topology_linux_core"
+
+      - name: Finalize coverage XML
+        run: |
+          if ls .coverage.* 1> /dev/null 2>&1; then
+            coverage combine
+          fi
+          test -f .coverage
+          coverage xml -o coverage.xml
+
+      - name: Upload coverage.xml
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-coverage
+          path: backend/coverage.xml
+          if-no-files-found: error
+
+  full-test-suite:
+    name: full-test-suite
+    needs: quality-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: devnest_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U test -d devnest_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+
+      # Privileged topology tests run under sudo next (topology_linux suite + topology_linux_core).
+      - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
+        run: |
+          pytest tests -v -m "not topology_linux and not topology_linux_core" \
+            --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
+
+      - name: Finalize suite coverage XML
+        run: |
+          if ls .coverage.* 1> /dev/null 2>&1; then
+            coverage combine
+          fi
+          test -f .coverage
+          coverage xml -o nightly-full-tests-coverage.xml
+
+      - name: Run Linux topology tests (elevated privileges)
+        run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux or topology_linux_core"
+
+      - name: Upload full-suite coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-full-tests-coverage
+          path: backend/nightly-full-tests-coverage.xml
+          if-no-files-found: warn

@@ -1,0 +1,60 @@
+"""One workspace network attachment to one topology on one node."""
+
+from datetime import datetime, timezone
+
+from sqlalchemy import Column, DateTime, Enum as SAEnum, UniqueConstraint
+from sqlmodel import Field, SQLModel
+
+from .enums import TopologyAttachmentStatus
+
+_attachment_status_enum = SAEnum(
+    TopologyAttachmentStatus,
+    name="topology_attachment_status",
+    native_enum=False,
+    length=32,
+    values_callable=lambda obj: [e.value for e in obj],
+)
+
+
+class TopologyAttachment(SQLModel, table=True):
+    """
+    Attachment row: Docker ``container_id``, stable ``workspace_ip``, veth/bridge identifiers.
+
+    ``workspace_id`` is the logical workspace id (FK to a future ``workspace`` table when it exists).
+
+    At most one attachment row per (``topology_id``, ``node_id``, ``workspace_id``) in V1
+    (reuse the row across status transitions; do not insert duplicates for the same triple).
+    """
+
+    __tablename__ = "topology_attachment"
+    __table_args__ = (
+        UniqueConstraint(
+            "topology_id",
+            "node_id",
+            "workspace_id",
+            name="uq_topology_attachment_topology_node_workspace",
+        ),
+    )
+
+    attachment_id: int | None = Field(default=None, primary_key=True)
+    topology_id: int = Field(foreign_key="topology.topology_id", index=True)
+    node_id: str = Field(index=True, max_length=128)
+    workspace_id: int = Field(index=True)
+    container_id: str | None = Field(default=None, max_length=128, index=True)
+    status: TopologyAttachmentStatus = Field(
+        default=TopologyAttachmentStatus.ATTACHING,
+        sa_column=Column(_attachment_status_enum, nullable=False, index=True),
+    )
+    workspace_ip: str | None = Field(default=None, max_length=64)
+    interface_host: str | None = Field(default=None, max_length=64)
+    interface_container: str | None = Field(default=None, max_length=64)
+    bridge_name: str | None = Field(default=None, max_length=64)
+    gateway_ip: str | None = Field(default=None, max_length=64)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )

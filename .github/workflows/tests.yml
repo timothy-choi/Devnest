@@ -1,12 +1,134 @@
-name: Run Tests
+name: Tests
 
 on:
-  pull_request:
   push:
+    branches:
+      - "**"
+    paths:
+      - "backend/**"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    branches:
+      - "**"
+    paths:
+      - "backend/**"
+      - ".github/workflows/tests.yml"
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# --- Merge-time tier (fast PR signal) ---
+# Excludes pytest markers: slow, topology_heavy, concurrency, failure_path, topology_linux,
+# topology_linux_core (in the non-sudo pytest pass). System job then runs sudo pytest for
+# topology_linux_core only (one runtime+topology+probe happy path). Full topology_linux suite
+# stays in nightly.yml under sudo.
+# System job also excludes workspace_image (full workspace image build).
+#
+# --- Nightly tier ---
+# See nightly.yml: full suite including heavy markers + topology_linux + workspace_image.
 
 jobs:
-  test:
+  quality-checks:
+    name: quality-checks
     runs-on: ubuntu-latest
+    # Advisory only: lint/format/types/coverage do not block downstream test jobs.
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install quality tools
+        run: pip install ruff black mypy pytest pytest-cov coverage
+
+      - name: Ruff (lint)
+        continue-on-error: true
+        run: ruff check .
+
+      - name: Black (format check)
+        continue-on-error: true
+        run: black --check .
+
+      - name: Mypy (static types)
+        continue-on-error: true
+        run: mypy app
+
+      - name: Pytest with coverage
+        continue-on-error: true
+        # Unit tests only; integration/system need Postgres/Docker in downstream jobs.
+        run: pytest tests/unit -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-quality
+          path: backend/coverage-quality.xml
+          if-no-files-found: warn
+
+  unit-tests:
+    name: Unit Tests
+    needs: quality-checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install coverage tools
+        run: pip install coverage pytest-cov
+
+      - name: Run unit tests
+        run: pytest tests/unit -v -n auto -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
+
+      - name: Finalize unit coverage (combine workers if needed, then XML + report)
+        run: |
+          if ls .coverage.* 1> /dev/null 2>&1; then
+            coverage combine
+          fi
+          test -f .coverage
+          coverage xml -o coverage-unit.xml
+          coverage report
+
+      - name: Upload unit coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-unit
+          path: backend/coverage-unit.xml
+          if-no-files-found: error
+
+  integration-tests:
+    name: Integration Tests
+    needs: quality-checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
 
     services:
       postgres:
@@ -23,22 +145,127 @@ jobs:
           --health-timeout=5s
           --health-retries=5
 
-    defaults:
-      run:
-        working-directory: backend
-
     env:
       DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install coverage tools
+        run: pip install coverage pytest-cov
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
       - name: Wait for PostgreSQL
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y postgresql-client
-          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do sleep 1; done
-      - run: pip install -r requirements.txt
-      - run: pytest tests -v
+          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+
+      - name: Run integration tests
+        run: pytest tests/integration -v -n 2 -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
+
+      - name: Finalize integration coverage (combine workers if needed, then XML + report)
+        run: |
+          if ls .coverage.* 1> /dev/null 2>&1; then
+            coverage combine
+          fi
+          test -f .coverage
+          coverage xml -o coverage-integration.xml
+          coverage report
+
+      - name: Upload integration coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-integration
+          path: backend/coverage-integration.xml
+          if-no-files-found: error
+
+  system-tests:
+    name: System Tests
+    needs: quality-checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: devnest_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U test -d devnest_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+      # Absolute path so sudo pytest appends to the same file as the non-sudo run.
+      COVERAGE_FILE: ${{ github.workspace }}/backend/.coverage.system
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install coverage tools
+        run: pip install coverage pytest-cov
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+
+      # Docker + DB system tests only; excludes privileged topology markers (sudo steps below)
+      # and workspace_image (long Dockerfile build). Same marker exclusions as unit/integration.
+      - name: Run system tests (merge-time tier, non-sudo)
+        run: pytest tests/system -v -m "not topology_linux and not topology_linux_core and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-append --cov-report=term-missing
+
+      - name: Run Linux topology core happy-path (sudo, CAP_NET_ADMIN)
+        run: sudo -E "$(which python)" -m pytest tests/system/topology/test_runtime_topology_probe_happy_path.py -v -m "topology_linux_core" --cov=app --cov-append --cov-report=term-missing
+
+      - name: Finalize system coverage (XML + report)
+        run: |
+          test -f .coverage.system
+          coverage xml --data-file=.coverage.system -o coverage-system.xml
+          coverage report --data-file=.coverage.system
+
+      - name: Upload system coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-system
+          path: backend/coverage-system.xml
+          if-no-files-found: error

@@ -2,54 +2,126 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+
+@pytest.fixture(scope="session")
+def worker_id() -> str:
+    """``pytest-xdist`` sets ``PYTEST_XDIST_WORKER`` on workers; single-process runs use ``master``."""
+    return os.environ.get("PYTEST_XDIST_WORKER", "master")
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel
 
-from app.libs.db.database import init_db
+from app.libs.common.config import get_settings
+from app.libs.db.database import init_db, reset_engine
+
+
+ADMIN_DATABASE_URL = "postgresql+psycopg://test:test@127.0.0.1:5432/postgres"
+TEST_DB_HOST = "127.0.0.1"
+TEST_DB_PORT = "5432"
+TEST_DB_USER = "test"
+TEST_DB_PASSWORD = "test"
 
 
 @pytest.fixture(autouse=True)
 def _integration_internal_api_key(monkeypatch):
     """Internal notification routes require X-Internal-API-Key."""
     monkeypatch.setenv("INTERNAL_API_KEY", "integration-test-internal-key")
-    from app.libs.common.config import get_settings
-
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
 
 
 @pytest.fixture(scope="session")
-def test_engine():
+def worker_database_url(worker_id: str) -> str:
+    """
+    Give each pytest-xdist worker its own database.
+
+    Examples:
+      master -> devnest_test
+      gw0    -> devnest_test_gw0
+      gw1    -> devnest_test_gw1
+    """
+    db_name = "devnest_test" if worker_id == "master" else f"devnest_test_{worker_id}"
+
+    admin_engine = create_engine(
+        ADMIN_DATABASE_URL,
+        isolation_level="AUTOCOMMIT",
+    )
+
+    with admin_engine.connect() as conn:
+        conn.execute(text(f'DROP DATABASE IF EXISTS "{db_name}"'))
+        conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+
+    admin_engine.dispose()
+
+    database_url = (
+        f"postgresql+psycopg://{TEST_DB_USER}:{TEST_DB_PASSWORD}"
+        f"@{TEST_DB_HOST}:{TEST_DB_PORT}/{db_name}"
+    )
+
+    os.environ["DATABASE_URL"] = database_url
+    get_settings.cache_clear()
+    reset_engine()
+
+    yield database_url
+
+    admin_engine = create_engine(
+        ADMIN_DATABASE_URL,
+        isolation_level="AUTOCOMMIT",
+    )
+    with admin_engine.connect() as conn:
+        conn.execute(text(f'DROP DATABASE IF EXISTS "{db_name}"'))
+    admin_engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def test_engine(worker_database_url: str) -> Engine:
+    """
+    Create the app engine after DATABASE_URL has been set for this worker,
+    then initialize schema once for this worker's isolated database.
+    """
     from app.libs.db.database import get_engine
+
+    get_settings.cache_clear()
+    reset_engine()
 
     engine = get_engine()
     init_db()
+
     yield engine
+
+    engine.dispose()
 
 
 @pytest.fixture(autouse=True)
-def _clean_tables(test_engine):
-    def truncate() -> None:
-        with test_engine.connect() as conn:
-            for table in reversed(SQLModel.metadata.sorted_tables):
-                conn.execute(text(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE'))
-            conn.commit()
+def _clean_tables(test_engine: Engine):
+    """
+    Clean only this worker's database before each test.
+    Safe because each worker has its own isolated DB.
+    """
+    with test_engine.connect() as conn:
+        for table in reversed(SQLModel.metadata.sorted_tables):
+            conn.execute(
+                text(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE')
+            )
+        conn.commit()
 
-    truncate()
     yield
 
 
 @pytest.fixture
-def db_session(test_engine):
+def db_session(test_engine: Engine):
     with Session(test_engine) as session:
         yield session
 
 
 @pytest.fixture
-def client(test_engine):
+def client(test_engine: Engine):
     from app.main import app
     from app.services.auth_service.api.dependencies import get_db
 
@@ -61,6 +133,8 @@ def client(test_engine):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+
     with TestClient(app) as test_client:
         yield test_client
+
     app.dependency_overrides.clear()
