@@ -21,6 +21,12 @@ from ...services.notification_service.models import (  # noqa: F401 — register
     PushSubscription,
 )
 from ...services.user_service.models import UserProfile, UserSettings  # noqa: F401 — register metadata
+from ...services.workspace_service.models import (  # noqa: F401 — register metadata
+    Workspace,
+    WorkspaceConfig,
+    WorkspaceJob,
+    WorkspaceRuntime,
+)
 
 _engine = None
 _session_factory = None
