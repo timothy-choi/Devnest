@@ -155,6 +155,7 @@ class ContainerInspectionResult:
             ``WORKSPACE_PROJECT_CONTAINER_PATH`` (normalize trailing slashes); ``None`` if missing.
             For full debugging use ``bind_mounts`` and ``mounts`` together.
         health_status: Adapter-normalized health (e.g. healthy, unhealthy); ``None`` if N/A.
+        labels: Engine ``Config.Labels`` as sorted ``(key, value)`` pairs (immutable snapshot).
     """
 
     exists: bool
@@ -166,6 +167,7 @@ class ContainerInspectionResult:
     health_status: str | None = None
     bind_mounts: tuple[BindMountInfo, ...] = ()
     workspace_project_mount: BindMountInfo | None = None
+    labels: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

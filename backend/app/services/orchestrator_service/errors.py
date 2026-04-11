@@ -29,3 +29,9 @@ class WorkspaceRestartError(OrchestratorError):
     """Raised when the restart flow hits an unexpected failure (validation, inspect, etc.)."""
 
     pass
+
+
+class WorkspaceUpdateError(OrchestratorError):
+    """Raised when the update flow hits an unexpected failure (validation, inspect, etc.)."""
+
+    pass

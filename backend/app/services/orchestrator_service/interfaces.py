@@ -9,6 +9,7 @@ from .results import (
     WorkspaceDeleteResult,
     WorkspaceRestartResult,
     WorkspaceStopResult,
+    WorkspaceUpdateResult,
 )
 
 
@@ -50,9 +51,15 @@ class OrchestratorService(ABC):
     ) -> WorkspaceRestartResult:
         """Stop then bring the workspace runtime back up (controlled restart cycle)."""
 
-    def update_workspace_runtime(self, *, workspace_id: str) -> None:
-        """Apply configuration or image updates to a workspace runtime."""
-        raise NotImplementedError
+    @abstractmethod
+    def update_workspace_runtime(
+        self,
+        *,
+        workspace_id: str,
+        requested_config_version: int,
+        requested_by: str | None = None,
+    ) -> WorkspaceUpdateResult:
+        """Apply ``requested_config_version`` (no-op when already current, else restart-based V1)."""
 
     def check_workspace_runtime_health(self, *, workspace_id: str) -> WorkspaceBringUpResult:
         """Read-only health snapshot (no repair)."""

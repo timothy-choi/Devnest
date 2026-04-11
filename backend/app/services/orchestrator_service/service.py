@@ -10,22 +10,31 @@ from pathlib import Path
 from app.libs.probes.interfaces import ProbeRunner
 from app.libs.runtime.errors import RuntimeAdapterError
 from app.libs.runtime.interfaces import RuntimeAdapter
-from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT
+from app.libs.runtime.models import WORKSPACE_IDE_CONTAINER_PORT, ContainerInspectionResult
 from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
 from app.libs.topology.interfaces import TopologyAdapter
 
-from .errors import WorkspaceBringUpError, WorkspaceDeleteError, WorkspaceRestartError, WorkspaceStopError
+from .errors import (
+    WorkspaceBringUpError,
+    WorkspaceDeleteError,
+    WorkspaceRestartError,
+    WorkspaceStopError,
+    WorkspaceUpdateError,
+)
 from .interfaces import OrchestratorService
 from .results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
     WorkspaceRestartResult,
     WorkspaceStopResult,
+    WorkspaceUpdateResult,
 )
 
 # Docker container name: start with alphanumeric; allow [a-zA-Z0-9_.-]
 _CONTAINER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+# Persisted on the workspace container when ``requested_config_version`` is supplied at bring-up / restart.
+_CONFIG_VERSION_LABEL = "devnest.config_version"
 
 
 def _sanitize_container_name(workspace_id: str) -> str:
@@ -51,6 +60,27 @@ def _parse_topology_workspace_id(workspace_id: str) -> int:
 def _issues_or_none(issues: list[str]) -> list[str] | None:
     cleaned = [str(x).strip() for x in issues if str(x).strip()]
     return cleaned or None
+
+
+def _label_value(labels: tuple[tuple[str, str], ...], key: str) -> str | None:
+    for k, v in labels:
+        if k == key:
+            return v
+    return None
+
+
+def _config_version_from_inspection(ins: ContainerInspectionResult) -> int:
+    """Effective config version from engine labels; ``0`` when missing or container absent (V1 baseline)."""
+    if not ins.exists:
+        return 0
+    raw = _label_value(ins.labels, _CONFIG_VERSION_LABEL)
+    if raw is None or not str(raw).strip():
+        return 0
+    try:
+        v = int(str(raw).strip(), 10)
+    except ValueError:
+        return 0
+    return max(0, v)
 
 
 class DefaultOrchestratorService(OrchestratorService):
@@ -92,7 +122,7 @@ class DefaultOrchestratorService(OrchestratorService):
         workspace_id: str,
         requested_config_version: int | None = None,
     ) -> WorkspaceBringUpResult:
-        _ = requested_config_version  # TODO: reconcile with persisted Workspace_runtime row / config version
+        # TODO: reconcile with persisted Workspace_runtime row; container label is the V1 source of truth.
 
         wid = (workspace_id or "").strip()
         if not wid:
@@ -106,16 +136,20 @@ class DefaultOrchestratorService(OrchestratorService):
         except OSError as e:
             raise WorkspaceBringUpError(f"cannot create workspace project directory {host_dir}: {e}") from e
 
+        labels: dict[str, str] = {
+            "devnest.workspace_id": wid,
+            "devnest.managed_by": "orchestrator",
+        }
+        if requested_config_version is not None:
+            labels[_CONFIG_VERSION_LABEL] = str(int(requested_config_version))
+
         try:
             running = ensure_running_runtime_only(
                 self._runtime_adapter,
                 name=name,
                 image=self._workspace_image,
                 ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
-                labels={
-                    "devnest.workspace_id": wid,
-                    "devnest.managed_by": "orchestrator",
-                },
+                labels=labels,
                 workspace_host_path=str(host_dir),
             )
         except RuntimeAdapterError as e:
@@ -425,5 +459,173 @@ class DefaultOrchestratorService(OrchestratorService):
             workspace_ip=up_res.workspace_ip,
             internal_endpoint=up_res.internal_endpoint,
             probe_healthy=up_res.probe_healthy,
+            issues=_issues_or_none(issues),
+        )
+
+    def update_workspace_runtime(
+        self,
+        *,
+        workspace_id: str,
+        requested_config_version: int,
+        requested_by: str | None = None,
+    ) -> WorkspaceUpdateResult:
+        _ = requested_by  # TODO: persist audit trail / emit update event
+
+        if requested_config_version < 0:
+            raise WorkspaceUpdateError("requested_config_version must be non-negative")
+
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise WorkspaceUpdateError("workspace_id is empty")
+        try:
+            _parse_topology_workspace_id(wid)
+        except WorkspaceBringUpError as e:
+            raise WorkspaceUpdateError(str(e)) from e
+
+        container_ref = _sanitize_container_name(wid)
+        try:
+            ins = self._runtime_adapter.inspect_container(container_id=container_ref)
+        except Exception as e:
+            raise WorkspaceUpdateError(f"inspect_container failed: {e}") from e
+
+        current = _config_version_from_inspection(ins)
+        tid = str(self._topology_id)
+        nid = self._node_id
+
+        if current == requested_config_version:
+            return self._update_workspace_runtime_noop(
+                wid=wid,
+                ins=ins,
+                container_ref=container_ref,
+                requested_config_version=requested_config_version,
+                current_config_version=current,
+                node_id=nid,
+                topology_id=tid,
+            )
+
+        try:
+            r = self.restart_workspace_runtime(
+                workspace_id=wid,
+                requested_by=requested_by,
+                requested_config_version=requested_config_version,
+            )
+        except WorkspaceRestartError as e:
+            raise WorkspaceUpdateError(str(e)) from e
+
+        issues: list[str] = []
+        if r.issues:
+            issues.extend(r.issues)
+
+        # TODO: persist applied config version to Workspace_runtime when DB model exists.
+
+        return WorkspaceUpdateResult(
+            workspace_id=wid,
+            success=bool(r.success),
+            current_config_version=current,
+            requested_config_version=requested_config_version,
+            update_strategy="restart",
+            no_op=False,
+            stop_success=r.stop_success,
+            bringup_success=r.bringup_success,
+            container_id=r.container_id,
+            container_state=r.container_state,
+            node_id=r.node_id,
+            topology_id=r.topology_id,
+            workspace_ip=r.workspace_ip,
+            internal_endpoint=r.internal_endpoint,
+            probe_healthy=r.probe_healthy,
+            issues=_issues_or_none(issues),
+        )
+
+    def _update_workspace_runtime_noop(
+        self,
+        *,
+        wid: str,
+        ins: ContainerInspectionResult,
+        container_ref: str,
+        requested_config_version: int,
+        current_config_version: int,
+        node_id: str,
+        topology_id: str,
+    ) -> WorkspaceUpdateResult:
+        """Version already matches; snapshot health without stop/bring-up."""
+        issues: list[str] = []
+        if not ins.exists:
+            issues.append("update:noop:workspace_runtime_not_found")
+            return WorkspaceUpdateResult(
+                workspace_id=wid,
+                success=False,
+                current_config_version=current_config_version,
+                requested_config_version=requested_config_version,
+                update_strategy="noop",
+                no_op=True,
+                node_id=node_id,
+                topology_id=topology_id,
+                issues=_issues_or_none(issues),
+            )
+
+        state = (ins.container_state or "").strip().lower()
+        if state != "running":
+            issues.append(f"update:noop:container_not_running:{state or 'unknown'}")
+            cid = (ins.container_id or container_ref).strip() or None
+            return WorkspaceUpdateResult(
+                workspace_id=wid,
+                success=False,
+                current_config_version=current_config_version,
+                requested_config_version=requested_config_version,
+                update_strategy="noop",
+                no_op=True,
+                container_id=cid,
+                container_state=ins.container_state,
+                node_id=node_id,
+                topology_id=topology_id,
+                issues=_issues_or_none(issues),
+            )
+
+        cid = (ins.container_id or container_ref).strip()
+        if not cid:
+            issues.append("update:noop:container_id_missing")
+            return WorkspaceUpdateResult(
+                workspace_id=wid,
+                success=False,
+                current_config_version=current_config_version,
+                requested_config_version=requested_config_version,
+                update_strategy="noop",
+                no_op=True,
+                container_state=ins.container_state,
+                node_id=node_id,
+                topology_id=topology_id,
+                issues=_issues_or_none(issues),
+            )
+
+        try:
+            health = self._probe_runner.check_workspace_health(
+                workspace_id=wid,
+                topology_id=topology_id,
+                node_id=node_id,
+                container_id=cid,
+                expected_port=WORKSPACE_IDE_CONTAINER_PORT,
+                timeout_seconds=5.0,
+            )
+        except Exception as e:
+            raise WorkspaceUpdateError(f"probe health check failed: {e}") from e
+
+        if health.issues:
+            issues.extend([f"{i.component}:{i.code}:{i.message}" for i in health.issues])
+
+        return WorkspaceUpdateResult(
+            workspace_id=wid,
+            success=bool(health.healthy),
+            current_config_version=current_config_version,
+            requested_config_version=requested_config_version,
+            update_strategy="noop",
+            no_op=True,
+            container_id=cid,
+            container_state=health.container_state or ins.container_state,
+            node_id=node_id,
+            topology_id=topology_id,
+            workspace_ip=health.workspace_ip,
+            internal_endpoint=health.internal_endpoint,
+            probe_healthy=health.healthy,
             issues=_issues_or_none(issues),
         )

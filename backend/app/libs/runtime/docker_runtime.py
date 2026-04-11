@@ -69,7 +69,25 @@ def _inspection_not_found() -> ContainerInspectionResult:
         health_status=None,
         bind_mounts=(),
         workspace_project_mount=None,
+        labels=(),
     )
+
+
+def _normalize_inspection_labels(attrs: dict) -> tuple[tuple[str, str], ...]:
+    cfg = attrs.get("Config")
+    raw: dict | None = None
+    if isinstance(cfg, dict):
+        raw_labels = cfg.get("Labels")
+        if isinstance(raw_labels, dict):
+            raw = raw_labels
+    if not raw:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for k, v in raw.items():
+        if k is None:
+            continue
+        pairs.append((str(k), str(v) if v is not None else ""))
+    return tuple(sorted(pairs))
 
 
 def _normalize_engine_state(raw: object | None) -> str:
@@ -257,6 +275,7 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
         health_status=_normalize_health(attrs),
         bind_mounts=bind_mounts,
         workspace_project_mount=_workspace_project_bind(bind_mounts),
+        labels=_normalize_inspection_labels(attrs),
     )
 
 

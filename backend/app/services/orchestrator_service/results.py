@@ -56,3 +56,23 @@ class WorkspaceRestartResult:
     internal_endpoint: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
+
+
+@dataclass
+class WorkspaceUpdateResult:
+    workspace_id: str
+    success: bool
+    current_config_version: int = 0
+    requested_config_version: int = 0
+    update_strategy: Optional[str] = None
+    no_op: bool = False
+    stop_success: Optional[bool] = None
+    bringup_success: Optional[bool] = None
+    container_id: Optional[str] = None
+    container_state: Optional[str] = None
+    node_id: Optional[str] = None
+    topology_id: Optional[str] = None
+    workspace_ip: Optional[str] = None
+    internal_endpoint: Optional[str] = None
+    probe_healthy: Optional[bool] = None
+    issues: Optional[List[str]] = None
