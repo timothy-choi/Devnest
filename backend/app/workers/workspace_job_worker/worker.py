@@ -1,8 +1,10 @@
 """DB-backed workspace job executor: dequeue ``QUEUED`` jobs, call orchestrator, persist outcomes.
 
 **Dequeue / multi-runner semantics (PostgreSQL, SQLite 3.37+):** eligible rows are claimed with
-``SELECT … FOR UPDATE SKIP LOCKED`` on the oldest ``QUEUED`` job. Only one transaction can claim a
-given row; other runners skip locked rows and take the next queue entry (or idle). Each job is
+``SELECT … FOR UPDATE SKIP LOCKED`` on the oldest ``QUEUED`` job. On **SQLite**, the claim
+transaction starts with ``BEGIN IMMEDIATE`` so concurrent workers serialize on the DB file
+(SQLite deferred transactions + ``SKIP LOCKED`` do not match PostgreSQL-style row races). On
+PostgreSQL, row locks alone are sufficient. Each job is
 processed in its **own** database session with an independent **commit** so a failure or rollback
 on one job does not undo completed siblings in the same API tick.
 
@@ -28,6 +30,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session, select
@@ -112,6 +115,19 @@ def _stmt_queued_job_by_id_for_update(workspace_job_id: int):
     )
 
 
+def _begin_sqlite_immediate_claim_transaction(session: Session) -> None:
+    """
+    Reserve a SQLite write lock before dequeuing.
+
+    Without this, two connections can both observe ``QUEUED`` under default deferred transactions,
+    so ``FOR UPDATE SKIP LOCKED`` does not reliably exclude the second claimer (unlike PostgreSQL).
+    Must be the first statement on a fresh session used only for claim+job work.
+    """
+    if session.get_bind().dialect.name != "sqlite":
+        return
+    session.execute(sa_text("BEGIN IMMEDIATE"))
+
+
 def try_claim_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:
     """
     Lock the oldest ``QUEUED`` row (``SKIP LOCKED``), transition it to ``RUNNING``, and flush.
@@ -119,6 +135,7 @@ def try_claim_next_queued_workspace_job(session: Session) -> WorkspaceJob | None
     Caller must commit or rollback the session. Returns ``None`` if no job is available or all
     candidates are locked by other transactions.
     """
+    _begin_sqlite_immediate_claim_transaction(session)
     job = session.exec(_stmt_oldest_queued_job_for_update()).first()
     if job is None:
         return None
@@ -129,6 +146,7 @@ def try_claim_next_queued_workspace_job(session: Session) -> WorkspaceJob | None
 
 def try_claim_queued_workspace_job_by_id(session: Session, workspace_job_id: int) -> WorkspaceJob | None:
     """Same as :func:`try_claim_next_queued_workspace_job` but for a specific primary key."""
+    _begin_sqlite_immediate_claim_transaction(session)
     job = session.exec(_stmt_queued_job_by_id_for_update(workspace_job_id)).first()
     if job is None:
         return None
