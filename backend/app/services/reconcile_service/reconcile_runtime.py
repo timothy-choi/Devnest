@@ -326,8 +326,7 @@ def _reconcile_stopped(
             _fail_reconcile(session, ws, job, f"reconcile:stop_failed:{e}")
             return
         wmod._finalize_stop_result(session, ws, job, stop_res)
-        session.refresh(ws)
-        session.refresh(job)
+        # Worker session uses autoflush=False; refresh would load pre-finalize rows and clobber job status.
         if job.status != WorkspaceJobStatus.SUCCEEDED.value:
             record_workspace_event(
                 session,
@@ -346,7 +345,6 @@ def _reconcile_stopped(
             message="Stopped lingering runtime while workspace was STOPPED",
             payload={"job_id": job.workspace_job_id},
         )
-        session.refresh(ws)
         _best_effort_remove_orphan_gateway_route(
             session,
             ws,
