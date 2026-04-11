@@ -20,7 +20,7 @@ services:
     networks:
       - devnest-gateway
 
-  # Minimal HTTP service to verify Host-based routing (see dynamic.yml: 1.app.devnest.local).
+  # Minimal HTTP service to verify Host-based routing (see dynamic.yml: whoami.app.devnest.local).
   mock-upstream:
     image: traefik/whoami:latest
     container_name: devnest-gateway-mock-upstream

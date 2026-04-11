@@ -1,0 +1,3 @@
+# DevNest gateway CI / local test dependencies (not runtime).
+pytest>=8.0
+PyYAML>=6.0

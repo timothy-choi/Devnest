@@ -6,12 +6,14 @@ on:
       - "**"
     paths:
       - "backend/**"
+      - "devnest-gateway/**"
       - ".github/workflows/tests.yml"
   pull_request:
     branches:
       - "**"
     paths:
       - "backend/**"
+      - "devnest-gateway/**"
       - ".github/workflows/tests.yml"
 
 concurrency:
@@ -25,12 +27,67 @@ concurrency:
 # stays in nightly.yml under sudo.
 # System job also excludes workspace_image (full workspace image build).
 #
+# Path filters (job `detect`): backend-only changes skip gateway tests; devnest-gateway-only
+# changes skip heavy backend jobs. Editing this workflow runs both backend and gateway jobs.
+#
 # --- Nightly tier ---
 # See nightly.yml: full suite including heavy markers + topology_linux + workspace_image.
 
 jobs:
+  detect:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      gateway: ${{ steps.filter.outputs.gateway }}
+      tests_workflow: ${{ steps.filter.outputs.tests_workflow }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            gateway:
+              - 'devnest-gateway/**'
+            tests_workflow:
+              - '.github/workflows/tests.yml'
+
+  gateway-tests:
+    name: Gateway (data-plane)
+    needs: detect
+    if: needs.detect.outputs.gateway == 'true' || needs.detect.outputs.tests_workflow == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: devnest-gateway
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: devnest-gateway/requirements-test.txt
+
+      - name: Install test dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Pytest (config + compose + live whoami route)
+        run: pytest tests -v
+
   quality-checks:
     name: quality-checks
+    needs: detect
+    if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.tests_workflow == 'true'
     runs-on: ubuntu-latest
     # Advisory only: lint/format/types/coverage do not block downstream test jobs.
     defaults:
@@ -80,7 +137,7 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    needs: quality-checks
+    needs: [detect, quality-checks]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -124,7 +181,7 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    needs: quality-checks
+    needs: [detect, quality-checks]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -196,7 +253,7 @@ jobs:
 
   system-tests:
     name: System Tests
-    needs: quality-checks
+    needs: [detect, quality-checks]
     runs-on: ubuntu-latest
     defaults:
       run:

@@ -1,43 +1,52 @@
-# DevNest gateway — dynamic routing (file provider).
-# Routes are merged here (or split under dynamic.d/ with additional file entries in traefik.yml).
+# DevNest gateway — dynamic routing (Traefik file provider, watch: true).
 #
-# TODO: Replace manual edits with a sync process that:
-#   - Reads WorkspaceRuntime.internal_endpoint from control plane (or receives webhooks).
-#   - Rewrites this file or calls Traefik HTTP API / Redis provider.
+# V1: edit this file and save; Traefik reloads routes without restarting the container.
 #
-# Host pattern: <workspace_id>.<DEVNEST_BASE_DOMAIN>
-# Example: workspace_id=42, base domain app.devnest.local → Host(`42.app.devnest.local`)
+# TODO: Dynamic registration from control plane (HTTP provider, Redis, or route-sync sidecar).
+# TODO: Template hosts from DEVNEST_BASE_DOMAIN (today labels are literal; change when templating exists).
 
 http:
   routers:
     # -------------------------------------------------------------------------
-    # Example: route to the bundled mock upstream (proves host-based routing in Compose).
-    # Remove or override when pointing at real workspace runtimes.
+    # PRIMARY V1 EXAMPLE (documented hostname → host upstream)
+    # Host: ws-123.app.devnest.local
+    # Upstream: HTTP server on the Docker host (code-server, python -m http.server, etc.)
+    # Default port 8080 — change the service URL below if you use another port.
+    # WebSocket: Traefik forwards Upgrade/Connection for HTTP/1.1 by default.
     # -------------------------------------------------------------------------
-    devnest-example-workspace:
-      rule: "Host(`1.app.devnest.local`)"
+    devnest-ws-123:
+      rule: "Host(`ws-123.app.devnest.local`)"
+      entryPoints:
+        - web
+      service: devnest-ws-123-upstream
+
+    # -------------------------------------------------------------------------
+    # Zero-dependency smoke test (Compose only — no process on host port 8080 required)
+    # Host: whoami.app.devnest.local → traefik/whoami container on the compose network
+    # -------------------------------------------------------------------------
+    devnest-smoke-whoami:
+      rule: "Host(`whoami.app.devnest.local`)"
       entryPoints:
         - web
       service: devnest-mock-upstream
-      # WebSocket: Traefik forwards Upgrade headers by default for HTTP/1.1 services.
 
     # -------------------------------------------------------------------------
-    # Example: route to a workspace HTTP server running on the Docker host (dev).
-    # Uncomment and set port after `docker compose up`.
+    # Optional: path-scoped routing (same host, prefix) — uncomment to experiment
     # -------------------------------------------------------------------------
-    # devnest-host-workspace:
-    #   rule: "Host(`2.app.devnest.local`)"
+    # devnest-ws-123-api-prefix:
+    #   rule: "Host(`ws-123.app.devnest.local`) && PathPrefix(`/api`)"
     #   entryPoints:
     #     - web
-    #   service: devnest-host-upstream
-    #
-    # services:
-    #   devnest-host-upstream:
-    #     loadBalancer:
-    #       servers:
-    #         - url: "http://host.docker.internal:9080"
+    #   service: devnest-ws-123-upstream
+    #   priority: 100
 
   services:
+    devnest-ws-123-upstream:
+      loadBalancer:
+        servers:
+          # host.docker.internal → your machine (see docker-compose extra_hosts).
+          - url: "http://host.docker.internal:8080"
+
     devnest-mock-upstream:
       loadBalancer:
         servers:

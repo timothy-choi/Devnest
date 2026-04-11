@@ -1,6 +1,17 @@
 # Backend ↔ Gateway integration contract (future)
 
-This document specifies how the **control plane** (DevNest backend) will drive the **data plane** (this gateway). **None of these endpoints exist on the backend yet** — they are the intended V2 contract after a small internal service or sidecar is added.
+This document specifies how the **control plane** (DevNest backend) will drive the **data plane** (this gateway). **None of these endpoints exist on the backend yet** — these are the intended V2 contract after a small internal service or sidecar is added.
+
+## Metadata alignment (Workspace / WorkspaceRuntime)
+
+| Backend field | Role | Gateway V1 / future use |
+|---------------|------|-------------------------|
+| `workspace.workspace_id` | Stable integer id | Derive hostname segment (e.g. `{id}.app.devnest.local`) or custom label from `public_host`. |
+| `workspace.public_host` | Optional public hostname hint | Future: use as router `Host()` when set; else derive from `workspace_id` + base domain. |
+| `workspace.endpoint_ref` | User-facing / gateway URL hint | Future: populate with `https://{id}.app.devnest.local` (or TLS host) once routes exist. |
+| `workspace_runtime.internal_endpoint` | Upstream URL for proxy | **Traefik `loadBalancer.servers[].url`** — e.g. `http://10.0.0.5:8080` or `http://host.docker.internal:9080` in dev. |
+
+V1 today: these values are mirrored **manually** in `traefik/dynamic.yml` for local dev. A later **route-sync** step will read the DB or call internal APIs and update Traefik dynamically.
 
 ## Principles
 
