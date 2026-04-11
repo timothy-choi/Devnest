@@ -27,6 +27,7 @@ from app.services.workspace_service.models.enums import (
 )
 from app.workers.workspace_job_worker.worker import (
     load_next_queued_workspace_job,
+    poll_workspace_jobs_tick,
     run_pending_jobs,
     run_queued_workspace_job_by_id,
 )
@@ -995,3 +996,55 @@ class TestMissingWorkspace:
             assert job is not None
             assert job.status == WorkspaceJobStatus.FAILED.value
             assert job.error_msg is not None
+
+
+class TestPollWorkspaceJobsTick:
+    """``poll_workspace_jobs_tick`` is the bind-only entrypoint used by the poll-loop process."""
+
+    def test_poll_processes_one_job_without_caller_session(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            job_id = job.workspace_job_id
+            session.commit()
+
+        orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
+        tick = poll_workspace_jobs_tick(
+            workspace_job_worker_engine,
+            get_orchestrator=lambda _s: orch,
+            limit=1,
+        )
+        assert tick.processed_count == 1
+        assert tick.last_job_id == job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            j = session.get(WorkspaceJob, job_id)
+            assert j is not None and j.status == WorkspaceJobStatus.SUCCEEDED.value
+
+    def test_poll_empty_queue_returns_zero_processed(
+        self,
+        workspace_job_worker_engine,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        tick = poll_workspace_jobs_tick(
+            workspace_job_worker_engine,
+            get_orchestrator=lambda _s: orch,
+            limit=1,
+        )
+        assert tick.processed_count == 0
+        assert tick.last_job_id is None
+        orch.bring_up_workspace_runtime.assert_not_called()
