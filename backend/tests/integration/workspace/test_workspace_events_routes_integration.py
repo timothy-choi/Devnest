@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
+from httpx import ASGITransport, Client, Timeout
 from fastapi import status
 from sqlmodel import Session, select
 
@@ -71,42 +72,42 @@ def _fast_sse_poll_all(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _read_sse_until_data_line(
-    client,
-    url: str,
+    testclient,
+    path: str,
     headers: dict[str, str],
     *,
     max_bytes: int = 64_000,
     max_chunks: int = 256,
+    read_timeout_s: float = 20.0,
 ) -> bytes:
     """
-    Read until a full SSE ``data:`` frame or caps are hit.
+    Read the first full SSE ``data:`` frame using httpx + ASGITransport.
 
-    The events endpoint may not write bytes until after the first DB poll; without a chunk cap,
-    ``iter_bytes`` can block forever when the implementation yields no data (e.g. bugs/regressions).
+    Starlette's synchronous ``TestClient.stream().iter_bytes()`` can block without returning even
+    when ``timeout=`` is passed (especially under ``pytest-xdist``), which stalls the whole worker
+    and makes the *other* worker look stuck on its last test. httpx applies read timeouts to stream
+    reads reliably.
     """
     buf = b""
     n_chunks = 0
-    with client.stream(
-        "GET",
-        url,
-        headers=headers,
-        timeout=httpx.Timeout(20.0, connect=5.0),
-    ) as res:
+    transport = ASGITransport(app=testclient.app, lifespan="auto")
+    timeout = Timeout(connect=5.0, read=read_timeout_s, write=10.0, pool=5.0)
+    with Client(transport=transport, base_url="http://testserver", timeout=timeout) as http:
         try:
-            assert res.status_code == status.HTTP_200_OK
-            assert res.headers.get("content-type", "").startswith("text/event-stream")
-            for chunk in res.iter_bytes(chunk_size=512):
-                n_chunks += 1
-                buf += chunk
-                if b"data: " in buf and b"\n\n" in buf:
-                    break
-                if len(buf) >= max_bytes or n_chunks >= max_chunks:
-                    break
-        finally:
-            try:
-                res.close()
-            except Exception:
-                pass
+            with http.stream("GET", path, headers=headers) as res:
+                assert res.status_code == status.HTTP_200_OK
+                assert res.headers.get("content-type", "").startswith("text/event-stream")
+                for chunk in res.iter_bytes(chunk_size=512):
+                    n_chunks += 1
+                    buf += chunk
+                    if b"data: " in buf and b"\n\n" in buf:
+                        return buf
+                    if len(buf) >= max_bytes or n_chunks >= max_chunks:
+                        break
+        except httpx.ReadTimeout as e:
+            pytest.fail(
+                f"SSE read timed out after {read_timeout_s}s (chunks={n_chunks}, bytes={len(buf)}): {e}"
+            )
     if b"data: " not in buf or b"\n\n" not in buf:
         pytest.fail(
             f"SSE incomplete after {n_chunks} chunks / {len(buf)} bytes (expected a full data:…\\n\\n frame)"
@@ -165,16 +166,14 @@ def test_get_workspace_events_sse_empty_workspace_stream_opens_without_reading_b
     uid, token = _register_and_token(client, username="int_sse_empty", email="int_sse_empty@example.com")
     wid = _seed_workspace(db_session, uid)
 
-    with client.stream(
-        "GET",
-        f"/workspaces/{wid}/events",
-        headers=_auth(token),
-        timeout=httpx.Timeout(20.0, connect=5.0),
-    ) as res:
-        assert res.status_code == status.HTTP_200_OK
-        assert res.headers.get("content-type", "").startswith("text/event-stream")
-        assert res.headers.get("cache-control") == "no-cache"
-    # Closing the stream ends the request; do not call iter_bytes() here (can block indefinitely).
+    transport = ASGITransport(app=client.app, lifespan="auto")
+    timeout = Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
+    with Client(transport=transport, base_url="http://testserver", timeout=timeout) as http:
+        with http.stream("GET", f"/workspaces/{wid}/events", headers=_auth(token)) as res:
+            assert res.status_code == status.HTTP_200_OK
+            assert res.headers.get("content-type", "").startswith("text/event-stream")
+            assert res.headers.get("cache-control") == "no-cache"
+    # Do not read the SSE body here (infinite stream); headers prove the route opened.
 
 
 def test_get_workspace_events_after_start_intent_stream_contains_queued_event(
