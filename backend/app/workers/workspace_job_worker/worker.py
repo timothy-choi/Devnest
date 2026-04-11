@@ -86,6 +86,24 @@ def _format_issues(issues: list[str] | None) -> str | None:
     return _truncate("; ".join(str(x) for x in issues if str(x).strip()), 8192)
 
 
+def _update_noop_issues_imply_stopped_workspace(issues: list[str] | None) -> bool:
+    """
+    True when orchestrator noop-update failed only because the workspace container is missing
+    or not running (no restart was required; config version already matched).
+
+    In those cases the settled control-plane state should be ``STOPPED``, not ``ERROR``.
+    """
+    if not issues:
+        return False
+    for raw in issues:
+        s = str(raw).strip()
+        if s.startswith("update:noop:workspace_runtime_not_found"):
+            return True
+        if s.startswith("update:noop:container_not_running:"):
+            return True
+    return False
+
+
 def _parse_topology_id(val: str | None) -> int | None:
     if val is None:
         return None
@@ -381,6 +399,28 @@ def _finalize_update_result(
         return
 
     msg = _format_issues(result.issues) or "Update completed without success"
+    if result.no_op and _update_noop_issues_imply_stopped_workspace(result.issues):
+        # Config already matched; container absent or stopped — settle to STOPPED (not ERROR).
+        rt = _get_or_create_runtime(session, wid)
+        ts = _now()
+        rt.node_id = result.node_id
+        rt.topology_id = _parse_topology_id(result.topology_id)
+        rt.container_id = result.container_id
+        rt.container_state = result.container_state
+        rt.internal_endpoint = result.internal_endpoint
+        rt.config_version = cfg_v
+        rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
+        rt.last_heartbeat_at = None
+        rt.updated_at = ts
+        session.add(rt)
+
+        _mark_job_succeeded(session, job)
+        ws.status = WorkspaceStatus.STOPPED.value
+        _workspace_clear_errors(ws)
+        ws.status_reason = _truncate(msg, 1024)
+        _touch_workspace(session, ws)
+        return
+
     _finalize_job_failed_workspace_error(session, ws, job, message=msg)
 
 
@@ -465,7 +505,12 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
             event_type=WorkspaceStreamEventType.JOB_FAILED,
             status=ws.status,
             message="Workspace job failed",
-            payload={**base_payload, "error_msg": job.error_msg},
+            payload={
+                **base_payload,
+                "error_msg": job.error_msg,
+                "last_error_code": ws.last_error_code,
+                "last_error_message": ws.last_error_message,
+            },
         )
 
 

@@ -4,7 +4,15 @@ from enum import Enum
 
 
 class WorkspaceStatus(str, Enum):
-    """Transactional workspace lifecycle; runtime fields are owned by the orchestrator."""
+    """Control-plane lifecycle states stored on ``Workspace``.
+
+    **Transactional (``*ING``):** set by the Workspace Service when accepting an intent and
+    enqueueing a :class:`~app.services.workspace_service.models.WorkspaceJob`.
+
+    **Settled:** updated by the job worker from orchestrator results (``RUNNING``, ``STOPPED``,
+    ``DELETED``) or failures (``ERROR``). Design docs sometimes call the failure state *FAILED*;
+    the canonical stored value here is ``ERROR``.
+    """
 
     CREATING = "CREATING"
     STARTING = "STARTING"

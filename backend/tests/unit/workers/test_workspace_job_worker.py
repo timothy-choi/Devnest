@@ -629,6 +629,60 @@ class TestDispatchUpdate:
             assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
             assert rt is not None and rt.config_version == cfg
 
+    def test_update_noop_container_not_running_settles_stopped_without_error(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        """Orchestrator noop (config already applied) but container stopped → STOPPED + job SUCCEEDED."""
+        orch = _orch()
+        cfg = 3
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.UPDATE.value,
+                requested_config_version=cfg,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.update_workspace_runtime.return_value = WorkspaceUpdateResult(
+                workspace_id=str(wid),
+                success=False,
+                current_config_version=cfg,
+                requested_config_version=cfg,
+                update_strategy="noop",
+                no_op=True,
+                node_id=NODE_ID,
+                topology_id=TOPOLOGY_ID_STR,
+                container_id="cid-exited",
+                container_state="exited",
+                issues=["update:noop:container_not_running:exited"],
+            )
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert job.error_msg is None
+            assert ws is not None and ws.status == WorkspaceStatus.STOPPED.value
+            assert ws.last_error_code is None
+            assert ws.status_reason is not None
+            assert rt is not None
+            assert rt.config_version == cfg
+            assert rt.health_status == WorkspaceRuntimeHealthStatus.UNKNOWN.value
+
 
 class TestUnsupportedJobType:
     def test_unknown_job_type_marks_job_failed_and_workspace_error(
