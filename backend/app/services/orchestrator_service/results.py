@@ -40,3 +40,19 @@ class WorkspaceDeleteResult:
     topology_deleted: Optional[bool] = None
     container_id: Optional[str] = None
     issues: Optional[List[str]] = None
+
+
+@dataclass
+class WorkspaceRestartResult:
+    workspace_id: str
+    success: bool
+    stop_success: Optional[bool] = None
+    bringup_success: Optional[bool] = None
+    container_id: Optional[str] = None
+    container_state: Optional[str] = None
+    node_id: Optional[str] = None
+    topology_id: Optional[str] = None
+    workspace_ip: Optional[str] = None
+    internal_endpoint: Optional[str] = None
+    probe_healthy: Optional[bool] = None
+    issues: Optional[List[str]] = None

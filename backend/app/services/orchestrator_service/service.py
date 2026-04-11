@@ -15,9 +15,14 @@ from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
 from app.libs.topology.interfaces import TopologyAdapter
 
-from .errors import WorkspaceBringUpError, WorkspaceDeleteError, WorkspaceStopError
+from .errors import WorkspaceBringUpError, WorkspaceDeleteError, WorkspaceRestartError, WorkspaceStopError
 from .interfaces import OrchestratorService
-from .results import WorkspaceBringUpResult, WorkspaceDeleteResult, WorkspaceStopResult
+from .results import (
+    WorkspaceBringUpResult,
+    WorkspaceDeleteResult,
+    WorkspaceRestartResult,
+    WorkspaceStopResult,
+)
 
 # Docker container name: start with alphanumeric; allow [a-zA-Z0-9_.-]
 _CONTAINER_NAME_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
@@ -333,5 +338,92 @@ class DefaultOrchestratorService(OrchestratorService):
             topology_detached=topology_detached,
             topology_deleted=topology_deleted,
             container_id=container_id,
+            issues=_issues_or_none(issues),
+        )
+
+    def restart_workspace_runtime(
+        self,
+        *,
+        workspace_id: str,
+        requested_by: str | None = None,
+        requested_config_version: int | None = None,
+    ) -> WorkspaceRestartResult:
+        _ = requested_by  # TODO: persist audit trail / emit restart event
+
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise WorkspaceRestartError("workspace_id is empty")
+        try:
+            _parse_topology_workspace_id(wid)
+        except WorkspaceBringUpError as e:
+            raise WorkspaceRestartError(str(e)) from e
+
+        try:
+            stop_res = self.stop_workspace_runtime(workspace_id=wid, requested_by=requested_by)
+        except WorkspaceStopError as e:
+            raise WorkspaceRestartError(str(e)) from e
+
+        issues: list[str] = []
+        if stop_res.issues:
+            issues.extend(stop_res.issues)
+
+        tid = str(self._topology_id)
+        nid = self._node_id
+
+        if not stop_res.success:
+            return WorkspaceRestartResult(
+                workspace_id=wid,
+                success=False,
+                stop_success=False,
+                bringup_success=False,
+                container_id=stop_res.container_id,
+                container_state=stop_res.container_state,
+                node_id=nid,
+                topology_id=tid,
+                workspace_ip=None,
+                internal_endpoint=None,
+                probe_healthy=None,
+                issues=_issues_or_none(issues),
+            )
+
+        try:
+            up_res = self.bring_up_workspace_runtime(
+                workspace_id=wid,
+                requested_config_version=requested_config_version,
+            )
+        except WorkspaceBringUpError as e:
+            issues.append(f"bringup:failed:{e}")
+            return WorkspaceRestartResult(
+                workspace_id=wid,
+                success=False,
+                stop_success=True,
+                bringup_success=False,
+                container_id=stop_res.container_id,
+                container_state=stop_res.container_state,
+                node_id=nid,
+                topology_id=tid,
+                workspace_ip=None,
+                internal_endpoint=None,
+                probe_healthy=None,
+                issues=_issues_or_none(issues),
+            )
+
+        if up_res.issues:
+            issues.extend(up_res.issues)
+
+        # TODO: persist Workspace_runtime restart outcome (timestamps, container_id, probe result).
+
+        return WorkspaceRestartResult(
+            workspace_id=wid,
+            success=bool(up_res.success),
+            stop_success=True,
+            bringup_success=bool(up_res.success),
+            container_id=up_res.container_id,
+            container_state=up_res.container_state,
+            node_id=up_res.node_id or nid,
+            topology_id=up_res.topology_id or tid,
+            workspace_ip=up_res.workspace_ip,
+            internal_endpoint=up_res.internal_endpoint,
+            probe_healthy=up_res.probe_healthy,
             issues=_issues_or_none(issues),
         )
