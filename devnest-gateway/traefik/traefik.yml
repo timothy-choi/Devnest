@@ -1,0 +1,30 @@
+# DevNest gateway — static Traefik configuration (V1).
+# TODO: Enable TLS entrypoint and certificate resolver when DNS + ACME are in scope.
+# TODO: Secure or disable dashboard in production; restrict API/dashboard bind addresses.
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+api:
+  dashboard: true
+  insecure: true
+
+entryPoints:
+  web:
+    address: ":80"
+    # TODO(websecure): add entryPoints.websecure on :443 + tls when TLS automation exists.
+    # forwardedHeaders:
+    #   insecure: true  # only if behind another trusted L7 proxy
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+  # TODO: Add providers.http pointing at control-plane route registry when implemented.
+  # TODO: Add providers.redis or Kubernetes CRD for multi-replica dynamic state.
+
+log:
+  level: INFO
+
+accessLog: {}

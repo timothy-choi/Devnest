@@ -1,0 +1,33 @@
+# DevNest data-plane gateway (Traefik) + mock upstream for local smoke tests.
+# Control plane (DevNest backend) is NOT started here — run it separately.
+
+services:
+  traefik:
+    image: traefik:v3.2
+    container_name: devnest-gateway-traefik
+    restart: unless-stopped
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "${DEVNEST_GATEWAY_PORT:-80}:80"
+      - "${DEVNEST_DASHBOARD_PORT:-8080}:8080"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    extra_hosts:
+      # Reach workspace HTTP servers bound on the host (code-server, etc.).
+      - "host.docker.internal:host-gateway"
+    networks:
+      - devnest-gateway
+
+  # Minimal HTTP service to verify Host-based routing (see dynamic.yml: 1.app.devnest.local).
+  mock-upstream:
+    image: traefik/whoami:latest
+    container_name: devnest-gateway-mock-upstream
+    restart: unless-stopped
+    networks:
+      - devnest-gateway
+
+networks:
+  devnest-gateway:
+    name: devnest-gateway

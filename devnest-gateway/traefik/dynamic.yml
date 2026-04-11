@@ -1,0 +1,44 @@
+# DevNest gateway — dynamic routing (file provider).
+# Routes are merged here (or split under dynamic.d/ with additional file entries in traefik.yml).
+#
+# TODO: Replace manual edits with a sync process that:
+#   - Reads WorkspaceRuntime.internal_endpoint from control plane (or receives webhooks).
+#   - Rewrites this file or calls Traefik HTTP API / Redis provider.
+#
+# Host pattern: <workspace_id>.<DEVNEST_BASE_DOMAIN>
+# Example: workspace_id=42, base domain app.devnest.local → Host(`42.app.devnest.local`)
+
+http:
+  routers:
+    # -------------------------------------------------------------------------
+    # Example: route to the bundled mock upstream (proves host-based routing in Compose).
+    # Remove or override when pointing at real workspace runtimes.
+    # -------------------------------------------------------------------------
+    devnest-example-workspace:
+      rule: "Host(`1.app.devnest.local`)"
+      entryPoints:
+        - web
+      service: devnest-mock-upstream
+      # WebSocket: Traefik forwards Upgrade headers by default for HTTP/1.1 services.
+
+    # -------------------------------------------------------------------------
+    # Example: route to a workspace HTTP server running on the Docker host (dev).
+    # Uncomment and set port after `docker compose up`.
+    # -------------------------------------------------------------------------
+    # devnest-host-workspace:
+    #   rule: "Host(`2.app.devnest.local`)"
+    #   entryPoints:
+    #     - web
+    #   service: devnest-host-upstream
+    #
+    # services:
+    #   devnest-host-upstream:
+    #     loadBalancer:
+    #       servers:
+    #         - url: "http://host.docker.internal:9080"
+
+  services:
+    devnest-mock-upstream:
+      loadBalancer:
+        servers:
+          - url: "http://mock-upstream:80"
