@@ -5,8 +5,8 @@ from pathlib import Path
 import yaml
 
 
-def test_dynamic_yml_example_routes(gateway_root: Path) -> None:
-    raw = (gateway_root / "traefik" / "dynamic.yml").read_text(encoding="utf-8")
+def test_dynamic_base_example_routes(gateway_root: Path) -> None:
+    raw = (gateway_root / "traefik" / "dynamic" / "000-base.yml").read_text(encoding="utf-8")
     cfg = yaml.safe_load(raw)
     http = cfg["http"]
     routers = http["routers"]

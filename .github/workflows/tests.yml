@@ -7,14 +7,20 @@ on:
     paths:
       - "backend/**"
       - "devnest-gateway/**"
-      - ".github/workflows/tests.yml"
+      - "gateway/**"
+      - "traefik/**"
+      - "docker-compose*.yml"
+      - ".github/workflows/**"
   pull_request:
     branches:
       - "**"
     paths:
       - "backend/**"
       - "devnest-gateway/**"
-      - ".github/workflows/tests.yml"
+      - "gateway/**"
+      - "traefik/**"
+      - "docker-compose*.yml"
+      - ".github/workflows/**"
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
@@ -28,7 +34,8 @@ concurrency:
 # System job also excludes workspace_image (full workspace image build).
 #
 # Path filters (job `detect`): backend-only changes skip gateway tests; devnest-gateway-only
-# changes skip heavy backend jobs. Editing this workflow runs both backend and gateway jobs.
+# (or root compose / traefik / gateway/**) changes skip heavy backend jobs. Any workflow edit
+# under .github/workflows/ runs both backend and gateway jobs.
 #
 # --- Nightly tier ---
 # See nightly.yml: full suite including heavy markers + topology_linux + workspace_image.
@@ -55,8 +62,11 @@ jobs:
               - 'backend/**'
             gateway:
               - 'devnest-gateway/**'
+              - 'gateway/**'
+              - 'traefik/**'
+              - 'docker-compose*.yml'
             tests_workflow:
-              - '.github/workflows/tests.yml'
+              - '.github/workflows/**'
 
   gateway-tests:
     name: Gateway (data-plane)

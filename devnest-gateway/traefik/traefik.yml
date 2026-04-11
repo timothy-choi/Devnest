@@ -19,7 +19,8 @@ entryPoints:
 
 providers:
   file:
-    filename: /etc/traefik/dynamic.yml
+    # Merges all *.yml in this directory (000-base.yml static + 100-workspaces.yml from route-admin).
+    directory: /etc/traefik/dynamic
     watch: true
   # TODO: Add providers.http pointing at control-plane route registry when implemented.
   # TODO: Add providers.redis or Kubernetes CRD for multi-replica dynamic state.

@@ -1,73 +1,39 @@
-# Backend ↔ Gateway integration contract (future)
+# Backend ↔ Gateway integration contract (V1)
 
-This document specifies how the **control plane** (DevNest backend) will drive the **data plane** (this gateway). **None of these endpoints exist on the backend yet** — these are the intended V2 contract after a small internal service or sidecar is added.
+The **control plane** (DevNest backend) registers workspace routes with the **data plane** via the standalone **route-admin** HTTP API. Traefik reads merged YAML from `traefik/dynamic/` (file provider, `watch: true`).
+
+## V1 route-admin API (implemented)
+
+Base URL: `DEVNEST_GATEWAY_URL` (default `http://127.0.0.1:9080` — host port mapped to route-admin, **not** Traefik’s public `:80` or dashboard `:8080`).
+
+| Method | Path | Body / notes |
+|--------|------|----------------|
+| `POST` | `/routes` | `{"workspace_id": "<id>", "public_host": "…", "target": "http://…"}` — idempotent upsert |
+| `DELETE` | `/routes/{workspace_id}` | Idempotent; `204` |
+| `GET` | `/routes` | List registered routes (debug) |
+| `GET` | `/health` | Liveness |
+
+Persisted fragment: `traefik/dynamic/100-workspaces.yml` (routers `devnest-reg-{workspace_id}`). TODO: auth, TLS, HA, reconcile.
 
 ## Metadata alignment (Workspace / WorkspaceRuntime)
 
-| Backend field | Role | Gateway V1 / future use |
-|---------------|------|-------------------------|
-| `workspace.workspace_id` | Stable integer id | Derive hostname segment (e.g. `{id}.app.devnest.local`) or custom label from `public_host`. |
-| `workspace.public_host` | Optional public hostname hint | Future: use as router `Host()` when set; else derive from `workspace_id` + base domain. |
-| `workspace.endpoint_ref` | User-facing / gateway URL hint | Future: populate with `https://{id}.app.devnest.local` (or TLS host) once routes exist. |
-| `workspace_runtime.internal_endpoint` | Upstream URL for proxy | **Traefik `loadBalancer.servers[].url`** — e.g. `http://10.0.0.5:8080` or `http://host.docker.internal:9080` in dev. |
+| Backend field | Role | Gateway V1 use |
+|---------------|------|----------------|
+| `workspace.workspace_id` | Stable integer id | `workspace_id` in API; default `public_host` = `{id}.{DEVNEST_BASE_DOMAIN}` when `public_host` unset |
+| `workspace.public_host` | Optional hostname | Sent to route-admin as `public_host` when set |
+| `workspace.endpoint_ref` | User-facing URL hint | Unchanged by route-admin in V1 |
+| `workspace_runtime.internal_endpoint` | Upstream URL | Normalized to `target` (adds `http://` if missing) |
 
-V1 today: these values are mirrored **manually** in `traefik/dynamic.yml` for local dev. A later **route-sync** step will read the DB or call internal APIs and update Traefik dynamically.
+## Worker behavior (backend)
+
+When `DEVNEST_GATEWAY_ENABLED=true`, after successful **RUNNING** finalization the job worker calls `POST /routes`. On successful **stop** or **delete**, it calls `DELETE /routes/{id}`. Failures are logged only; workspace lifecycle is not rolled back.
+
+## Earlier “internal API on backend” idea
+
+A future option was `POST /internal/gateway/routes` on the backend. V1 uses **direct** backend → route-admin instead to keep the gateway stack standalone. That internal indirection remains a possible later phase.
 
 ## Principles
 
-1. **Source of truth:** `WorkspaceRuntime.internal_endpoint` (and related fields) on the backend reflect where the workspace container listens (e.g. `http://10.0.0.5:8080`).
-2. **Gateway responsibility:** Map stable **public hostnames** to those upstream URLs and proxy HTTP/WebSocket.
-3. **Separation:** The gateway does not mutate workspace lifecycle; it only reflects routes the control plane authorizes.
-
-## Proposed internal API (on the backend)
-
-Base path suggestion: `/internal/gateway` (requires `X-Internal-API-Key`, consistent with existing internal routes).
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/internal/gateway/routes` | Register or replace a route for `workspace_id`. |
-| `DELETE` | `/internal/gateway/routes/{workspace_id}` | Deregister route (stop/delete workspace). |
-| `GET` | `/internal/gateway/routes` | List registered routes (debug / reconcile). |
-
-### `POST /internal/gateway/routes`
-
-**Request body (JSON):**
-
-```json
-{
-  "workspace_id": 42,
-  "internal_endpoint": "http://10.0.0.5:8080",
-  "public_host": "42.app.devnest.local"
-}
-```
-
-- `workspace_id`: integer primary key (matches subdomain in host-based routing).
-- `internal_endpoint`: value compatible with `WorkspaceRuntime.internal_endpoint`.
-- `public_host`: optional; if omitted, gateway derives `"{workspace_id}.{DEVNEST_BASE_DOMAIN}"`.
-
-**Response:** `200` with `{ "accepted": true, "route_id": "..." }` or `409` if conflicting.
-
-**Caller:** Worker/orchestrator after successful attach/bring-up, or a dedicated **route-sync** job.  
-**TODO:** Define idempotency key and behavior when `internal_endpoint` changes (rolling update).
-
-### `DELETE /internal/gateway/routes/{workspace_id}`
-
-**Response:** `204` or `404` if no route.
-
-**Caller:** Worker after workspace delete or when runtime is torn down.
-
-### `GET /internal/gateway/routes`
-
-**Response:** paginated list of `{ workspace_id, internal_endpoint, public_host, updated_at }` for operators and future reconcile.
-
-## Gateway-side consumption (implementation options)
-
-1. **Route-sync sidecar** (recommended for V2): Poll or subscribe to backend events; update Traefik via **HTTP provider** URL, **Redis** KV, or **file provider** + reload.
-2. **Traefik HTTP provider:** Backend exposes a YAML/JSON document Traefik polls — aligns with “dynamic configuration” without writing files on disk.
-3. **Manual / ops:** Edit `traefik/dynamic.yml` during early integration (current V1 scaffold).
-
-## Deferred
-
-- Authentication at the gateway (OAuth, JWT validation, session cookies).
-- mTLS between gateway and workspace nodes.
-- Multi-region or clustered gateway state.
+1. **Source of truth:** `WorkspaceRuntime.internal_endpoint` reflects the workspace process URL.
+2. **Gateway responsibility:** Map `public_host` → `target` and proxy HTTP/WebSocket (Traefik).
+3. **Separation:** Route-admin does not mutate workspace lifecycle; it only applies routes the worker requested.

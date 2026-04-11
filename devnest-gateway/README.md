@@ -4,30 +4,34 @@ Standalone **data-plane** reverse proxy for workspace HTTP/WebSocket traffic. It
 
 ## What works in V1
 
-- Docker Compose runs **Traefik** (entrypoints **80** and **8080**) with **file provider** dynamic config.
-- **Host-based routing** to upstream URLs (edit `traefik/dynamic.yml`).
-- **WebSockets:** Traefik forwards Upgrade requests by default; no extra V1 config.
-- **Example routes:**
-  - `ws-123.<DEVNEST_BASE_DOMAIN>` → `http://host.docker.internal:<port>` (your IDE or mock server on the Docker **host**).
-  - `whoami.<DEVNEST_BASE_DOMAIN>` → `mock-upstream` container (smoke test without anything on host :8080).
+- Docker Compose runs **Traefik** (public **80**, dashboard **8080**), **route-admin** (registration API on host **9080** by default), and **mock-upstream**.
+- Traefik **file provider** loads **`traefik/dynamic/*.yml`** (merged, `watch: true`).
+- **route-admin** implements `POST/DELETE/GET /routes` and rewrites `traefik/dynamic/100-workspaces.yml` for workspace routes (`devnest-reg-{id}`).
+- **WebSockets:** Traefik forwards Upgrade by default.
+- **Static example routes** (`traefik/dynamic/000-base.yml`):
+  - `ws-123.<DEVNEST_BASE_DOMAIN>` → `http://host.docker.internal:<port>` (host upstream).
+  - `whoami.<DEVNEST_BASE_DOMAIN>` → `mock-upstream` container.
 
 ## Layout
 
 ```
 devnest-gateway/
-├── docker-compose.yml      # Traefik + optional mock-upstream
-├── .env.example            # Copy to .env (same directory as compose file)
+├── docker-compose.yml      # Traefik + route-admin + mock-upstream
+├── .env.example
+├── route_admin/            # FastAPI app (Dockerfile + route_admin_app.py)
 ├── traefik/
-│   ├── traefik.yml         # Static: entrypoints, providers, dashboard
-│   └── dynamic.yml         # Routers/services (V1: edit by hand)
+│   ├── traefik.yml         # Static: entrypoints, directory provider
+│   └── dynamic/
+│       ├── 000-base.yml    # Static examples (hand-edited)
+│       └── 100-workspaces.yml   # Managed by route-admin
 ├── scripts/
-│   ├── hosts-snippet.sh    # Print /etc/hosts lines for local testing
-│   └── run-example-upstream.sh   # Python http.server on host :8080 for ws-123
-├── tests/                  # Pytest: Traefik YAML + compose + optional live route
-├── requirements-test.txt   # pytest + PyYAML (CI / dev)
+│   ├── hosts-snippet.sh
+│   └── run-example-upstream.sh
+├── tests/
+├── requirements-test.txt
 ├── pytest.ini
 └── docs/
-    └── BACKEND_INTEGRATION_CONTRACT.md   # Future backend → gateway sync
+    └── BACKEND_INTEGRATION_CONTRACT.md
 ```
 
 ## Automated tests
@@ -59,10 +63,10 @@ The **integration** test runs `docker compose up`, curls `whoami.app.devnest.loc
 
    Append the printed lines to `/etc/hosts` (or use your DNS tool). Default domain: `app.devnest.local`.
 
-3. **Start Traefik:**
+3. **Build and start** (first run builds `route-admin`):
 
    ```bash
-   docker compose up -d
+   docker compose up -d --build
    ```
 
 4. **Smoke test (no host server needed):**
@@ -91,27 +95,31 @@ The **integration** test runs `docker compose up`, curls `whoami.app.devnest.loc
 
 6. **Dashboard** (dev only): http://127.0.0.1:8080/dashboard/ (Traefik v3 path).
 
+7. **Route-admin** (optional): http://127.0.0.1:9080/health — backend sets `DEVNEST_GATEWAY_URL=http://127.0.0.1:9080` and `DEVNEST_GATEWAY_ENABLED=true` to register routes on workspace RUNNING.
+
 ## Configuration
 
 | Item | Where |
 |------|--------|
-| Base domain for examples | `DEVNEST_BASE_DOMAIN` in `.env` (must match `Host()` rules in `dynamic.yml` if you change it) |
+| Base domain for examples | `DEVNEST_BASE_DOMAIN` in `.env` (match `Host()` in `traefik/dynamic/*.yml`) |
 | Gateway HTTP | Port **80** on host → Traefik `web` |
-| Dashboard | Port **8080** on host → Traefik `traefik` entrypoint |
-| Routes / upstreams | `traefik/dynamic.yml` |
+| Dashboard | Port **8080** on host → Traefik API |
+| Route-admin | Port **9080** on host → `POST/DELETE /routes` |
+| Static routes | `traefik/dynamic/000-base.yml` |
+| Registered workspace routes | `traefik/dynamic/100-workspaces.yml` (written by route-admin) |
 
-`docker-compose.yml` passes `DEVNEST_BASE_DOMAIN` into Traefik labels only for documentation; **router rules are in `dynamic.yml`**. If you change the base domain, update `Host(\`...\`)` in `dynamic.yml` or use a templating step later.
+If you change the base domain, update `Host(\`...\`)` in the YAML files (or add templating later).
 
 ### Path-based routing (optional)
 
-`dynamic.yml` includes a commented example: `PathPrefix(\`/api\`)` combined with `Host()`. Uncomment and adjust for APIs under a path on the same hostname.
+Add another router in `000-base.yml` with `PathPrefix(\`/api\`)` combined with `Host()` if needed.
 
 ## How this aligns with DevNest docs
 
-- **Control plane** (backend): workspace CRUD, runtime metadata (`internal_endpoint`, `public_host`, `endpoint_ref`). Unchanged in this repo area.
-- **Data plane** (this gateway): maps **public host** → **internal endpoint** and proxies traffic. V1 uses a static file; later a sync job will apply the same mapping from backend metadata.
+- **Control plane** (backend): workspace lifecycle; worker calls route-admin when `DEVNEST_GATEWAY_ENABLED=true`.
+- **Data plane** (this repo): Traefik + route-admin; maps **public host** → **upstream** and proxies traffic.
 
-See `docs/BACKEND_INTEGRATION_CONTRACT.md` for the field mapping table and future internal API shape.
+See `docs/BACKEND_INTEGRATION_CONTRACT.md` for the HTTP contract and metadata mapping.
 
 ## Deferred (next phases)
 
