@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     devnest_gateway_url: str = "http://127.0.0.1:9080"
     devnest_base_domain: str = "app.devnest.local"
     devnest_gateway_enabled: bool = False
+    # Used for gateway_url hint on attach/access when route registration is enabled (no TLS in V1).
+    devnest_gateway_public_scheme: str = "http"
 
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""

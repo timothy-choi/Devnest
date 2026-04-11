@@ -10,6 +10,8 @@ on:
       - "gateway/**"
       - "traefik/**"
       - "docker-compose*.yml"
+      - "docker-compose.system.yml"
+      - "backend/tests/system/**"
       - ".github/workflows/**"
   pull_request:
     branches:
@@ -20,6 +22,8 @@ on:
       - "gateway/**"
       - "traefik/**"
       - "docker-compose*.yml"
+      - "docker-compose.system.yml"
+      - "backend/tests/system/**"
       - ".github/workflows/**"
 
 concurrency:
@@ -65,6 +69,8 @@ jobs:
               - 'gateway/**'
               - 'traefik/**'
               - 'docker-compose*.yml'
+              - 'docker-compose.system.yml'
+              - 'backend/tests/system/gateway/**'
             tests_workflow:
               - '.github/workflows/**'
 
@@ -93,6 +99,68 @@ jobs:
 
       - name: Pytest (config + compose + live whoami route)
         run: pytest tests -v
+
+  system-gateway-tests:
+    name: system-gateway-tests
+    needs: detect
+    if: |
+      needs.detect.outputs.backend == 'true' ||
+      needs.detect.outputs.gateway == 'true' ||
+      needs.detect.outputs.tests_workflow == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: devnest_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U test -d devnest_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+
+      - name: Start system gateway stack (Traefik + route-admin + workspace-sim)
+        run: docker compose -f docker-compose.system.yml up -d --build
+
+      - name: Run backend system gateway tests
+        working-directory: backend
+        run: pytest tests/system/gateway -v
+
+      - name: Stop system gateway stack
+        if: always()
+        run: docker compose -f docker-compose.system.yml down -v
 
   quality-checks:
     name: quality-checks
@@ -319,7 +387,7 @@ jobs:
       # Docker + DB system tests only; excludes privileged topology markers (sudo steps below)
       # and workspace_image (long Dockerfile build). Same marker exclusions as unit/integration.
       - name: Run system tests (merge-time tier, non-sudo)
-        run: pytest tests/system -v -m "not topology_linux and not topology_linux_core and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path" --cov=app --cov-append --cov-report=term-missing
+        run: pytest tests/system -v -m "not topology_linux and not topology_linux_core and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path and not gateway" --cov=app --cov-append --cov-report=term-missing
 
       - name: Run Linux topology core happy-path (sudo, CAP_NET_ADMIN)
         run: sudo -E "$(which python)" -m pytest tests/system/topology/test_runtime_topology_probe_happy_path.py -v -m "topology_linux_core" --cov=app --cov-append --cov-report=term-missing

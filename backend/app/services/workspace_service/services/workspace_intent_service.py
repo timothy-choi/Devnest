@@ -143,9 +143,25 @@ def _runtime_ready_for_access(ws: Workspace, rt: WorkspaceRuntime | None) -> boo
 
 
 def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
-    # TODO: return edge-registered URL once gateway reconciles workspace routes (orchestrator TODO today).
-    _ = (ws, rt)
-    return None
+    """Public URL clients would use via Traefik when ``DEVNEST_GATEWAY_ENABLED`` (DNS/TLS out of scope)."""
+    from app.libs.common.config import get_settings
+
+    settings = get_settings()
+    if not settings.devnest_gateway_enabled:
+        return None
+    if ws.status != WorkspaceStatus.RUNNING.value:
+        return None
+    if rt is None or not (rt.container_id or "").strip():
+        return None
+    wid = ws.workspace_id
+    if wid is None:
+        return None
+    host = (ws.public_host or "").strip()
+    if not host:
+        dom = (settings.devnest_base_domain or "app.devnest.local").strip().strip(".")
+        host = f"{wid}.{dom}"
+    scheme = (settings.devnest_gateway_public_scheme or "http").strip().rstrip(":")
+    return f"{scheme}://{host}/"
 
 
 def _access_issues_for_runtime(rt: WorkspaceRuntime) -> tuple[str, ...]:

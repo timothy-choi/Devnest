@@ -93,7 +93,7 @@ jobs:
       - name: Pytest with coverage
         run: |
           pytest --cov=app --cov-report=xml:coverage.xml --cov-report=term-missing \
-            -m "not topology_linux and not topology_linux_core"
+            -m "not topology_linux and not topology_linux_core and not gateway"
 
       - name: Finalize coverage XML
         run: |
@@ -164,7 +164,7 @@ jobs:
       # Privileged topology tests run under sudo next (topology_linux suite + topology_linux_core).
       - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
         run: |
-          pytest tests -v -m "not topology_linux and not topology_linux_core" \
+          pytest tests -v -m "not topology_linux and not topology_linux_core and not gateway" \
             --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
 
       - name: Finalize suite coverage XML

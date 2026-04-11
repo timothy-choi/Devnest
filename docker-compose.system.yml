@@ -1,0 +1,53 @@
+# DevNest system tests: data-plane stack for backend ↔ gateway integration tests.
+# Control plane (FastAPI) runs in pytest on the host; this compose provides Traefik + route-admin
+# + a deterministic HTTP "workspace" upstream on the Docker network.
+#
+# Usage (from repo root):
+#   docker compose -f docker-compose.system.yml up -d --build
+#
+# Host ports (override via env): TRAEFIK_SYSTEM_PORT=18080, ROUTE_ADMIN_SYSTEM_PORT=19080
+
+name: devnest-system
+
+services:
+  workspace-sim:
+    image: nginx:alpine
+    container_name: devnest-system-workspace-sim
+    volumes:
+      - ./backend/tests/system/gateway/nginx-workspace-sim.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - devnest-system
+
+  route-admin:
+    build:
+      context: ./devnest-gateway/route_admin
+    image: devnest-route-admin:system
+    container_name: devnest-system-route-admin
+    ports:
+      - "${ROUTE_ADMIN_SYSTEM_PORT:-19080}:8080"
+    volumes:
+      - ./backend/tests/system/gateway/traefik-dynamic:/etc/traefik/dynamic
+    environment:
+      ROUTES_FILE: /etc/traefik/dynamic/100-workspaces.yml
+    networks:
+      - devnest-system
+
+  traefik:
+    image: traefik:v3.2
+    container_name: devnest-system-traefik
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "${TRAEFIK_SYSTEM_PORT:-18080}:80"
+      - "${TRAEFIK_SYSTEM_DASHBOARD_PORT:-18081}:8080"
+    volumes:
+      - ./devnest-gateway/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./backend/tests/system/gateway/traefik-dynamic:/etc/traefik/dynamic:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - devnest-system
+
+networks:
+  devnest-system:
+    name: devnest-system
