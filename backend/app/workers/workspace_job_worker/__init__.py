@@ -9,6 +9,7 @@ from .worker import (
     load_next_queued_workspace_job,
     run_one_pending_workspace_job,
     run_pending_jobs,
+    run_queued_workspace_job_by_id,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "load_next_queued_workspace_job",
     "run_one_pending_workspace_job",
     "run_pending_jobs",
+    "run_queued_workspace_job_by_id",
 ]

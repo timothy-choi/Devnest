@@ -8,7 +8,10 @@ from app.libs.db.database import init_db
 from app.services.auth_service.api.routers.auth import router as auth_router
 from app.services.notification_service.api.routers import internal_notifications_router, notifications_router
 from app.services.user_service.api.routers import users_router
-from app.services.workspace_service.api.routers import workspaces_router
+from app.services.workspace_service.api.routers import (
+    internal_workspace_jobs_router,
+    workspaces_router,
+)
 
 
 @asynccontextmanager
@@ -23,3 +26,4 @@ app.include_router(users_router)
 app.include_router(workspaces_router)
 app.include_router(notifications_router)
 app.include_router(internal_notifications_router)
+app.include_router(internal_workspace_jobs_router)

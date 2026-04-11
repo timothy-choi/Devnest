@@ -1,4 +1,8 @@
-"""Fixtures for workspace image system tests (real Docker build + run)."""
+"""Fixtures for workspace image system tests (real Docker build + run).
+
+Control-plane E2E tests (``test_workspace_control_plane_system.py``) reuse
+``tests.integration.conftest`` (PostgreSQL + FastAPI client) via ``pytest_plugins``.
+"""
 
 from __future__ import annotations
 
@@ -9,13 +13,20 @@ import time
 import uuid
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import patch
 
 import docker
 import docker.errors
 import pytest
 from docker.models.containers import Container
+from sqlmodel import Session
+
+from app.libs.topology.models import Topology
 
 from tests.system.conftest import _remove_container_force
+
+# Integration DB + TestClient for workspace control-plane system tests in this package.
+pytest_plugins = ("tests.integration.conftest",)
 
 WORKSPACE_IMAGE_TAG = os.environ.get("DEVNEST_WORKSPACE_TEST_IMAGE_TAG", "devnest-workspace-test:latest")
 
@@ -111,3 +122,61 @@ def running_workspace_container(
     finally:
         _remove_container_force(docker_client, name)
         shutil.rmtree(workspace, ignore_errors=True)
+
+
+@pytest.fixture
+def _workspace_control_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Orchestrator-friendly defaults: no host bridge/veth, lightweight workspace image."""
+    monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE", "1")
+    monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "1")
+    monkeypatch.setenv("WORKSPACE_CONTAINER_IMAGE", "nginx:alpine")
+    from app.libs.common.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def orchestrator_topology(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> int:
+    """
+    Persist a ``Topology`` row and point ``DEVNEST_TOPOLOGY_ID`` at it (required by ``DbTopologyAdapter``).
+    """
+    oct2 = (uuid.uuid4().int % 200) + 1
+    cidr = f"10.{oct2}.0.0/24"
+    gateway = f"10.{oct2}.0.1"
+    t = Topology(
+        name=f"sys-cp-{uuid.uuid4().hex[:8]}",
+        version="v1",
+        spec_json={
+            "cidr": cidr,
+            "gateway_ip": gateway,
+            "bridge_name": f"brcp{oct2 % 900 + 100}"[:15],
+        },
+    )
+    db_session.add(t)
+    db_session.commit()
+    db_session.refresh(t)
+    assert t.topology_id is not None
+    monkeypatch.setenv("DEVNEST_TOPOLOGY_ID", str(t.topology_id))
+    return t.topology_id
+
+
+@pytest.fixture
+def e2e_probe_socket_patch() -> Generator[None, None, None]:
+    """
+    Stub TCP connect for service probes.
+
+    The workspace IP lives in an isolated netns; the pytest host cannot open ``ws_ip:8080`` directly.
+    Same pattern as ``tests/integration/orchestrator/test_orchestrator_bringup_integration.py``.
+    """
+
+    class _FakeSock:
+        def close(self) -> None:
+            pass
+
+    with patch(
+        "app.libs.probes.probe_runner.socket.create_connection",
+        return_value=_FakeSock(),
+    ):
+        yield

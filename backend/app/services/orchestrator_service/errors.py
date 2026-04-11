@@ -7,6 +7,12 @@ class OrchestratorError(Exception):
     pass
 
 
+class AppOrchestratorBindingError(OrchestratorError):
+    """Cannot build a process-local orchestrator (e.g. Docker engine unreachable)."""
+
+    pass
+
+
 class WorkspaceBringUpError(OrchestratorError):
     """Unexpected bring-up failure: validation, runtime, topology, or probe errors (not probe-unhealthy roll-ups)."""
 

@@ -27,6 +27,7 @@ from app.services.workspace_service.models.enums import (
 from app.workers.workspace_job_worker.worker import (
     load_next_queued_workspace_job,
     run_pending_jobs,
+    run_queued_workspace_job_by_id,
 )
 
 # Orchestrator receives stringified workspace PK.
@@ -805,6 +806,50 @@ class TestUnsuccessfulOrchestratorResult:
             assert job is not None and job.status == WorkspaceJobStatus.FAILED.value
             assert ws is not None and ws.status == WorkspaceStatus.ERROR.value
             assert rt is not None and rt.container_state == "running"
+
+
+class TestRunQueuedJobById:
+    def test_run_by_id_processes_that_job_even_when_not_fifo_next(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        t_old = datetime(2024, 2, 1, tzinfo=timezone.utc)
+        t_new = datetime(2024, 2, 2, tzinfo=timezone.utc)
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            older = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.STOP.value,
+                created_at=t_old,
+            )
+            older_id = older.workspace_job_id
+            newer = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.START.value,
+                created_at=t_new,
+            )
+            newer_id = newer.workspace_job_id
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
+            tick = run_queued_workspace_job_by_id(session, orch, workspace_job_id=newer_id)
+            session.commit()
+
+        assert tick.processed_count == 1
+        assert tick.last_job_id == newer_id
+        with Session(workspace_job_worker_engine) as session:
+            assert session.get(WorkspaceJob, newer_id).status == WorkspaceJobStatus.SUCCEEDED.value
+            assert session.get(WorkspaceJob, older_id).status == WorkspaceJobStatus.QUEUED.value
 
 
 class TestCallOrder:

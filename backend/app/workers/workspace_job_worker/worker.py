@@ -464,3 +464,25 @@ def run_one_pending_workspace_job(
 ) -> WorkspaceJobWorkerTickResult:
     """Run at most one queued job; equivalent to ``run_pending_jobs(..., limit=1)``."""
     return run_pending_jobs(session, orchestrator, limit=1)
+
+
+def run_queued_workspace_job_by_id(
+    session: Session,
+    orchestrator: OrchestratorService,
+    *,
+    workspace_job_id: int,
+) -> WorkspaceJobWorkerTickResult:
+    """
+    Run a single job by primary key if it is ``QUEUED``; otherwise no-op (``processed_count=0``).
+
+    Does not commit; callers should ``session.commit()`` after success or ``rollback`` on failure.
+    """
+    job = session.get(WorkspaceJob, workspace_job_id)
+    if job is None:
+        return WorkspaceJobWorkerTickResult(processed_count=0, last_job_id=None)
+    if job.status != WorkspaceJobStatus.QUEUED.value:
+        return WorkspaceJobWorkerTickResult(processed_count=0, last_job_id=None)
+    jid = job.workspace_job_id
+    _process_one_job(session, orchestrator, job)
+    session.flush()
+    return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
