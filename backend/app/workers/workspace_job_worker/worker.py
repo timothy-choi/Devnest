@@ -39,6 +39,10 @@ from app.services.workspace_service.models.enums import (
     WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
 )
+from app.services.workspace_service.services.workspace_event_service import (
+    WorkspaceStreamEventType,
+    record_workspace_event,
+)
 
 from .errors import UnsupportedWorkspaceJobTypeError
 from .results import WorkspaceJobWorkerTickResult
@@ -398,6 +402,37 @@ def _execute_job_body(
     raise UnsupportedWorkspaceJobTypeError(f"Unsupported WorkspaceJob.type={jt!r}")
 
 
+def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: WorkspaceJob) -> None:
+    # Persist job/workspace mutations before refresh so we do not reload stale pre-success rows from DB.
+    session.flush()
+    session.refresh(job)
+    session.refresh(ws)
+    jid = job.workspace_job_id
+    base_payload: dict[str, object] = {
+        "job_id": jid,
+        "job_type": job.job_type,
+        "workspace_status": ws.status,
+    }
+    if job.status == WorkspaceJobStatus.SUCCEEDED.value:
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.JOB_SUCCEEDED,
+            status=ws.status,
+            message="Workspace job succeeded",
+            payload=base_payload,
+        )
+    elif job.status == WorkspaceJobStatus.FAILED.value:
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.JOB_FAILED,
+            status=ws.status,
+            message="Workspace job failed",
+            payload={**base_payload, "error_msg": job.error_msg},
+        )
+
+
 def _process_one_job(session: Session, orchestrator: OrchestratorService, job: WorkspaceJob) -> None:
     wid = job.workspace_id
     ws = session.get(Workspace, wid)
@@ -407,6 +442,18 @@ def _process_one_job(session: Session, orchestrator: OrchestratorService, job: W
         return
 
     _mark_job_running(session, job)
+    record_workspace_event(
+        session,
+        workspace_id=wid,
+        event_type=WorkspaceStreamEventType.JOB_RUNNING,
+        status=ws.status,
+        message="Workspace job started",
+        payload={
+            "job_id": job.workspace_job_id,
+            "job_type": job.job_type,
+            "attempt": job.attempt,
+        },
+    )
 
     try:
         _execute_job_body(session, orchestrator, ws, job)
@@ -420,6 +467,8 @@ def _process_one_job(session: Session, orchestrator: OrchestratorService, job: W
         ws.status = WorkspaceStatus.ERROR.value
         _workspace_set_error(ws, _ERROR_CODE_JOB, str(e))
         _touch_workspace(session, ws)
+
+    _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
 
 
 def load_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:

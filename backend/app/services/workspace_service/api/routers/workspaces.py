@@ -1,9 +1,14 @@
 """Workspace control-plane routes (V1: create, list, get, lifecycle intents)."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import asyncio
+import json
+from collections.abc import AsyncIterator
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
-from app.libs.db.database import get_db
+from app.libs.db.database import get_db, get_engine
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.api.schemas import (
@@ -23,6 +28,13 @@ from app.services.workspace_service.errors import (
     WorkspaceServiceError,
 )
 from app.services.workspace_service.services import workspace_intent_service
+from app.services.workspace_service.services.workspace_event_service import (
+    EVENT_PAGE_LIMIT,
+    SSE_POLL_INTERVAL_SEC,
+    assert_workspace_owner,
+    format_sse_data_line,
+    list_workspace_events,
+)
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -281,6 +293,74 @@ def post_workspace_attach(
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
     return _attach_response(out)
+
+
+@router.get(
+    "/{workspace_id}/events",
+    summary="Stream workspace control-plane events (SSE)",
+    description=(
+        "Server-Sent Events stream of persisted control-plane events for this workspace. "
+        "Replays stored events (``after_id`` cursor) then polls the database on an interval (V1; no broker). "
+        "Use this to observe transactional status and asynchronous job outcomes alongside "
+        "POST /workspaces/start/{id} and related intents."
+    ),
+)
+async def stream_workspace_events(
+    workspace_id: int,
+    request: Request,
+    current: UserAuth = Depends(get_current_user),
+) -> StreamingResponse:
+    assert current.user_auth_id is not None
+    uid = current.user_auth_id
+    engine = get_engine()
+
+    def _verify_owner() -> None:
+        with Session(engine) as session:
+            assert_workspace_owner(session, workspace_id, uid)
+
+    try:
+        await asyncio.to_thread(_verify_owner)
+    except WorkspaceNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from None
+
+    async def event_stream() -> AsyncIterator[str]:
+        last_id = 0
+        while True:
+            if await request.is_disconnected():
+                break
+
+            def _fetch_page() -> list:
+                with Session(engine) as session:
+                    return list_workspace_events(
+                        session,
+                        workspace_id=workspace_id,
+                        owner_user_id=uid,
+                        after_id=last_id,
+                        limit=EVENT_PAGE_LIMIT,
+                    )
+
+            try:
+                events = await asyncio.to_thread(_fetch_page)
+            except WorkspaceNotFoundError:
+                yield f"data: {json.dumps({'error': 'workspace_not_found'})}\n\n"
+                break
+
+            for ev in events:
+                eid = ev.workspace_event_id or 0
+                last_id = max(last_id, eid)
+                yield format_sse_data_line(ev)
+
+            await asyncio.sleep(SSE_POLL_INTERVAL_SEC)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get(

@@ -11,6 +11,7 @@ from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.models import (  # noqa: F401 — register metadata before create_all
     Workspace,
     WorkspaceConfig,
+    WorkspaceEvent,
     WorkspaceJob,
     WorkspaceRuntime,
 )

@@ -29,6 +29,10 @@ from app.services.workspace_service.models import (
     WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
 )
+from app.services.workspace_service.services.workspace_event_service import (
+    WorkspaceStreamEventType,
+    record_workspace_event,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +270,19 @@ def _persist_intent(
     session.add(job)
     session.flush()
 
+    record_workspace_event(
+        session,
+        workspace_id=ws.workspace_id,
+        event_type=WorkspaceStreamEventType.INTENT_QUEUED,
+        status=new_status,
+        message="Intent accepted; job queued",
+        payload={
+            "job_id": job.workspace_job_id,
+            "job_type": job_type,
+            "requested_config_version": requested_config_version,
+        },
+    )
+
     try:
         session.commit()
     except Exception:
@@ -442,6 +459,19 @@ def request_update_workspace(
     session.add(job)
     session.flush()
 
+    record_workspace_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=WorkspaceStreamEventType.INTENT_QUEUED,
+        status=ws.status,
+        message="Update intent accepted; job queued",
+        payload={
+            "job_id": job.workspace_job_id,
+            "job_type": WorkspaceJobType.UPDATE.value,
+            "requested_config_version": next_version,
+        },
+    )
+
     try:
         session.commit()
     except Exception:
@@ -498,6 +528,19 @@ def create_workspace(
     )
     session.add(job)
     session.flush()
+
+    record_workspace_event(
+        session,
+        workspace_id=ws.workspace_id,
+        event_type=WorkspaceStreamEventType.INTENT_QUEUED,
+        status=ws.status,
+        message="Workspace creation accepted; job queued",
+        payload={
+            "job_id": job.workspace_job_id,
+            "job_type": WorkspaceJobType.CREATE.value,
+            "requested_config_version": 1,
+        },
+    )
 
     try:
         session.commit()

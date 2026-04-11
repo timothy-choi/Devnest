@@ -17,7 +17,8 @@ from app.services.orchestrator_service.results import (
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
-from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
+from app.services.workspace_service.models import Workspace, WorkspaceEvent, WorkspaceJob, WorkspaceRuntime
+from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
 from app.services.workspace_service.models.enums import (
     WorkspaceJobStatus,
     WorkspaceJobType,
@@ -409,6 +410,17 @@ class TestDispatchCreate:
             assert rt.config_version == REQUESTED_CONFIG_VERSION
             assert rt.health_status == WorkspaceRuntimeHealthStatus.HEALTHY.value
             assert rt.last_heartbeat_at is not None
+
+            evs = list(
+                session.exec(
+                    select(WorkspaceEvent)
+                    .where(WorkspaceEvent.workspace_id == wid)
+                    .order_by(WorkspaceEvent.workspace_event_id),
+                ).all(),
+            )
+            assert len(evs) == 2
+            assert evs[0].event_type == WorkspaceStreamEventType.JOB_RUNNING
+            assert evs[1].event_type == WorkspaceStreamEventType.JOB_SUCCEEDED
 
 
 class TestDispatchStart:

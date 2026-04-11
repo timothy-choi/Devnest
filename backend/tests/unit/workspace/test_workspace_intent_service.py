@@ -16,9 +16,16 @@ from app.services.workspace_service.errors import (
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
 )
-from app.services.workspace_service.models import Workspace, WorkspaceConfig, WorkspaceJob, WorkspaceJobStatus
+from app.services.workspace_service.models import (
+    Workspace,
+    WorkspaceConfig,
+    WorkspaceEvent,
+    WorkspaceJob,
+    WorkspaceJobStatus,
+)
 from app.services.workspace_service.models.enums import WorkspaceJobType, WorkspaceStatus
 from app.services.workspace_service.services import workspace_intent_service
+from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
 
 
 def _seed_workspace(
@@ -88,6 +95,14 @@ def test_request_start_happy_path_stopped(workspace_unit_engine, owner_user_id: 
         assert job.status == WorkspaceJobStatus.QUEUED.value
         assert job.requested_config_version == 1
         assert _job_count(session, wid) == before + 1
+
+        ev = session.exec(
+            select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wid),
+        ).first()
+        assert ev is not None
+        assert ev.event_type == WorkspaceStreamEventType.INTENT_QUEUED
+        assert ev.status == WorkspaceStatus.STARTING.value
+        assert ev.payload_json["job_id"] == out.job_id
 
 
 def test_request_start_happy_path_error_status(workspace_unit_engine, owner_user_id: int) -> None:

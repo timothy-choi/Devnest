@@ -18,12 +18,14 @@ from app.services.workspace_service.api.schemas.workspace_schemas import (
 from app.services.workspace_service.models import (
     Workspace,
     WorkspaceConfig,
+    WorkspaceEvent,
     WorkspaceJob,
     WorkspaceJobStatus,
     WorkspaceJobType,
     WorkspaceStatus,
 )
 from app.services.workspace_service.services import workspace_intent_service
+from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
 
 
 def _sample_create_body() -> CreateWorkspaceRequest:
@@ -118,6 +120,15 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
         assert job.requested_config_version == 1
         assert job.attempt == 0
 
+        ev = session.exec(
+            select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == out.workspace_id),
+        ).first()
+        assert ev is not None
+        assert ev.event_type == WorkspaceStreamEventType.INTENT_QUEUED
+        assert ev.status == WorkspaceStatus.CREATING.value
+        assert ev.payload_json["job_id"] == out.job_id
+        assert ev.payload_json["job_type"] == WorkspaceJobType.CREATE.value
+
 
 def test_create_workspace_commit_failure_rolls_back_no_rows(
     workspace_unit_engine: Engine,
@@ -137,6 +148,7 @@ def test_create_workspace_commit_failure_rolls_back_no_rows(
         assert list(session.exec(select(Workspace)).all()) == []
         assert list(session.exec(select(WorkspaceConfig)).all()) == []
         assert list(session.exec(select(WorkspaceJob)).all()) == []
+        assert list(session.exec(select(WorkspaceEvent)).all()) == []
 
 
 def test_list_workspaces_empty(workspace_unit_engine: Engine, owner_user_id: int) -> None:
