@@ -4,9 +4,11 @@
 
 - **BringUp / health check:** ``success`` mirrors probe ``healthy`` when the container is running;
   missing/stopped containers yield ``success=False`` with ``issues`` (health check path).
-- **Stop / delete:** ``success`` requires the engine action to succeed **and**
+- **Stop:** ``success`` requires the engine stop to succeed; ``topology_detached=False`` is a
+  failure only when ``issues`` contain ``topology:detach_failed:`` (idempotent detach no-ops do
+  not add that prefix).
+- **Delete:** ``success`` requires ``container_deleted`` **and**
   ``topology_detached is not False`` (detach idempotent ``False`` fails the roll-up).
-- **Delete:** additionally requires ``container_deleted``.
 - **Restart / update (restart path):** ``success`` follows the bring-up probe roll-up after a
   successful stop roll-up; partial failures set ``stop_success`` / ``bringup_success`` accordingly.
 - **Update (noop):** ``success`` follows the probe roll-up when the container is running.

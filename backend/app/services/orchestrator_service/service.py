@@ -91,6 +91,29 @@ def _issues_or_none(issues: list[str]) -> list[str] | None:
     return cleaned or None
 
 
+def _stop_workspace_success_roll_up(
+    *,
+    stop_success: bool,
+    topology_detached: bool | None,
+    issues: list[str],
+) -> bool:
+    """
+    True when the container reached a safe stopped/absent state (``stop_success``) and topology
+    detach did not record an explicit failure.
+
+    ``detach_workspace`` returns ``detached=False`` for idempotent no-ops (no row or already
+    ``DETACHED``) without appending issues. A real detach problem adds ``topology:detach_failed:``
+    and sets ``topology_detached=False``.
+    """
+    detach_explicit_failure = topology_detached is False and any(
+        str(i).strip().startswith("topology:detach_failed:")
+        for i in issues
+    )
+    if detach_explicit_failure:
+        return False
+    return bool(stop_success)
+
+
 def _label_value(labels: tuple[tuple[str, str], ...], key: str) -> str | None:
     for k, v in labels:
         if k == key:
@@ -381,7 +404,11 @@ class DefaultOrchestratorService(OrchestratorService):
 
         # TODO: persist runtime stop outcome (container_state, timestamps) to Workspace_runtime.
 
-        success = bool(stop_success and topology_detached is not False)
+        success = _stop_workspace_success_roll_up(
+            stop_success=stop_success,
+            topology_detached=topology_detached,
+            issues=issues,
+        )
         result = WorkspaceStopResult(
             workspace_id=wid,
             success=success,

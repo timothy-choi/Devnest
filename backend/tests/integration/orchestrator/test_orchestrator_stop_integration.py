@@ -11,11 +11,9 @@ needs no patch.
 **Platform:** Docker and PostgreSQL are required (see ``orchestrator_docker_client`` skip). These tests
 are not ``topology_linux`` (no real bridge/veth on the host).
 
-**Idempotency note:** The current ``stop_workspace_runtime`` success rule treats
-``topology_detached=False`` (e.g. attachment already ``DETACHED``) as a failed roll-up, so a *second*
-stop call may return ``success=False`` even when the runtime adapter idempotently reports a stopped
-container. The idempotent test asserts no exception and a non-running container; it documents
-``success`` for the second call without changing the orchestrator.
+**Idempotency:** A second stop after a successful stop returns ``success=True`` when the container
+is already inactive: idempotent topology detach yields ``detached=False`` without
+``topology:detach_failed`` issues, and the runtime adapter treats stop as a no-op.
 """
 
 from __future__ import annotations
@@ -161,11 +159,7 @@ def test_stop_workspace_runtime_idempotent_second_call_no_crash(
     topology_adapter_integration: DbTopologyAdapter,
     tmp_path,
 ) -> None:
-    """Second stop after a successful stop: no exception; container stays inactive.
-
-    Current orchestrator may set ``success=False`` on the second call because detach returns
-    ``detached=False`` when the row is already ``DETACHED``.
-    """
+    """Second stop after a successful stop: no exception; container stays inactive; success True."""
     tid = _seed_topology(
         db_session,
         spec={
@@ -204,8 +198,7 @@ def test_stop_workspace_runtime_idempotent_second_call_no_crash(
         assert first.success is True
 
         second = svc.stop_workspace_runtime(workspace_id=workspace_id)
-        # See module docstring: detach returns detached=False when already DETACHED → success=False.
-        assert second.success is False
+        assert second.success is True
         assert second.container_id
         _assert_container_not_running(runtime_adapter_integration, ref=container_name)
     finally:
