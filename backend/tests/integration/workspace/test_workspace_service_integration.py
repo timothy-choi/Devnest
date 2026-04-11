@@ -1,5 +1,14 @@
 """Integration tests: workspace_intent_service on PostgreSQL (worker-isolated DB, table truncate per test).
 
+These tests exercise the workspace service layer only: synchronous ``Session`` calls, no HTTP
+``TestClient``, no background job worker, and no SSE/streaming. There are no polling loops or
+indefinite waits in this module.
+
+If a run appears to stall near the end of the workspace integration package, the last file
+collected is often this one while the actual blocker may be an earlier module (for example SSE
+reads in ``test_workspace_events_routes_integration.py``) or session-scoped Postgres/Docker
+teardown.
+
 Commit failures during ``create_workspace`` are exercised with mocks in
 ``tests/unit/workspace/test_workspace_service.py``; forcing a mid-transaction DB error here is
 brittle and adds little beyond the real rollback behavior already covered there.
