@@ -7,16 +7,8 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
-from httpx import ASGITransport, Client, Timeout
-
-
-def _asgi_transport(app):
-    """httpx 0.28+ supports ``lifespan=``; 0.27.x does not (CI may resolve either)."""
-    try:
-        return ASGITransport(app=app, lifespan="auto")
-    except TypeError:
-        return ASGITransport(app=app)
 from fastapi import status
+from httpx import ASGITransport, Client, Timeout
 from sqlmodel import Session, select
 
 from app.services.auth_service.services.auth_token import create_access_token
@@ -31,6 +23,14 @@ from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
     record_workspace_event,
 )
+
+
+def _asgi_transport(app):
+    """httpx 0.28+ supports ``lifespan=``; 0.27.x does not (CI may resolve either)."""
+    try:
+        return ASGITransport(app=app, lifespan="auto")
+    except TypeError:
+        return ASGITransport(app=app)
 
 
 def _register_and_token(client, *, username: str, email: str) -> tuple[int, str]:
@@ -100,7 +100,9 @@ def _read_sse_until_data_line(
     n_chunks = 0
     transport = _asgi_transport(testclient.app)
     timeout = Timeout(connect=5.0, read=read_timeout_s, write=10.0, pool=5.0)
-    with Client(transport=transport, base_url="http://testserver", timeout=timeout) as http:
+    # httpx 0.27: ``with Client(...)`` calls ``transport.__enter__()``; ASGITransport has no CM there.
+    http = Client(transport=transport, base_url="http://testserver", timeout=timeout)
+    try:
         try:
             with http.stream("GET", path, headers=headers) as res:
                 assert res.status_code == status.HTTP_200_OK
@@ -116,6 +118,8 @@ def _read_sse_until_data_line(
             pytest.fail(
                 f"SSE read timed out after {read_timeout_s}s (chunks={n_chunks}, bytes={len(buf)}): {e}"
             )
+    finally:
+        http.close()
     if b"data: " not in buf or b"\n\n" not in buf:
         pytest.fail(
             f"SSE incomplete after {n_chunks} chunks / {len(buf)} bytes (expected a full data:…\\n\\n frame)"
@@ -176,11 +180,14 @@ def test_get_workspace_events_sse_empty_workspace_stream_opens_without_reading_b
 
     transport = _asgi_transport(client.app)
     timeout = Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
-    with Client(transport=transport, base_url="http://testserver", timeout=timeout) as http:
+    http = Client(transport=transport, base_url="http://testserver", timeout=timeout)
+    try:
         with http.stream("GET", f"/workspaces/{wid}/events", headers=_auth(token)) as res:
             assert res.status_code == status.HTTP_200_OK
             assert res.headers.get("content-type", "").startswith("text/event-stream")
             assert res.headers.get("cache-control") == "no-cache"
+    finally:
+        http.close()
     # Do not read the SSE body here (infinite stream); headers prove the route opened.
 
 
