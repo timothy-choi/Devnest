@@ -66,6 +66,27 @@ class CreateWorkspaceAcceptedResponse(BaseModel):
     message: str = "Workspace creation accepted."
 
 
+class WorkspaceIntentAcceptedResponse(BaseModel):
+    """202-style acceptance for start/stop/restart/delete/update intent requests."""
+
+    workspace_id: int
+    status: str
+    job_id: int
+    job_type: str
+    requested_config_version: int
+    message: str = "Workspace request accepted."
+    issues: list[str] = Field(default_factory=list)
+
+
+class PatchWorkspaceUpdateRequest(BaseModel):
+    """Intent to roll forward config: new ``WorkspaceConfig`` row at ``latest + 1`` (service-computed)."""
+
+    runtime: WorkspaceRuntimeSpecSchema = Field(
+        ...,
+        description="Next config payload; persisted as the next WorkspaceConfig version.",
+    )
+
+
 class WorkspaceSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
