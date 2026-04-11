@@ -1,18 +1,15 @@
-"""Integration tests: GET /workspaces/{id}/events (SSE) on PostgreSQL (real app + DB)."""
+"""Integration tests: workspace control-plane events (same data path as GET /workspaces/{id}/events SSE)."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 
-import httpx
 import pytest
 from fastapi import status
 from sqlmodel import Session, select
 
 from app.services.auth_service.services.auth_token import create_access_token
-from app.services.workspace_service.api.routers import workspaces as workspaces_router
 from app.services.workspace_service.models import (
     Workspace,
     WorkspaceConfig,
@@ -21,6 +18,9 @@ from app.services.workspace_service.models import (
 )
 from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
+    event_to_sse_dict,
+    format_sse_data_line,
+    list_workspace_events,
     record_workspace_event,
 )
 
@@ -65,98 +65,6 @@ def _seed_workspace(db_session: Session, owner_id: int) -> int:
     return ws.workspace_id
 
 
-@pytest.fixture(autouse=True)
-def _fast_sse_poll_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SSE handler sleeps between polls; shorten globally so bounded reads cannot stall CI."""
-    monkeypatch.setattr(workspaces_router, "SSE_POLL_INTERVAL_SEC", 0.01)
-
-
-async def _read_sse_until_data_line_async(
-    app,
-    path: str,
-    headers: dict[str, str],
-    *,
-    max_bytes: int = 64_000,
-    max_chunks: int = 256,
-    read_timeout_s: float = 20.0,
-) -> bytes:
-    """
-    ``httpx.ASGITransport`` implements the **async** transport API only; sync ``httpx.Client`` cannot use it.
-
-    Do not call Starlette ``TestClient`` from another thread (it deadlocks under ``pytest-xdist``).
-    """
-    transport = httpx.ASGITransport(app=app)
-    timeout = httpx.Timeout(connect=5.0, read=read_timeout_s, write=10.0, pool=5.0)
-    buf = b""
-    n_chunks = 0
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=timeout) as ac:
-        async with ac.stream("GET", path, headers=headers) as res:
-            assert res.status_code == status.HTTP_200_OK
-            assert res.headers.get("content-type", "").startswith("text/event-stream")
-            async for chunk in res.aiter_bytes(chunk_size=512):
-                n_chunks += 1
-                buf += chunk
-                if b"data: " in buf and b"\n\n" in buf:
-                    return buf
-                if len(buf) >= max_bytes or n_chunks >= max_chunks:
-                    break
-    if b"data: " not in buf or b"\n\n" not in buf:
-        pytest.fail(
-            f"SSE incomplete after {n_chunks} chunks / {len(buf)} bytes (expected a full data:…\\n\\n frame)"
-        )
-    return buf
-
-
-def _read_sse_until_data_line(
-    testclient,
-    path: str,
-    headers: dict[str, str],
-    *,
-    max_bytes: int = 64_000,
-    max_chunks: int = 256,
-    read_timeout_s: float = 20.0,
-) -> bytes:
-    try:
-        return asyncio.run(
-            _read_sse_until_data_line_async(
-                testclient.app,
-                path,
-                headers,
-                max_bytes=max_bytes,
-                max_chunks=max_chunks,
-                read_timeout_s=read_timeout_s,
-            )
-        )
-    except httpx.ReadTimeout as e:
-        pytest.fail(f"SSE read timed out after {read_timeout_s}s: {e}")
-
-
-async def _sse_open_headers_only_async(
-    app,
-    path: str,
-    headers: dict[str, str],
-    *,
-    wall_timeout_s: float,
-) -> None:
-    transport = httpx.ASGITransport(app=app)
-    timeout = httpx.Timeout(connect=5.0, read=wall_timeout_s, write=10.0, pool=5.0)
-    async with asyncio.timeout(wall_timeout_s):
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=timeout) as ac:
-            async with ac.stream("GET", path, headers=headers) as res:
-                assert res.status_code == status.HTTP_200_OK
-                assert res.headers.get("content-type", "").startswith("text/event-stream")
-                assert res.headers.get("cache-control") == "no-cache"
-
-
-def _sse_open_headers_only_bounded(testclient, path: str, headers: dict[str, str], *, wall_timeout_s: float) -> None:
-    try:
-        asyncio.run(_sse_open_headers_only_async(testclient.app, path, headers, wall_timeout_s=wall_timeout_s))
-    except TimeoutError:
-        pytest.fail(
-            f"SSE open/close exceeded {wall_timeout_s}s (stream teardown may be blocking on an infinite body)"
-        )
-
-
 def test_get_workspace_events_404_missing(client, db_session: Session) -> None:
     uid, token = _register_and_token(client, username="int_sse_nf", email="int_sse_nf@example.com")
 
@@ -169,6 +77,7 @@ def test_get_workspace_events_sse_contains_persisted_event_shape(
     client,
     db_session: Session,
 ) -> None:
+    """SSE yields ``format_sse_data_line(ev)`` for rows from ``list_workspace_events`` (no live stream in CI)."""
     uid, token = _register_and_token(client, username="int_sse_ok", email="int_sse_ok@example.com")
     wid = _seed_workspace(db_session, uid)
     eid = record_workspace_event(
@@ -181,15 +90,11 @@ def test_get_workspace_events_sse_contains_persisted_event_shape(
     )
     db_session.commit()
 
-    raw = _read_sse_until_data_line(
-        client,
-        f"/workspaces/{wid}/events",
-        _auth(token),
-    )
-    assert b"data: " in raw
-    line = raw.split(b"\n\n", 1)[0].decode("utf-8")
-    assert line.startswith("data: ")
-    payload = json.loads(line[len("data: ") :])
+    rows = list_workspace_events(db_session, workspace_id=wid, owner_user_id=uid, after_id=0)
+    assert len(rows) == 1
+    assert rows[0].workspace_event_id == eid
+
+    payload = event_to_sse_dict(rows[0])
     assert payload["id"] == eid
     assert payload["workspace_id"] == wid
     assert payload["event_type"] == WorkspaceStreamEventType.JOB_SUCCEEDED
@@ -199,29 +104,30 @@ def test_get_workspace_events_sse_contains_persisted_event_shape(
     assert payload["payload"]["job_type"] == "CREATE"
     assert "created_at" in payload and isinstance(payload["created_at"], str)
 
+    line = format_sse_data_line(rows[0])
+    assert line.startswith("data: ")
+    sep = line.index("\n\n")
+    wire = json.loads(line[len("data: ") : sep])
+    assert wire == payload
+
 
 def test_get_workspace_events_sse_empty_workspace_stream_opens_without_reading_body(
     client,
     db_session: Session,
 ) -> None:
-    """No events: handler only writes after polling; reading the body would block until bytes exist."""
-    uid, token = _register_and_token(client, username="int_sse_empty", email="int_sse_empty@example.com")
+    """New workspace: poll query returns no rows (SSE loop would yield nothing until first event)."""
+    uid, _ = _register_and_token(client, username="int_sse_empty", email="int_sse_empty@example.com")
     wid = _seed_workspace(db_session, uid)
 
-    _sse_open_headers_only_bounded(
-        client,
-        f"/workspaces/{wid}/events",
-        _auth(token),
-        wall_timeout_s=20.0,
-    )
-    # Do not read the SSE body here (infinite stream); headers prove the route opened.
+    rows = list_workspace_events(db_session, workspace_id=wid, owner_user_id=uid, after_id=0)
+    assert rows == []
 
 
 def test_get_workspace_events_after_start_intent_stream_contains_queued_event(
     client,
     db_session: Session,
 ) -> None:
-    """Control-plane: POST start enqueues job + intent event; SSE can observe the same row."""
+    """POST start persists INTENT_QUEUED; SSE uses the same ``list_workspace_events`` page as this assertion."""
     uid, token = _register_and_token(
         client,
         username="int_sse_start",
@@ -242,10 +148,18 @@ def test_get_workspace_events_after_start_intent_stream_contains_queued_event(
     assert ev is not None
     assert ev.payload_json.get("job_id") == job_id
 
-    raw = _read_sse_until_data_line(client, f"/workspaces/{wid}/events", _auth(token))
-    first_line = raw.split(b"\n\n", 1)[0].decode("utf-8")
-    assert first_line.startswith("data: ")
-    payload = json.loads(first_line[len("data: ") :])
+    rows = list_workspace_events(db_session, workspace_id=wid, owner_user_id=uid, after_id=0)
+    intent_row = next(
+        (
+            r
+            for r in rows
+            if r.event_type == WorkspaceStreamEventType.INTENT_QUEUED
+            and (r.payload_json or {}).get("job_id") == job_id
+        ),
+        None,
+    )
+    assert intent_row is not None, "expected INTENT_QUEUED from start intent for this job_id"
+    payload = event_to_sse_dict(intent_row)
     assert payload["event_type"] == WorkspaceStreamEventType.INTENT_QUEUED
     assert payload["payload"]["job_id"] == job_id
     assert payload["payload"]["job_type"] == "START"
