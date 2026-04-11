@@ -23,6 +23,19 @@ def _port_free(host: str, port: int, timeout: float = 0.5) -> bool:
         return True
 
 
+def _wait_for_tcp(host: str, port: int, *, attempts: int = 60, sleep_s: float = 1.0) -> None:
+    """Wait until something accepts TCP (docker-proxy → Traefik may need a few seconds on CI)."""
+    last: OSError | None = None
+    for _ in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=3):
+                return
+        except OSError as e:
+            last = e
+            time.sleep(sleep_s)
+    pytest.fail(f"port {port} did not accept TCP in time: {last!r}")
+
+
 @pytest.mark.integration
 def test_whoami_hostname_routes_through_traefik(gateway_root: Path) -> None:
     if not shutil.which("docker"):
@@ -41,6 +54,8 @@ def test_whoami_hostname_routes_through_traefik(gateway_root: Path) -> None:
         )
         assert up.returncode == 0, up.stderr or up.stdout
 
+        _wait_for_tcp("127.0.0.1", 80)
+
         last_err: Exception | None = None
         body = ""
         for _ in range(45):
@@ -50,12 +65,17 @@ def test_whoami_hostname_routes_through_traefik(gateway_root: Path) -> None:
                     headers={"Host": "whoami.app.devnest.local"},
                     method="GET",
                 )
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with urllib.request.urlopen(req, timeout=10) as resp:
                     body = resp.read().decode("utf-8", errors="replace")
                 assert resp.status == 200
                 assert "whoami.app.devnest.local" in body
                 break
-            except (urllib.error.URLError, TimeoutError, AssertionError) as e:
+            except (
+                urllib.error.URLError,
+                OSError,  # ConnectionResetError, ECONNREFUSED while Traefik/docker-proxy starts
+                TimeoutError,
+                AssertionError,
+            ) as e:
                 last_err = e
                 time.sleep(1)
         else:
