@@ -186,7 +186,7 @@ def workspace_control_plane_probe_socket_patch() -> Generator[None, None, None]:
             pass
 
     with patch(
-        "app.libs.probes.probe_runner.socket.create_connection",
+        "app.libs.probes.probe_runner._probe_create_connection",
         return_value=_FakeSock(),
     ):
         yield

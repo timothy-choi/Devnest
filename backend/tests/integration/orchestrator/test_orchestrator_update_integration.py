@@ -138,7 +138,7 @@ def test_update_workspace_runtime_noop_when_label_matches_requested_integration(
     out = None
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             up0 = svc.bring_up_workspace_runtime(
@@ -152,7 +152,7 @@ def test_update_workspace_runtime_noop_when_label_matches_requested_integration(
         assert _label_config_version(ins0) == cfg_ver
 
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             out = svc.update_workspace_runtime(
@@ -233,7 +233,7 @@ def test_update_workspace_runtime_restart_happy_path_integration(
     out = None
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             assert svc.bring_up_workspace_runtime(
@@ -245,7 +245,7 @@ def test_update_workspace_runtime_restart_happy_path_integration(
         assert _label_config_version(ins_mid) == v_before
 
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             out = svc.update_workspace_runtime(
@@ -330,7 +330,7 @@ def test_update_workspace_runtime_restart_probe_unhealthy_without_tcp_patch_inte
     out = None
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             assert svc.bring_up_workspace_runtime(

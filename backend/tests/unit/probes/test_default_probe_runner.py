@@ -270,7 +270,7 @@ class TestCheckServiceReachable:
 
     def test_reachable(self, runner: DefaultProbeRunner) -> None:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=self._FakeSock(),
         ) as cc:
             out = runner.check_service_reachable(
@@ -287,7 +287,7 @@ class TestCheckServiceReachable:
 
     def test_timeout(self, runner: DefaultProbeRunner) -> None:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             side_effect=socket.timeout(),
         ):
             out = runner.check_service_reachable(workspace_ip="192.0.2.1", port=8080, timeout_seconds=0.5)
@@ -296,7 +296,7 @@ class TestCheckServiceReachable:
 
     def test_unreachable_connection_refused(self, runner: DefaultProbeRunner) -> None:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             side_effect=ConnectionRefusedError(),
         ):
             out = runner.check_service_reachable(workspace_ip="192.0.2.2", port=8080)
@@ -309,7 +309,7 @@ class TestCheckServiceReachable:
 
     def test_unreachable_oserror_enetunreach(self, runner: DefaultProbeRunner) -> None:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             side_effect=OSError(errno.ENETUNREACH, "Network is unreachable"),
         ):
             out = runner.check_service_reachable(workspace_ip="192.0.2.3", port=443)
@@ -319,7 +319,7 @@ class TestCheckServiceReachable:
 
     def test_connect_error_gaierror(self, runner: DefaultProbeRunner) -> None:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             side_effect=socket.gaierror(8, "nodename nor servname"),
         ):
             out = runner.check_service_reachable(workspace_ip="no-such-host.invalid", port=8080)
@@ -329,7 +329,7 @@ class TestCheckServiceReachable:
 
     def test_connect_error_generic_oserror(self, runner: DefaultProbeRunner) -> None:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             side_effect=OSError(errno.EIO, "I/O error"),
         ):
             out = runner.check_service_reachable(workspace_ip="127.0.0.1", port=8080)
@@ -379,7 +379,7 @@ class TestCheckWorkspaceHealth:
         self._healthy_container(mock_runtime)
         self._healthy_topology_with_ip(mock_topology)
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=TestCheckServiceReachable._FakeSock(),
         ):
             out = runner.check_workspace_health(
@@ -410,7 +410,7 @@ class TestCheckWorkspaceHealth:
         )
         self._healthy_topology_with_ip(mock_topology)
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=TestCheckServiceReachable._FakeSock(),
         ):
             out = runner.check_workspace_health(
@@ -465,7 +465,7 @@ class TestCheckWorkspaceHealth:
         self._healthy_container(mock_runtime)
         self._healthy_topology_with_ip(mock_topology)
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             side_effect=ConnectionRefusedError(),
         ):
             out = runner.check_workspace_health(
@@ -490,7 +490,7 @@ class TestCheckWorkspaceHealth:
         self._healthy_container(mock_runtime)
         self._healthy_topology_with_ip(mock_topology, ip="10.99.1.2")
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             side_effect=socket.timeout(),
         ):
             out = runner.check_workspace_health(

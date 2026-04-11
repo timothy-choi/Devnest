@@ -126,7 +126,7 @@ def test_delete_workspace_runtime_happy_path_single_workspace_topology_removed(
 
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             up = svc.bring_up_workspace_runtime(workspace_id=workspace_id)
@@ -193,7 +193,7 @@ def test_delete_workspace_runtime_second_call_idempotent_semantics(
 
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             assert svc.bring_up_workspace_runtime(workspace_id=workspace_id).success is True
@@ -261,7 +261,7 @@ def test_delete_workspace_runtime_topology_retained_when_second_workspace_attach
 
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             assert svc_a.bring_up_workspace_runtime(workspace_id=ws_a).success is True

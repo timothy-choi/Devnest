@@ -119,7 +119,7 @@ def test_restart_workspace_runtime_happy_path_integration(
     out = None
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             up0 = svc.bring_up_workspace_runtime(workspace_id=workspace_id)
@@ -128,7 +128,7 @@ def test_restart_workspace_runtime_happy_path_integration(
         assert up0.internal_endpoint
 
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             out = svc.restart_workspace_runtime(
@@ -264,7 +264,7 @@ def test_restart_workspace_runtime_bringup_probe_fails_after_stop_without_tcp_pa
     out = None
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             assert svc.bring_up_workspace_runtime(workspace_id=workspace_id).success is True

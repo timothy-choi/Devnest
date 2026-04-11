@@ -29,6 +29,10 @@ from .results import (
     WorkspaceHealthResult,
 )
 
+# Tests patch this symbol. Patching ``probe_runner.socket.create_connection`` mutates the stdlib
+# ``socket`` module (``probe_runner.socket`` is that module) and breaks unrelated TCP clients (httpx).
+_probe_create_connection = socket.create_connection
+
 
 def _parse_non_negative_int(raw: str) -> int | None:
     try:
@@ -354,7 +358,7 @@ class DefaultProbeRunner(ProbeRunner):
         sock: socket.socket | None = None
         try:
             t0 = time.perf_counter()
-            sock = socket.create_connection((ip, port), timeout=timeout_seconds)
+            sock = _probe_create_connection((ip, port), timeout=timeout_seconds)
             t1 = time.perf_counter()
             latency_ms = (t1 - t0) * 1000.0
             return ServiceProbeResult(

@@ -155,7 +155,7 @@ def test_check_workspace_health_aggregate_with_persisted_state(
 
     runner = DefaultProbeRunner(runtime=mock_runtime_running, topology=topology_adapter)
     with patch(
-        "app.libs.probes.probe_runner.socket.create_connection",
+        "app.libs.probes.probe_runner._probe_create_connection",
         return_value=_FakeSock(),
     ):
         agg = runner.check_workspace_health(

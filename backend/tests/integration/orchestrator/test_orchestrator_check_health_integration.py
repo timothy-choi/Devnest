@@ -86,13 +86,13 @@ def test_check_workspace_runtime_health_after_bring_up_integration(
 
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             assert svc.bring_up_workspace_runtime(workspace_id=workspace_id).success is True
 
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             out = svc.check_workspace_runtime_health(workspace_id=workspace_id)
