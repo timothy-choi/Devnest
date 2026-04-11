@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 
-import httpx
 import pytest
 from fastapi import status
-from httpx import ASGITransport, Client, Timeout
 from sqlmodel import Session, select
 
 from app.services.auth_service.services.auth_token import create_access_token
@@ -23,14 +22,6 @@ from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
     record_workspace_event,
 )
-
-
-def _close_http_client_best_effort(http: Client) -> None:
-    """httpx 0.27: ``Client.close()`` calls ``ASGITransport.close()`` which does not exist."""
-    try:
-        http.close()
-    except AttributeError:
-        pass
 
 
 def _register_and_token(client, *, username: str, email: str) -> tuple[int, str]:
@@ -89,43 +80,84 @@ def _read_sse_until_data_line(
     read_timeout_s: float = 20.0,
 ) -> bytes:
     """
-    Read the first full SSE ``data:`` frame using httpx + ASGITransport.
+    Read the first full SSE ``data:`` frame using Starlette ``TestClient`` on a daemon thread.
 
-    Starlette's synchronous ``TestClient.stream().iter_bytes()`` can block without returning even
-    when ``timeout=`` is passed (especially under ``pytest-xdist``), which stalls the whole worker
-    and makes the *other* worker look stuck on its last test. httpx applies read timeouts to stream
-    reads reliably.
+    ``TestClient.stream(..., timeout=...)`` does not reliably cap blocking ``iter_bytes()`` reads.
+    Mixing ``httpx.Client`` with ``httpx.ASGITransport`` across Starlette/pip resolutions can yield
+    transports without ``handle_request``. A wall-clock ``Event.wait`` on the main thread bounds the
+    worker so ``pytest-xdist`` does not hang indefinitely.
     """
-    buf = b""
-    n_chunks = 0
-    # No ``lifespan=``: not supported on every httpx ASGITransport (e.g. some 0.28.x / Starlette stacks).
-    transport = ASGITransport(app=testclient.app)
-    timeout = Timeout(connect=5.0, read=read_timeout_s, write=10.0, pool=5.0)
-    # Avoid ``with Client``: 0.27 calls ``transport.__enter__()`` which ASGITransport lacked.
-    http = Client(transport=transport, base_url="http://testserver", timeout=timeout)
-    try:
+    state: dict[str, object] = {"buf": b"", "n_chunks": 0, "err": None}
+    done = threading.Event()
+
+    def worker() -> None:
         try:
-            with http.stream("GET", path, headers=headers) as res:
+            with testclient.stream("GET", path, headers=headers) as res:
                 assert res.status_code == status.HTTP_200_OK
                 assert res.headers.get("content-type", "").startswith("text/event-stream")
+                buf = b""
+                n_chunks = 0
                 for chunk in res.iter_bytes(chunk_size=512):
                     n_chunks += 1
                     buf += chunk
+                    state["buf"] = buf
+                    state["n_chunks"] = n_chunks
                     if b"data: " in buf and b"\n\n" in buf:
-                        return buf
+                        return
                     if len(buf) >= max_bytes or n_chunks >= max_chunks:
-                        break
-        except httpx.ReadTimeout as e:
-            pytest.fail(
-                f"SSE read timed out after {read_timeout_s}s (chunks={n_chunks}, bytes={len(buf)}): {e}"
-            )
-    finally:
-        _close_http_client_best_effort(http)
+                        return
+        except Exception as e:
+            state["err"] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    slack_s = 5.0
+    if not done.wait(timeout=read_timeout_s + slack_s):
+        pytest.fail(
+            f"SSE read exceeded wall-clock {read_timeout_s + slack_s}s "
+            f"(chunks={state['n_chunks']}, bytes={len(state['buf'])})"
+        )
+    err = state["err"]
+    if err is not None:
+        assert isinstance(err, BaseException)
+        raise err
+    buf = state["buf"]
+    assert isinstance(buf, bytes)
+    n_chunks = state["n_chunks"]
+    assert isinstance(n_chunks, int)
     if b"data: " not in buf or b"\n\n" not in buf:
         pytest.fail(
             f"SSE incomplete after {n_chunks} chunks / {len(buf)} bytes (expected a full data:…\\n\\n frame)"
         )
     return buf
+
+
+def _sse_open_headers_only_bounded(testclient, path: str, headers: dict[str, str], *, wall_timeout_s: float) -> None:
+    """Open the SSE stream, assert headers, exit without reading the body; bounded wall time."""
+    state: dict[str, object] = {"err": None}
+    done = threading.Event()
+
+    def worker() -> None:
+        try:
+            with testclient.stream("GET", path, headers=headers) as res:
+                assert res.status_code == status.HTTP_200_OK
+                assert res.headers.get("content-type", "").startswith("text/event-stream")
+                assert res.headers.get("cache-control") == "no-cache"
+        except Exception as e:
+            state["err"] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    if not done.wait(timeout=wall_timeout_s):
+        pytest.fail(
+            f"SSE open/close exceeded {wall_timeout_s}s (stream teardown may be blocking on an infinite body)"
+        )
+    err = state["err"]
+    if err is not None:
+        assert isinstance(err, BaseException)
+        raise err
 
 
 def test_get_workspace_events_404_missing(client, db_session: Session) -> None:
@@ -179,16 +211,12 @@ def test_get_workspace_events_sse_empty_workspace_stream_opens_without_reading_b
     uid, token = _register_and_token(client, username="int_sse_empty", email="int_sse_empty@example.com")
     wid = _seed_workspace(db_session, uid)
 
-    transport = ASGITransport(app=client.app)
-    timeout = Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
-    http = Client(transport=transport, base_url="http://testserver", timeout=timeout)
-    try:
-        with http.stream("GET", f"/workspaces/{wid}/events", headers=_auth(token)) as res:
-            assert res.status_code == status.HTTP_200_OK
-            assert res.headers.get("content-type", "").startswith("text/event-stream")
-            assert res.headers.get("cache-control") == "no-cache"
-    finally:
-        _close_http_client_best_effort(http)
+    _sse_open_headers_only_bounded(
+        client,
+        f"/workspaces/{wid}/events",
+        _auth(token),
+        wall_timeout_s=20.0,
+    )
     # Do not read the SSE body here (infinite stream); headers prove the route opened.
 
 
