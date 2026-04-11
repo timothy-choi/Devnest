@@ -82,12 +82,6 @@ def gateway_system_stack(docker_client) -> None:
     )
 
 
-pytest_plugins = [
-    "tests.system.conftest",
-    "tests.system.workspace.conftest",
-]
-
-
 @pytest.fixture(autouse=True)
 def _gateway_system_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the backend gateway client at the system route-admin; enable registration."""
