@@ -8,6 +8,14 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 from httpx import ASGITransport, Client, Timeout
+
+
+def _asgi_transport(app):
+    """httpx 0.28+ supports ``lifespan=``; 0.27.x does not (CI may resolve either)."""
+    try:
+        return ASGITransport(app=app, lifespan="auto")
+    except TypeError:
+        return ASGITransport(app=app)
 from fastapi import status
 from sqlmodel import Session, select
 
@@ -90,7 +98,7 @@ def _read_sse_until_data_line(
     """
     buf = b""
     n_chunks = 0
-    transport = ASGITransport(app=testclient.app, lifespan="auto")
+    transport = _asgi_transport(testclient.app)
     timeout = Timeout(connect=5.0, read=read_timeout_s, write=10.0, pool=5.0)
     with Client(transport=transport, base_url="http://testserver", timeout=timeout) as http:
         try:
@@ -166,7 +174,7 @@ def test_get_workspace_events_sse_empty_workspace_stream_opens_without_reading_b
     uid, token = _register_and_token(client, username="int_sse_empty", email="int_sse_empty@example.com")
     wid = _seed_workspace(db_session, uid)
 
-    transport = ASGITransport(app=client.app, lifespan="auto")
+    transport = _asgi_transport(client.app)
     timeout = Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
     with Client(transport=transport, base_url="http://testserver", timeout=timeout) as http:
         with http.stream("GET", f"/workspaces/{wid}/events", headers=_auth(token)) as res:
