@@ -1,0 +1,882 @@
+"""Unit tests: workspace job worker dispatch and persistence (SQLite + mocked orchestrator)."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, create_autospec
+
+import pytest
+from sqlmodel import Session, select
+
+from app.services.orchestrator_service.errors import WorkspaceBringUpError
+from app.services.orchestrator_service.interfaces import OrchestratorService
+from app.services.orchestrator_service.results import (
+    WorkspaceBringUpResult,
+    WorkspaceDeleteResult,
+    WorkspaceRestartResult,
+    WorkspaceStopResult,
+    WorkspaceUpdateResult,
+)
+from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
+from app.services.workspace_service.models.enums import (
+    WorkspaceJobStatus,
+    WorkspaceJobType,
+    WorkspaceRuntimeHealthStatus,
+    WorkspaceStatus,
+)
+from app.workers.workspace_job_worker.worker import (
+    load_next_queued_workspace_job,
+    run_pending_jobs,
+)
+
+# Orchestrator receives stringified workspace PK.
+NODE_ID = "node-prod-1"
+CONTAINER_ID = "ctr-abc123"
+CONTAINER_STATE = "running"
+TOPOLOGY_ID_STR = "42"
+INTERNAL_ENDPOINT = "http://10.0.0.5:8080"
+REQUESTED_CONFIG_VERSION = 2
+
+
+@pytest.fixture
+def patch_worker_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Monotonic fake clock for ``worker._now``."""
+    base = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    state = {"n": 0}
+
+    def _tick() -> datetime:
+        i = state["n"]
+        state["n"] = i + 1
+        return base + timedelta(seconds=i)
+
+    import app.workers.workspace_job_worker.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_now", _tick)
+
+
+def _seed_workspace(
+    session: Session,
+    owner_user_id: int,
+    *,
+    status: str = WorkspaceStatus.STARTING.value,
+    name: str = "Job Worker WS",
+) -> Workspace:
+    now = datetime.now(timezone.utc)
+    ws = Workspace(
+        name=name,
+        description="unit",
+        owner_user_id=owner_user_id,
+        status=status,
+        is_private=True,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(ws)
+    session.flush()
+    assert ws.workspace_id is not None
+    return ws
+
+
+def _seed_job(
+    session: Session,
+    *,
+    workspace_id: int,
+    owner_user_id: int,
+    job_type: str,
+    status: str = WorkspaceJobStatus.QUEUED.value,
+    requested_config_version: int = REQUESTED_CONFIG_VERSION,
+    created_at: datetime | None = None,
+) -> WorkspaceJob:
+    job = WorkspaceJob(
+        workspace_id=workspace_id,
+        job_type=job_type,
+        status=status,
+        requested_by_user_id=owner_user_id,
+        requested_config_version=requested_config_version,
+        attempt=0,
+    )
+    if created_at is not None:
+        job.created_at = created_at
+    session.add(job)
+    session.flush()
+    assert job.workspace_job_id is not None
+    return job
+
+
+def _seed_runtime(
+    session: Session,
+    workspace_id: int,
+    *,
+    node_id: str = "old-node",
+    container_id: str = "old-ctr",
+) -> WorkspaceRuntime:
+    rt = WorkspaceRuntime(
+        workspace_id=workspace_id,
+        node_id=node_id,
+        container_id=container_id,
+        container_state="running",
+        topology_id=1,
+        internal_endpoint="http://old",
+        config_version=1,
+        health_status=WorkspaceRuntimeHealthStatus.UNKNOWN.value,
+    )
+    session.add(rt)
+    session.flush()
+    return rt
+
+
+def _orch() -> MagicMock:
+    return create_autospec(OrchestratorService, instance=True)
+
+
+def _bringup_ok(workspace_id: str) -> WorkspaceBringUpResult:
+    return WorkspaceBringUpResult(
+        workspace_id=workspace_id,
+        success=True,
+        node_id=NODE_ID,
+        topology_id=TOPOLOGY_ID_STR,
+        container_id=CONTAINER_ID,
+        container_state=CONTAINER_STATE,
+        workspace_ip="10.0.0.5",
+        internal_endpoint=INTERNAL_ENDPOINT,
+        probe_healthy=True,
+        issues=None,
+    )
+
+
+def _bringup_fail(workspace_id: str) -> WorkspaceBringUpResult:
+    return WorkspaceBringUpResult(
+        workspace_id=workspace_id,
+        success=False,
+        node_id=NODE_ID,
+        issues=["runtime:probe:unhealthy"],
+    )
+
+
+def _stop_ok(workspace_id: str) -> WorkspaceStopResult:
+    return WorkspaceStopResult(
+        workspace_id=workspace_id,
+        success=True,
+        container_id=CONTAINER_ID,
+        container_state="stopped",
+        topology_detached=True,
+        issues=None,
+    )
+
+
+def _stop_fail(workspace_id: str) -> WorkspaceStopResult:
+    return WorkspaceStopResult(
+        workspace_id=workspace_id,
+        success=False,
+        issues=["stop:engine:failed"],
+    )
+
+
+def _delete_ok(workspace_id: str) -> WorkspaceDeleteResult:
+    return WorkspaceDeleteResult(
+        workspace_id=workspace_id,
+        success=True,
+        container_deleted=True,
+        topology_detached=True,
+        issues=None,
+    )
+
+
+def _delete_fail(workspace_id: str) -> WorkspaceDeleteResult:
+    return WorkspaceDeleteResult(
+        workspace_id=workspace_id,
+        success=False,
+        issues=["delete:engine:failed"],
+    )
+
+
+def _restart_ok(workspace_id: str) -> WorkspaceRestartResult:
+    return WorkspaceRestartResult(
+        workspace_id=workspace_id,
+        success=True,
+        stop_success=True,
+        bringup_success=True,
+        node_id=NODE_ID,
+        topology_id=TOPOLOGY_ID_STR,
+        container_id=CONTAINER_ID,
+        container_state=CONTAINER_STATE,
+        workspace_ip="10.0.0.5",
+        internal_endpoint=INTERNAL_ENDPOINT,
+        probe_healthy=True,
+        issues=None,
+    )
+
+
+def _update_ok(workspace_id: str, *, config_version: int = REQUESTED_CONFIG_VERSION) -> WorkspaceUpdateResult:
+    return WorkspaceUpdateResult(
+        workspace_id=workspace_id,
+        success=True,
+        current_config_version=config_version,
+        requested_config_version=config_version,
+        update_strategy="noop",
+        no_op=True,
+        node_id=NODE_ID,
+        topology_id=TOPOLOGY_ID_STR,
+        container_id=CONTAINER_ID,
+        container_state=CONTAINER_STATE,
+        workspace_ip="10.0.0.5",
+        internal_endpoint=INTERNAL_ENDPOINT,
+        probe_healthy=True,
+        issues=None,
+    )
+
+
+class TestLoadPendingJobs:
+    def test_load_next_queued_picks_oldest_created_at(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+    ) -> None:
+        t0 = datetime(2024, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+        t1 = datetime(2024, 1, 2, 10, 0, 0, tzinfo=timezone.utc)
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.STOP.value,
+                created_at=t1,
+            )
+            older = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.START.value,
+                created_at=t0,
+            )
+            older_job_id = older.workspace_job_id
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            nxt = load_next_queued_workspace_job(session)
+            assert nxt is not None
+            assert nxt.workspace_job_id == older_job_id
+            assert nxt.job_type == WorkspaceJobType.START.value
+
+    def test_run_pending_jobs_respects_limit_two(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        wid_str_holder: dict[str, str] = {}
+
+        def _bring(**kwargs: object) -> WorkspaceBringUpResult:
+            return _bringup_ok(str(kwargs["workspace_id"]))
+
+        orch.bring_up_workspace_runtime.side_effect = _bring
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            wid_str_holder["v"] = str(wid)
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+                created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            )
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.START.value,
+                created_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            )
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            tick = run_pending_jobs(session, orch, limit=2)
+            session.commit()
+
+        assert tick.processed_count == 2
+        assert orch.bring_up_workspace_runtime.call_count == 2
+        wid_str = wid_str_holder["v"]
+        orch.bring_up_workspace_runtime.assert_any_call(
+            workspace_id=wid_str,
+            requested_config_version=REQUESTED_CONFIG_VERSION,
+        )
+
+
+class TestMarkJobStarted:
+    def test_orchestrator_called_only_after_job_running(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        captured: dict[str, object] = {}
+
+        def _bring(*, workspace_id: str, requested_config_version: int | None = None) -> WorkspaceBringUpResult:
+            job = captured.get("job")
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.RUNNING.value
+            assert job.started_at is not None
+            assert job.finished_at is None
+            return _bringup_ok(workspace_id)
+
+        orch.bring_up_workspace_runtime.side_effect = _bring
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            job_id = job.workspace_job_id
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            j = session.get(WorkspaceJob, job_id)
+            assert j is not None
+            captured["job"] = j
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.bring_up_workspace_runtime.assert_called_once()
+
+
+class TestDispatchCreate:
+    def test_create_dispatches_bring_up_and_persists_success(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.bring_up_workspace_runtime.assert_called_once_with(
+            workspace_id=str(wid),
+            requested_config_version=REQUESTED_CONFIG_VERSION,
+        )
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None
+            assert ws is not None
+            assert rt is not None
+            assert job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert job.error_msg is None
+            assert job.started_at is not None
+            assert job.finished_at is not None
+            assert job.started_at <= job.finished_at
+            assert job.attempt == 1
+            assert ws.status == WorkspaceStatus.RUNNING.value
+            assert ws.endpoint_ref == INTERNAL_ENDPOINT
+            assert ws.last_error_code is None
+            assert rt.node_id == NODE_ID
+            assert rt.container_id == CONTAINER_ID
+            assert rt.container_state == CONTAINER_STATE
+            assert rt.topology_id == int(TOPOLOGY_ID_STR)
+            assert rt.internal_endpoint == INTERNAL_ENDPOINT
+            assert rt.config_version == REQUESTED_CONFIG_VERSION
+            assert rt.health_status == WorkspaceRuntimeHealthStatus.HEALTHY.value
+            assert rt.last_heartbeat_at is not None
+
+
+class TestDispatchStart:
+    def test_start_dispatches_bring_up(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.START.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.bring_up_workspace_runtime.assert_called_once_with(
+            workspace_id=str(wid),
+            requested_config_version=REQUESTED_CONFIG_VERSION,
+        )
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.SUCCEEDED.value
+
+
+class TestDispatchStop:
+    def test_stop_dispatches_stop_and_persists(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid)
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.STOP.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.stop_workspace_runtime.return_value = _stop_ok(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.stop_workspace_runtime.assert_called_once_with(
+            workspace_id=str(wid),
+            requested_by=str(owner_user_id),
+        )
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws is not None and ws.status == WorkspaceStatus.STOPPED.value
+            assert ws.last_stopped is not None
+            assert rt is not None
+            assert rt.container_state == "stopped"
+            assert rt.health_status == WorkspaceRuntimeHealthStatus.UNKNOWN.value
+
+
+class TestDispatchRestart:
+    def test_restart_dispatches_restart(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.RESTART.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.restart_workspace_runtime.return_value = _restart_ok(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.restart_workspace_runtime.assert_called_once_with(
+            workspace_id=str(wid),
+            requested_by=str(owner_user_id),
+            requested_config_version=REQUESTED_CONFIG_VERSION,
+        )
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert rt is not None
+            assert rt.node_id == NODE_ID
+            assert rt.health_status == WorkspaceRuntimeHealthStatus.HEALTHY.value
+
+
+class TestDispatchDelete:
+    def test_delete_dispatches_delete_and_clears_runtime(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid)
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.delete_workspace_runtime.return_value = _delete_ok(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.delete_workspace_runtime.assert_called_once_with(
+            workspace_id=str(wid),
+            requested_by=str(owner_user_id),
+        )
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert rt is not None
+            assert rt.container_id is None
+            assert rt.container_state == "deleted"
+            assert rt.internal_endpoint is None
+
+
+class TestDispatchUpdate:
+    def test_update_dispatches_update_with_config_version(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        cfg = 3
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.UPDATE.value,
+                requested_config_version=cfg,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.update_workspace_runtime.return_value = _update_ok(str(wid), config_version=cfg)
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.update_workspace_runtime.assert_called_once_with(
+            workspace_id=str(wid),
+            requested_config_version=cfg,
+            requested_by=str(owner_user_id),
+        )
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert rt is not None and rt.config_version == cfg
+
+
+class TestUnsupportedJobType:
+    def test_unknown_job_type_marks_job_failed_and_workspace_error(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type="NOT_A_REAL_TYPE",
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.bring_up_workspace_runtime.assert_not_called()
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.FAILED.value
+            assert job.finished_at is not None
+            assert job.error_msg is not None
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ERROR.value
+            assert ws.last_error_code == "WORKSPACE_JOB_FAILED"
+
+
+class TestOrchestratorException:
+    def test_bring_up_exception_marks_job_failed_and_records_orchestrator_code(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        orch.bring_up_workspace_runtime.side_effect = WorkspaceBringUpError("engine blew up")
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.FAILED.value
+            assert job.finished_at is not None
+            assert job.error_msg is not None
+            assert "engine blew up" in job.error_msg
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ERROR.value
+            assert ws.last_error_code == "ORCHESTRATOR_EXCEPTION"
+
+
+class TestUnsuccessfulOrchestratorResult:
+    def test_bring_up_false_success_does_not_mutate_runtime_snapshot(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid, node_id="keep-me", container_id="keep-ctr")
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.START.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.bring_up_workspace_runtime.return_value = _bringup_fail(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.FAILED.value
+            assert job.error_msg is not None
+            assert "runtime:probe:unhealthy" in job.error_msg
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ERROR.value
+            assert ws.last_error_code == "WORKSPACE_JOB_FAILED"
+            assert rt is not None
+            assert rt.node_id == "keep-me"
+            assert rt.container_id == "keep-ctr"
+
+    def test_stop_false_success_leaves_runtime_unchanged(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid, node_id="n1", container_id="c1")
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.STOP.value,
+            )
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.stop_workspace_runtime.return_value = _stop_fail(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert rt is not None
+            assert rt.container_id == "c1"
+            assert rt.container_state == "running"
+
+    def test_delete_false_success_keeps_workspace_non_deleted(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.DELETING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid)
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.delete_workspace_runtime.return_value = _delete_fail(str(wid))
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.FAILED.value
+            assert ws is not None and ws.status == WorkspaceStatus.ERROR.value
+            assert rt is not None and rt.container_state == "running"
+
+
+class TestCallOrder:
+    def test_events_order_mark_running_before_finalize(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        events: list[str] = []
+
+        def _bring(*, workspace_id: str, requested_config_version: int | None = None) -> WorkspaceBringUpResult:
+            events.append("orchestrator")
+            return _bringup_ok(workspace_id)
+
+        orch.bring_up_workspace_runtime.side_effect = _bring
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = load_next_queued_workspace_job(session)
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.QUEUED.value
+            events.append("loaded_queued")
+            run_pending_jobs(session, orch, limit=1)
+            events.append("after_tick")
+            session.commit()
+
+        assert events == ["loaded_queued", "orchestrator", "after_tick"]
+
+
+class TestMissingWorkspace:
+    def test_missing_workspace_row_marks_job_failed_without_orchestrator(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = WorkspaceJob(
+                workspace_id=9_999_999,
+                job_type=WorkspaceJobType.START.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=owner_user_id,
+                requested_config_version=1,
+                attempt=0,
+            )
+            session.add(job)
+            session.flush()
+            job_id = job.workspace_job_id
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, orch, limit=1)
+            session.commit()
+
+        orch.bring_up_workspace_runtime.assert_not_called()
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.FAILED.value
+            assert job.error_msg is not None

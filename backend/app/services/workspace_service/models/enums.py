@@ -15,6 +15,7 @@ class WorkspaceStatus(str, Enum):
     UPDATING = "UPDATING"
     ERROR = "ERROR"
     DELETING = "DELETING"
+    DELETED = "DELETED"
 
 
 class WorkspaceJobType(str, Enum):
