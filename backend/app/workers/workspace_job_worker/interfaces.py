@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from sqlmodel import Session
@@ -15,9 +16,9 @@ class WorkspaceJobWorker(Protocol):
     def run_pending_jobs(
         self,
         session: Session,
-        orchestrator: OrchestratorService,
         *,
+        get_orchestrator: Callable[[Session], OrchestratorService],
         limit: int = 1,
     ) -> WorkspaceJobWorkerTickResult:
-        """Load up to ``limit`` queued jobs and run them sequentially."""
+        """Dequeue up to ``limit`` jobs (row-locked) and run them with a per-job orchestrator."""
         ...

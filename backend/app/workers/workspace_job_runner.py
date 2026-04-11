@@ -3,7 +3,11 @@
 Workspace intent APIs enqueue ``WorkspaceJob`` rows only; this module performs execution by
 delegating to :mod:`app.workers.workspace_job_worker.worker` with a process-local orchestrator.
 
-V1: intended to be invoked from an internal HTTP route, a future background poller, or tests —
+Each processed job commits in its **own** SQL session (see worker dequeue hardening). The FastAPI
+``session`` argument is only used to obtain the database bind; an outer ``commit()`` is harmless if
+the request session had no pending changes.
+
+V1: invoked from an internal HTTP route, :mod:`app.workers.workspace_job_poll_loop`, or tests —
 not from Workspace Service intent methods (preserves separation of control plane vs execution).
 """
 
@@ -13,7 +17,6 @@ from sqlmodel import Session
 
 from app.services.orchestrator_service.app_factory import build_default_orchestrator_for_session
 from app.services.orchestrator_service.errors import AppOrchestratorBindingError
-from app.services.orchestrator_service.interfaces import OrchestratorService
 
 from .workspace_job_worker.results import WorkspaceJobWorkerTickResult
 from .workspace_job_worker.worker import (
@@ -24,29 +27,33 @@ from .workspace_job_worker.worker import (
 
 def execute_workspace_job_tick(
     session: Session,
-    orchestrator: OrchestratorService,
     *,
     limit: int = 1,
     workspace_job_id: int | None = None,
 ) -> WorkspaceJobWorkerTickResult:
     """
-    Run queued job(s) in ``session`` and **commit** on success.
+    Run queued job(s); each job is committed independently inside the worker.
 
-    If ``workspace_job_id`` is set, only that job is considered (and only if ``QUEUED``).
-    Otherwise the oldest ``limit`` queued job(s) are processed.
+    If ``workspace_job_id`` is set, only that job is considered (and only if ``QUEUED`` and not
+    locked by another runner).
 
     Raises:
-        Any exception from the orchestrator or DB after ``session.rollback()``.
+        Any exception from the orchestrator or DB (request ``session`` is rolled back; completed
+        job commits are not undone).
     """
     try:
         if workspace_job_id is not None:
             tick = run_queued_workspace_job_by_id(
                 session,
-                orchestrator,
+                get_orchestrator=build_default_orchestrator_for_session,
                 workspace_job_id=workspace_job_id,
             )
         else:
-            tick = run_pending_jobs(session, orchestrator, limit=limit)
+            tick = run_pending_jobs(
+                session,
+                get_orchestrator=build_default_orchestrator_for_session,
+                limit=limit,
+            )
         session.commit()
     except Exception:
         session.rollback()
@@ -61,15 +68,13 @@ def execute_workspace_job_tick_with_default_orchestrator(
     workspace_job_id: int | None = None,
 ) -> WorkspaceJobWorkerTickResult:
     """
-    Same as :func:`execute_workspace_job_tick` but builds :func:`build_default_orchestrator_for_session`.
+    Same as :func:`execute_workspace_job_tick` (orchestrator is built per inner job session).
 
     Raises:
         AppOrchestratorBindingError: propagated (caller maps to HTTP 503, etc.).
     """
-    orchestrator = build_default_orchestrator_for_session(session)
     return execute_workspace_job_tick(
         session,
-        orchestrator,
         limit=limit,
         workspace_job_id=workspace_job_id,
     )

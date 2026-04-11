@@ -1,7 +1,17 @@
 """DB-backed workspace job executor: dequeue ``QUEUED`` jobs, call orchestrator, persist outcomes.
 
-V1: sequential processing, no row locks, no distributed lease. Multiple pollers may double-process
-the same job; production hardening should add ``FOR UPDATE SKIP LOCKED`` or equivalent.
+**Dequeue / multi-runner semantics (PostgreSQL, SQLite 3.37+):** eligible rows are claimed with
+``SELECT … FOR UPDATE SKIP LOCKED`` on the oldest ``QUEUED`` job. Only one transaction can claim a
+given row; other runners skip locked rows and take the next queue entry (or idle). Each job is
+processed in its **own** database session with an independent **commit** so a failure or rollback
+on one job does not undo completed siblings in the same API tick.
+
+- **Single runner:** FIFO processing; no contention.
+- **Multiple runners / instances:** Safe concurrent dequeue; the same job is never executed twice
+  unless an operator resets a stuck ``RUNNING`` row (out of scope: reconcile / watchdog).
+
+:func:`load_next_queued_workspace_job` is **unlocked** and intended for tests or diagnostics only —
+do not use it to drive execution.
 
 **Persistence:** The worker is the system of record for :class:`~app.services.workspace_service.models.Workspace`,
 :class:`~app.services.workspace_service.models.WorkspaceJob`, and
@@ -15,8 +25,11 @@ out of scope (see TODOs in orchestrator).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
@@ -65,6 +78,63 @@ _ORCHESTRATOR_EXCEPTIONS: tuple[type[Exception], ...] = (
 
 _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
 _ERROR_CODE_ORCH = "ORCHESTRATOR_EXCEPTION"
+
+
+def _worker_sessionmaker(bind: Engine):
+    """Session factory for per-job transactions (same engine as API / poller)."""
+    return sessionmaker(
+        bind=bind,
+        class_=Session,
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
+    )
+
+
+def _stmt_oldest_queued_job_for_update():
+    return (
+        select(WorkspaceJob)
+        .where(WorkspaceJob.status == WorkspaceJobStatus.QUEUED.value)
+        .order_by(WorkspaceJob.created_at.asc())
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+
+
+def _stmt_queued_job_by_id_for_update(workspace_job_id: int):
+    return (
+        select(WorkspaceJob)
+        .where(
+            WorkspaceJob.workspace_job_id == workspace_job_id,
+            WorkspaceJob.status == WorkspaceJobStatus.QUEUED.value,
+        )
+        .with_for_update(skip_locked=True)
+    )
+
+
+def try_claim_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:
+    """
+    Lock the oldest ``QUEUED`` row (``SKIP LOCKED``), transition it to ``RUNNING``, and flush.
+
+    Caller must commit or rollback the session. Returns ``None`` if no job is available or all
+    candidates are locked by other transactions.
+    """
+    job = session.exec(_stmt_oldest_queued_job_for_update()).first()
+    if job is None:
+        return None
+    _mark_job_running(session, job)
+    session.flush()
+    return job
+
+
+def try_claim_queued_workspace_job_by_id(session: Session, workspace_job_id: int) -> WorkspaceJob | None:
+    """Same as :func:`try_claim_next_queued_workspace_job` but for a specific primary key."""
+    job = session.exec(_stmt_queued_job_by_id_for_update(workspace_job_id)).first()
+    if job is None:
+        return None
+    _mark_job_running(session, job)
+    session.flush()
+    return job
 
 
 def _now() -> datetime:
@@ -514,11 +584,11 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
         )
 
 
-def _process_one_job(session: Session, orchestrator: OrchestratorService, job: WorkspaceJob) -> None:
+def _process_claimed_running_job(session: Session, orchestrator: OrchestratorService, job: WorkspaceJob) -> None:
     """
-    Run a single queued job: transition to ``RUNNING``, call orchestrator, persist outcomes, emit events.
+    Execute a job row that is already ``RUNNING`` (claimed via ``FOR UPDATE SKIP LOCKED``).
 
-    Commits are owned by the caller (e.g. :func:`execute_workspace_job_tick`).
+    Persists outcomes and emits ``JOB_RUNNING`` / outcome events. Caller owns commit/rollback.
     """
     wid = job.workspace_id
     jid = job.workspace_job_id
@@ -529,7 +599,6 @@ def _process_one_job(session: Session, orchestrator: OrchestratorService, job: W
             "workspace_job_missing_workspace",
             extra={"workspace_id": wid, "workspace_job_id": jid, "job_type": jt},
         )
-        _mark_job_running(session, job)
         _mark_job_failed(session, job, "Workspace row not found for job")
         return
 
@@ -539,10 +608,9 @@ def _process_one_job(session: Session, orchestrator: OrchestratorService, job: W
             "workspace_id": wid,
             "workspace_job_id": jid,
             "job_type": jt,
-            "attempt": int(job.attempt or 0) + 1,
+            "attempt": int(job.attempt or 0),
         },
     )
-    _mark_job_running(session, job)
     record_workspace_event(
         session,
         workspace_id=wid,
@@ -595,8 +663,24 @@ def _process_one_job(session: Session, orchestrator: OrchestratorService, job: W
     _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
 
 
+def _process_next_queued_job_return_id(session: Session, orchestrator: OrchestratorService) -> int | None:
+    """Claim one job under the current transaction and run it; return its id, or ``None`` if queue empty."""
+    job = try_claim_next_queued_workspace_job(session)
+    if job is None:
+        return None
+    jid = job.workspace_job_id
+    assert jid is not None
+    _process_claimed_running_job(session, orchestrator, job)
+    return jid
+
+
 def load_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:
-    """Return the oldest ``QUEUED`` workspace job, or ``None``."""
+    """
+    Return the oldest ``QUEUED`` workspace job without row locking.
+
+    **Not safe for execution** under concurrent runners — use :func:`try_claim_next_queued_workspace_job`
+    inside a short transaction instead.
+    """
     stmt = (
         select(WorkspaceJob)
         .where(WorkspaceJob.status == WorkspaceJobStatus.QUEUED.value)
@@ -608,54 +692,96 @@ def load_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:
 
 def run_pending_jobs(
     session: Session,
-    orchestrator: OrchestratorService,
     *,
+    get_orchestrator: Callable[[Session], OrchestratorService],
     limit: int = 1,
 ) -> WorkspaceJobWorkerTickResult:
     """
-    Process up to ``limit`` queued jobs sequentially in the current session.
+    Process up to ``limit`` queued jobs. Each job uses a **fresh** session and **commit** so
+    dequeue locking is correct and orchestrator adapters see the same session as persistence.
 
-    Does not commit; callers should ``session.commit()`` after this returns successfully or
-    ``session.rollback()`` on failure.
+    ``session`` is only used for :meth:`~sqlmodel.Session.get_bind`; it is not mutated by this
+    function. The caller does **not** need to commit ``session`` afterward for worker writes (an
+    outer commit is a no-op if the session is clean).
     """
+    bind = session.get_bind()
+    sm = _worker_sessionmaker(bind)
     processed = 0
     last_id: int | None = None
     for _ in range(max(1, limit)):
-        job = load_next_queued_workspace_job(session)
-        if job is None:
-            break
-        last_id = job.workspace_job_id
-        _process_one_job(session, orchestrator, job)
-        session.flush()
-        processed += 1
+        work = sm()
+        try:
+            orch = get_orchestrator(work)
+            jid = _process_next_queued_job_return_id(work, orch)
+            if jid is None:
+                work.rollback()
+                break
+            work.commit()
+            processed += 1
+            last_id = jid
+        except Exception:
+            work.rollback()
+            raise
+        finally:
+            work.close()
     return WorkspaceJobWorkerTickResult(processed_count=processed, last_job_id=last_id)
 
 
 def run_one_pending_workspace_job(
     session: Session,
-    orchestrator: OrchestratorService,
+    *,
+    get_orchestrator: Callable[[Session], OrchestratorService],
 ) -> WorkspaceJobWorkerTickResult:
     """Run at most one queued job; equivalent to ``run_pending_jobs(..., limit=1)``."""
-    return run_pending_jobs(session, orchestrator, limit=1)
+    return run_pending_jobs(session, get_orchestrator=get_orchestrator, limit=1)
 
 
 def run_queued_workspace_job_by_id(
     session: Session,
-    orchestrator: OrchestratorService,
     *,
+    get_orchestrator: Callable[[Session], OrchestratorService],
     workspace_job_id: int,
 ) -> WorkspaceJobWorkerTickResult:
     """
-    Run a single job by primary key if it is ``QUEUED``; otherwise no-op (``processed_count=0``).
-
-    Does not commit; callers should ``session.commit()`` after success or ``rollback`` on failure.
+    Run a single job by primary key if it is ``QUEUED`` and claimable (``SKIP LOCKED``);
+    otherwise no-op (``processed_count=0``).
     """
-    job = session.get(WorkspaceJob, workspace_job_id)
-    if job is None:
-        return WorkspaceJobWorkerTickResult(processed_count=0, last_job_id=None)
-    if job.status != WorkspaceJobStatus.QUEUED.value:
-        return WorkspaceJobWorkerTickResult(processed_count=0, last_job_id=None)
-    jid = job.workspace_job_id
-    _process_one_job(session, orchestrator, job)
-    session.flush()
-    return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
+    bind = session.get_bind()
+    sm = _worker_sessionmaker(bind)
+    work = sm()
+    try:
+        job = try_claim_queued_workspace_job_by_id(work, workspace_job_id)
+        if job is None:
+            work.rollback()
+            return WorkspaceJobWorkerTickResult(processed_count=0, last_job_id=None)
+        orch = get_orchestrator(work)
+        jid = job.workspace_job_id
+        assert jid is not None
+        _process_claimed_running_job(work, orch, job)
+        work.commit()
+        return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
+    except Exception:
+        work.rollback()
+        raise
+    finally:
+        work.close()
+
+
+def poll_workspace_jobs_tick(
+    bind: Engine,
+    *,
+    get_orchestrator: Callable[[Session], OrchestratorService],
+    limit: int = 1,
+) -> WorkspaceJobWorkerTickResult:
+    """
+    Process up to ``limit`` jobs using ``bind`` only (no caller-owned session).
+
+    Suitable for a dedicated worker process; same dequeue semantics as :func:`run_pending_jobs`.
+    """
+    sm = _worker_sessionmaker(bind)
+    holder = sm()
+
+    try:
+        return run_pending_jobs(holder, get_orchestrator=get_orchestrator, limit=limit)
+    finally:
+        holder.close()

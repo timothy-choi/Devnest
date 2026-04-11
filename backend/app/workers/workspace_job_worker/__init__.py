@@ -7,9 +7,12 @@ from .interfaces import WorkspaceJobWorker
 from .results import WorkspaceJobWorkerTickResult
 from .worker import (
     load_next_queued_workspace_job,
+    poll_workspace_jobs_tick,
     run_one_pending_workspace_job,
     run_pending_jobs,
     run_queued_workspace_job_by_id,
+    try_claim_next_queued_workspace_job,
+    try_claim_queued_workspace_job_by_id,
 )
 
 __all__ = [
@@ -18,7 +21,10 @@ __all__ = [
     "WorkspaceJobWorkerError",
     "WorkspaceJobWorkerTickResult",
     "load_next_queued_workspace_job",
+    "poll_workspace_jobs_tick",
     "run_one_pending_workspace_job",
     "run_pending_jobs",
     "run_queued_workspace_job_by_id",
+    "try_claim_next_queued_workspace_job",
+    "try_claim_queued_workspace_job_by_id",
 ]

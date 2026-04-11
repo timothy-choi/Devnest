@@ -33,7 +33,8 @@ router = APIRouter(
     summary="Process queued workspace jobs (internal)",
     description=(
         "Runs the workspace job worker against the Docker-backed orchestrator for up to ``limit`` "
-        "queued jobs (FIFO), or a single ``job_id`` if ``QUEUED``. Commits on success."
+        "queued jobs (FIFO, row-locked dequeue), or a single ``job_id`` if ``QUEUED``. Each job "
+        "commits in its own session; the request session commit is a no-op if unused."
     ),
 )
 def post_process_workspace_jobs(

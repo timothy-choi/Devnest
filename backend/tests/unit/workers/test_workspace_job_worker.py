@@ -299,7 +299,7 @@ class TestLoadPendingJobs:
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
-            tick = run_pending_jobs(session, orch, limit=2)
+            tick = run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=2)
             session.commit()
 
         assert tick.processed_count == 2
@@ -319,14 +319,16 @@ class TestMarkJobStarted:
         patch_worker_now: None,
     ) -> None:
         orch = _orch()
-        captured: dict[str, object] = {}
+        job_id_holder: dict[str, int] = {}
 
         def _bring(*, workspace_id: str, requested_config_version: int | None = None) -> WorkspaceBringUpResult:
-            job = captured.get("job")
-            assert job is not None
-            assert job.status == WorkspaceJobStatus.RUNNING.value
-            assert job.started_at is not None
-            assert job.finished_at is None
+            jid = job_id_holder["id"]
+            with Session(workspace_job_worker_engine) as s:
+                job = s.get(WorkspaceJob, jid)
+                assert job is not None
+                assert job.status == WorkspaceJobStatus.RUNNING.value
+                assert job.started_at is not None
+                assert job.finished_at is None
             return _bringup_ok(workspace_id)
 
         orch.bring_up_workspace_runtime.side_effect = _bring
@@ -341,14 +343,12 @@ class TestMarkJobStarted:
                 owner_user_id=owner_user_id,
                 job_type=WorkspaceJobType.CREATE.value,
             )
-            job_id = job.workspace_job_id
+            assert job.workspace_job_id is not None
+            job_id_holder["id"] = job.workspace_job_id
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
-            j = session.get(WorkspaceJob, job_id)
-            assert j is not None
-            captured["job"] = j
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.bring_up_workspace_runtime.assert_called_once()
@@ -378,7 +378,7 @@ class TestDispatchCreate:
 
         with Session(workspace_job_worker_engine) as session:
             orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.bring_up_workspace_runtime.assert_called_once_with(
@@ -447,7 +447,7 @@ class TestDispatchStart:
 
         with Session(workspace_job_worker_engine) as session:
             orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.bring_up_workspace_runtime.assert_called_once_with(
@@ -485,7 +485,7 @@ class TestDispatchStop:
 
         with Session(workspace_job_worker_engine) as session:
             orch.stop_workspace_runtime.return_value = _stop_ok(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.stop_workspace_runtime.assert_called_once_with(
@@ -528,7 +528,7 @@ class TestDispatchRestart:
 
         with Session(workspace_job_worker_engine) as session:
             orch.restart_workspace_runtime.return_value = _restart_ok(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.restart_workspace_runtime.assert_called_once_with(
@@ -570,7 +570,7 @@ class TestDispatchDelete:
 
         with Session(workspace_job_worker_engine) as session:
             orch.delete_workspace_runtime.return_value = _delete_ok(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.delete_workspace_runtime.assert_called_once_with(
@@ -615,7 +615,7 @@ class TestDispatchUpdate:
 
         with Session(workspace_job_worker_engine) as session:
             orch.update_workspace_runtime.return_value = _update_ok(str(wid), config_version=cfg)
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.update_workspace_runtime.assert_called_once_with(
@@ -667,7 +667,7 @@ class TestDispatchUpdate:
                 container_state="exited",
                 issues=["update:noop:container_not_running:exited"],
             )
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
@@ -707,7 +707,7 @@ class TestUnsupportedJobType:
             job_id = job.workspace_job_id
 
         with Session(workspace_job_worker_engine) as session:
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.bring_up_workspace_runtime.assert_not_called()
@@ -747,7 +747,7 @@ class TestOrchestratorException:
             job_id = job.workspace_job_id
 
         with Session(workspace_job_worker_engine) as session:
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
@@ -788,7 +788,7 @@ class TestUnsuccessfulOrchestratorResult:
 
         with Session(workspace_job_worker_engine) as session:
             orch.bring_up_workspace_runtime.return_value = _bringup_fail(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
@@ -829,7 +829,7 @@ class TestUnsuccessfulOrchestratorResult:
 
         with Session(workspace_job_worker_engine) as session:
             orch.stop_workspace_runtime.return_value = _stop_fail(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
@@ -862,7 +862,7 @@ class TestUnsuccessfulOrchestratorResult:
 
         with Session(workspace_job_worker_engine) as session:
             orch.delete_workspace_runtime.return_value = _delete_fail(str(wid))
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
@@ -908,7 +908,11 @@ class TestRunQueuedJobById:
 
         with Session(workspace_job_worker_engine) as session:
             orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
-            tick = run_queued_workspace_job_by_id(session, orch, workspace_job_id=newer_id)
+            tick = run_queued_workspace_job_by_id(
+                session,
+                get_orchestrator=lambda _s: orch,
+                workspace_job_id=newer_id,
+            )
             session.commit()
 
         assert tick.processed_count == 1
@@ -951,7 +955,7 @@ class TestCallOrder:
             assert job is not None
             assert job.status == WorkspaceJobStatus.QUEUED.value
             events.append("loaded_queued")
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             events.append("after_tick")
             session.commit()
 
@@ -982,7 +986,7 @@ class TestMissingWorkspace:
             session.commit()
 
         with Session(workspace_job_worker_engine) as session:
-            run_pending_jobs(session, orch, limit=1)
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
             session.commit()
 
         orch.bring_up_workspace_runtime.assert_not_called()

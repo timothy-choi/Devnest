@@ -1,8 +1,10 @@
 """Integration tests: WorkspaceJob worker on PostgreSQL (worker DB, truncate per test).
 
 Orchestrator calls are mocked with ``OrchestratorService`` autospec + result dataclasses; the
-integration surface is real persistence (Workspace / WorkspaceRuntime / WorkspaceJob) and
-transaction boundaries (caller ``commit``), matching how the worker is intended to be used.
+integration surface is real persistence (Workspace / WorkspaceRuntime / WorkspaceJob). The worker
+commits each job in a **separate** SQL session (``FOR UPDATE SKIP LOCKED`` dequeue); tests call
+``db_session.commit()`` before ``run_pending_jobs`` so seeded rows are visible to the worker, then
+``db_session.expire_all()`` before reading state on the test session.
 
 Failure roll-ups for ``success=False`` results are covered in unit tests; this module focuses on
 happy-path DB outcomes and a single orchestrator-exception path.
@@ -221,8 +223,9 @@ def test_process_create_job_happy_path_persists_runtime(
     orch = _orch()
     orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
 
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     orch.bring_up_workspace_runtime.assert_called_once_with(
         workspace_id=str(wid),
@@ -275,8 +278,9 @@ def test_process_start_job_happy_path(
 
     orch = _orch()
     orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     orch.bring_up_workspace_runtime.assert_called_once_with(
         workspace_id=str(wid),
@@ -310,8 +314,9 @@ def test_process_stop_job_happy_path(
 
     orch = _orch()
     orch.stop_workspace_runtime.return_value = _stop_ok(str(wid))
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     orch.stop_workspace_runtime.assert_called_once_with(
         workspace_id=str(wid),
@@ -350,8 +355,9 @@ def test_process_delete_job_happy_path_clears_runtime(
 
     orch = _orch()
     orch.delete_workspace_runtime.return_value = _delete_ok(str(wid))
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     orch.delete_workspace_runtime.assert_called_once_with(
         workspace_id=str(wid),
@@ -391,8 +397,9 @@ def test_process_update_job_happy_path_respects_config_version(
 
     orch = _orch()
     orch.update_workspace_runtime.return_value = _update_ok(str(wid), config_version=REQUESTED_CONFIG_VERSION)
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     orch.update_workspace_runtime.assert_called_once_with(
         workspace_id=str(wid),
@@ -428,8 +435,9 @@ def test_orchestrator_exception_marks_job_and_workspace_failed(
 
     orch = _orch()
     orch.bring_up_workspace_runtime.side_effect = WorkspaceBringUpError("integration injected failure")
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     job = db_session.get(WorkspaceJob, job_id)
     ws = db_session.get(Workspace, wid)
@@ -463,8 +471,9 @@ def test_unsupported_job_type_marks_failed_without_orchestrator(
     )
 
     orch = _orch()
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     orch.bring_up_workspace_runtime.assert_not_called()
     job = db_session.get(WorkspaceJob, job_id)
@@ -508,8 +517,9 @@ def test_run_pending_jobs_limit_one_leaves_second_queued_job(
 
     orch = _orch()
     orch.stop_workspace_runtime.return_value = _stop_ok(str(wid))
-    run_pending_jobs(db_session, orch, limit=1)
     db_session.commit()
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
 
     assert orch.stop_workspace_runtime.call_count == 1
     first = db_session.get(WorkspaceJob, job_first_id)
