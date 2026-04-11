@@ -124,7 +124,7 @@ def test_stop_workspace_runtime_happy_path_integration(
 
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             up = svc.bring_up_workspace_runtime(workspace_id=workspace_id)
@@ -195,7 +195,7 @@ def test_stop_workspace_runtime_idempotent_second_call_no_crash(
 
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             assert svc.bring_up_workspace_runtime(workspace_id=workspace_id).success is True
@@ -251,7 +251,7 @@ def test_stop_workspace_runtime_topology_attachment_detached_in_db(
 
     try:
         with patch(
-            "app.libs.probes.probe_runner.socket.create_connection",
+            "app.libs.probes.probe_runner._probe_create_connection",
             return_value=_FakeSock(),
         ):
             svc.bring_up_workspace_runtime(workspace_id=workspace_id)

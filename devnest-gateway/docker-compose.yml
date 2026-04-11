@@ -1,0 +1,48 @@
+# DevNest data-plane: Traefik + route-admin (registration API) + mock upstream for local smoke tests.
+# Control plane (DevNest backend) is NOT started here — run it separately.
+
+services:
+  traefik:
+    image: traefik:v3.2
+    container_name: devnest-gateway-traefik
+    restart: unless-stopped
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "${DEVNEST_GATEWAY_PORT:-80}:80"
+      - "${DEVNEST_DASHBOARD_PORT:-8080}:8080"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - devnest-gateway
+    depends_on:
+      - route-admin
+
+  # POST/DELETE /routes → updates traefik/dynamic/100-workspaces.yml (Traefik watches directory).
+  route-admin:
+    build: ./route_admin
+    image: devnest-route-admin:local
+    container_name: devnest-gateway-route-admin
+    restart: unless-stopped
+    ports:
+      - "${DEVNEST_ROUTE_ADMIN_PORT:-9080}:8080"
+    volumes:
+      - ./traefik/dynamic:/etc/traefik/dynamic
+    environment:
+      ROUTES_FILE: /etc/traefik/dynamic/100-workspaces.yml
+    networks:
+      - devnest-gateway
+
+  mock-upstream:
+    image: traefik/whoami:latest
+    container_name: devnest-gateway-mock-upstream
+    restart: unless-stopped
+    networks:
+      - devnest-gateway
+
+networks:
+  devnest-gateway:
+    name: devnest-gateway

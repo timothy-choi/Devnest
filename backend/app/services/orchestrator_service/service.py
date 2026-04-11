@@ -226,7 +226,7 @@ class DefaultOrchestratorService(OrchestratorService):
         netns: NetnsRefResult,
         attach_res: AttachWorkspaceResult,
     ) -> WorkspaceBringUpResult:
-        # TODO: register attach_res.internal_endpoint with edge gateway / route tables.
+        # Route registration: workspace job worker calls route-admin after RUNNING (not orchestrator).
         try:
             health = self._probe_runner.check_workspace_health(
                 workspace_id=ctx.wid,
@@ -495,7 +495,7 @@ class DefaultOrchestratorService(OrchestratorService):
         container_deleted, _ = self._delete_container_best_effort(container_id, issues)
         topology_deleted = self._delete_topology_runtime_best_effort(issues)
 
-        # TODO: persist Workspace_runtime tombstone / gateway deregistration.
+        # TODO: persist Workspace_runtime tombstone; gateway deregistration is done in the job worker.
 
         success = bool(container_deleted and topology_detached is not False)
         result = WorkspaceDeleteResult(

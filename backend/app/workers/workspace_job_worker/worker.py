@@ -20,8 +20,9 @@ do not use it to drive execution.
 :class:`~app.services.workspace_service.models.WorkspaceRuntime` after orchestration. The orchestrator
 returns result DTOs only; this module maps them onto ORM rows and emits workspace stream events.
 
-Gateway registration, SSE transport, reconcileRuntime, and EC2/scheduler integrations are intentionally
-out of scope (see TODOs in orchestrator).
+Best-effort **route-admin** registration (``DEVNEST_GATEWAY_ENABLED``) runs after RUNNING / stop /
+delete finalization; failures are logged only. SSE transport, reconcile, and EC2/scheduler integrations
+remain out of scope.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from app.services.orchestrator_service.errors import (
     WorkspaceUpdateError,
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
+from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
@@ -67,6 +69,8 @@ from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
     record_workspace_event,
 )
+
+from app.libs.common.config import get_settings
 
 from .errors import UnsupportedWorkspaceJobTypeError
 from .results import WorkspaceJobWorkerTickResult
@@ -321,6 +325,53 @@ def _touch_workspace(session: Session, ws: Workspace) -> None:
     session.add(ws)
 
 
+def _gateway_default_public_host(workspace_id: int, base_domain: str) -> str:
+    dom = (base_domain or "app.devnest.local").strip().strip(".")
+    return f"{workspace_id}.{dom}"
+
+
+def _gateway_try_register_running(ws: Workspace, internal_endpoint: str | None) -> None:
+    """Notify route-admin after RUNNING; failures are logged only (control plane stays authoritative)."""
+    try:
+        settings = get_settings()
+        if not settings.devnest_gateway_enabled:
+            return
+        ep = (internal_endpoint or "").strip()
+        if not ep:
+            logger.debug(
+                "gateway_register_skipped_no_internal_endpoint",
+                extra={"workspace_id": ws.workspace_id},
+            )
+            return
+        wid = ws.workspace_id
+        if wid is None:
+            return
+        public = (ws.public_host or "").strip() or _gateway_default_public_host(
+            int(wid),
+            settings.devnest_base_domain,
+        )
+        DevnestGatewayClient.from_settings(settings).register_route(str(wid), ep, public)
+    except Exception as e:
+        logger.warning(
+            "gateway_register_failed_best_effort",
+            extra={"workspace_id": getattr(ws, "workspace_id", None), "error": str(e)},
+        )
+
+
+def _gateway_try_deregister(workspace_id: int) -> None:
+    """Remove route on stop/delete; failures are logged only."""
+    try:
+        settings = get_settings()
+        if not settings.devnest_gateway_enabled:
+            return
+        DevnestGatewayClient.from_settings(settings).deregister_route(str(workspace_id))
+    except Exception as e:
+        logger.warning(
+            "gateway_deregister_failed_best_effort",
+            extra={"workspace_id": workspace_id, "error": str(e)},
+        )
+
+
 def _finalize_job_failed_workspace_error(
     session: Session,
     ws: Workspace,
@@ -371,6 +422,7 @@ def _finalize_runtime_running_success(
     ws.endpoint_ref = internal_endpoint or ws.endpoint_ref
     ws.last_started = _now()
     _touch_workspace(session, ws)
+    _gateway_try_register_running(ws, internal_endpoint)
 
 
 def _finalize_bringup_result(
@@ -412,6 +464,7 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
         _workspace_clear_errors(ws)
         ws.last_stopped = _now()
         _touch_workspace(session, ws)
+        _gateway_try_deregister(wid)
         return
 
     msg = _format_issues(result.issues) or "Stop completed without success"
@@ -427,6 +480,7 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
         _workspace_clear_errors(ws)
         _clear_runtime_after_delete(session, wid)
         _touch_workspace(session, ws)
+        _gateway_try_deregister(wid)
         return
 
     msg = _format_issues(result.issues) or "Delete completed without success"

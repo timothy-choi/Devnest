@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
     workspace_projects_base: str = ""
 
+    # Standalone gateway route-admin (data plane): register/deregister workspace routes after orchestration.
+    # DEVNEST_GATEWAY_URL is the route-admin HTTP base (not Traefik's public :80). Default matches compose
+    # DEVNEST_ROUTE_ADMIN_PORT=9080.
+    devnest_gateway_url: str = "http://127.0.0.1:9080"
+    devnest_base_domain: str = "app.devnest.local"
+    devnest_gateway_enabled: bool = False
+    # Used for gateway_url hint on attach/access when route registration is enabled (no TLS in V1).
+    devnest_gateway_public_scheme: str = "http"
+
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""
     smtp_port: int = 587
@@ -48,6 +57,15 @@ class Settings(BaseSettings):
     @field_validator("smtp_use_tls", mode="before")
     @classmethod
     def _parse_smtp_use_tls(cls, v):  # noqa: ANN001 — pydantic coerces env strings
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @field_validator("devnest_gateway_enabled", mode="before")
+    @classmethod
+    def _parse_devnest_gateway_enabled(cls, v):  # noqa: ANN001
         if isinstance(v, bool):
             return v
         if isinstance(v, str):

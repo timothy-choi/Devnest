@@ -1,0 +1,27 @@
+# DevNest gateway — static example routes (not managed by route-admin).
+# Workspace routes from the control plane are written to 100-workspaces.yml by route-admin.
+
+http:
+  routers:
+    devnest-ws-123:
+      rule: "Host(`ws-123.app.devnest.local`)"
+      entryPoints:
+        - web
+      service: devnest-ws-123-upstream
+
+    devnest-smoke-whoami:
+      rule: "Host(`whoami.app.devnest.local`)"
+      entryPoints:
+        - web
+      service: devnest-mock-upstream
+
+  services:
+    devnest-ws-123-upstream:
+      loadBalancer:
+        servers:
+          - url: "http://host.docker.internal:8080"
+
+    devnest-mock-upstream:
+      loadBalancer:
+        servers:
+          - url: "http://mock-upstream:80"

@@ -93,7 +93,7 @@ jobs:
       - name: Pytest with coverage
         run: |
           pytest --cov=app --cov-report=xml:coverage.xml --cov-report=term-missing \
-            -m "not topology_linux and not topology_linux_core"
+            -m "not topology_linux and not topology_linux_core and not gateway"
 
       - name: Finalize coverage XML
         run: |
@@ -164,7 +164,7 @@ jobs:
       # Privileged topology tests run under sudo next (topology_linux suite + topology_linux_core).
       - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
         run: |
-          pytest tests -v -m "not topology_linux and not topology_linux_core" \
+          pytest tests -v -m "not topology_linux and not topology_linux_core and not gateway" \
             --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
 
       - name: Finalize suite coverage XML
@@ -184,3 +184,29 @@ jobs:
           name: nightly-full-tests-coverage
           path: backend/nightly-full-tests-coverage.xml
           if-no-files-found: warn
+
+  # Standalone data-plane gateway (separate from backend); not triggered by merge-time path filters.
+  gateway-validation:
+    name: gateway-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: devnest-gateway
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: devnest-gateway/requirements-test.txt
+
+      - name: Install gateway test dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Gateway pytest (config + compose + live route)
+        run: pytest tests -v

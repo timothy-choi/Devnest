@@ -1,0 +1,8 @@
+.env
+*.log
+.venv/
+.venv-test/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
