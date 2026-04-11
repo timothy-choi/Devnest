@@ -1,4 +1,9 @@
-"""Default orchestrator: coordinates runtime, topology, and probes for workspace bring-up."""
+"""Default orchestrator: coordinates ``RuntimeAdapter``, ``TopologyAdapter``, and ``ProbeRunner``.
+
+Mutating flows: bring-up, stop, delete, restart, update (noop or restart-based). Read-only:
+``check_workspace_runtime_health``. Placement (``topology_id``, ``node_id``, project base) is
+injected until scheduler / ``Workspace_runtime`` persistence exist.
+"""
 
 from __future__ import annotations
 
@@ -85,13 +90,11 @@ def _config_version_from_inspection(ins: ContainerInspectionResult) -> int:
 
 class DefaultOrchestratorService(OrchestratorService):
     """
-    Coordinates ``RuntimeAdapter``, ``TopologyAdapter``, and ``ProbeRunner`` for bring-up.
+    Coordinates runtime, topology, and probes for workspace lifecycle operations.
 
-    Uses :func:`app.libs.runtime.runtime_orchestrator.ensure_running_runtime_only` for the
-    runtime sequence (no duplicated ensure/start/netns logic).
-
-    Placement (``topology_id``, ``node_id``, host project directory) is injected until the
-    workspace service persists intent and scheduler assigns nodes.
+    Runtime start uses :func:`app.libs.runtime.runtime_orchestrator.ensure_running_runtime_only`.
+    Restart and update (non-noop) compose ``stop_workspace_runtime`` and
+    ``bring_up_workspace_runtime`` without duplicating that sequence.
     """
 
     def __init__(
@@ -193,11 +196,9 @@ class DefaultOrchestratorService(OrchestratorService):
         except Exception as e:
             raise WorkspaceBringUpError(f"probe health check failed: {e}") from e
 
-        issue_msgs: list[str] | None
-        if health.issues:
-            issue_msgs = [f"{i.component}:{i.code}:{i.message}" for i in health.issues]
-        else:
-            issue_msgs = None
+        issue_msgs: list[str] = (
+            [f"{i.component}:{i.code}:{i.message}" for i in health.issues] if health.issues else []
+        )
 
         return WorkspaceBringUpResult(
             workspace_id=wid,
@@ -210,7 +211,7 @@ class DefaultOrchestratorService(OrchestratorService):
             workspace_ip=health.workspace_ip or attach_res.workspace_ip,
             internal_endpoint=health.internal_endpoint or attach_res.internal_endpoint,
             probe_healthy=health.healthy,
-            issues=issue_msgs,
+            issues=_issues_or_none(issue_msgs),
         )
 
     def stop_workspace_runtime(
@@ -535,6 +536,97 @@ class DefaultOrchestratorService(OrchestratorService):
             internal_endpoint=r.internal_endpoint,
             probe_healthy=r.probe_healthy,
             issues=_issues_or_none(issues),
+        )
+
+    def check_workspace_runtime_health(self, *, workspace_id: str) -> WorkspaceBringUpResult:
+        """Inspect + ``ProbeRunner.check_workspace_health`` only (no start/stop/topology writes)."""
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise WorkspaceBringUpError("workspace_id is empty")
+
+        _parse_topology_workspace_id(wid)
+        container_ref = _sanitize_container_name(wid)
+
+        try:
+            ins = self._runtime_adapter.inspect_container(container_id=container_ref)
+        except Exception as e:
+            raise WorkspaceBringUpError(f"inspect_container failed: {e}") from e
+
+        nid = self._node_id
+        tid = str(self._topology_id)
+
+        if not ins.exists:
+            return WorkspaceBringUpResult(
+                workspace_id=wid,
+                success=False,
+                node_id=nid,
+                topology_id=tid,
+                container_id=None,
+                container_state="missing",
+                probe_healthy=False,
+                issues=_issues_or_none(["health:container:not_found"]),
+            )
+
+        cid = (ins.container_id or container_ref).strip()
+        if not cid:
+            return WorkspaceBringUpResult(
+                workspace_id=wid,
+                success=False,
+                node_id=nid,
+                topology_id=tid,
+                container_id=None,
+                container_state=ins.container_state,
+                probe_healthy=False,
+                issues=_issues_or_none(["health:container:container_id_missing"]),
+            )
+
+        state = (ins.container_state or "").strip().lower()
+        if state != "running":
+            return WorkspaceBringUpResult(
+                workspace_id=wid,
+                success=False,
+                node_id=nid,
+                topology_id=tid,
+                container_id=cid,
+                container_state=ins.container_state,
+                probe_healthy=False,
+                issues=_issues_or_none([f"health:container:not_running:{state or 'unknown'}"]),
+            )
+
+        try:
+            health = self._probe_runner.check_workspace_health(
+                workspace_id=wid,
+                topology_id=tid,
+                node_id=nid,
+                container_id=cid,
+                expected_port=WORKSPACE_IDE_CONTAINER_PORT,
+                timeout_seconds=5.0,
+            )
+        except Exception as e:
+            raise WorkspaceBringUpError(f"probe health check failed: {e}") from e
+
+        issue_msgs: list[str] = (
+            [f"{i.component}:{i.code}:{i.message}" for i in health.issues] if health.issues else []
+        )
+
+        netns_ref: str | None = None
+        try:
+            netns_ref = self._runtime_adapter.get_container_netns_ref(container_id=cid).netns_ref
+        except Exception:
+            pass
+
+        return WorkspaceBringUpResult(
+            workspace_id=wid,
+            success=bool(health.healthy),
+            node_id=nid,
+            topology_id=tid,
+            container_id=cid,
+            container_state=health.container_state or ins.container_state,
+            netns_ref=netns_ref,
+            workspace_ip=health.workspace_ip,
+            internal_endpoint=health.internal_endpoint,
+            probe_healthy=health.healthy,
+            issues=_issues_or_none(issue_msgs),
         )
 
     def _update_workspace_runtime_noop(

@@ -1,4 +1,19 @@
-"""Result types returned by the orchestrator service."""
+"""Result types returned by the orchestrator service.
+
+``success`` roll-up semantics (V1):
+
+- **BringUp / health check:** ``success`` mirrors probe ``healthy`` when the container is running;
+  missing/stopped containers yield ``success=False`` with ``issues`` (health check path).
+- **Stop / delete:** ``success`` requires the engine action to succeed **and**
+  ``topology_detached is not False`` (detach idempotent ``False`` fails the roll-up).
+- **Delete:** additionally requires ``container_deleted``.
+- **Restart / update (restart path):** ``success`` follows the bring-up probe roll-up after a
+  successful stop roll-up; partial failures set ``stop_success`` / ``bringup_success`` accordingly.
+- **Update (noop):** ``success`` follows the probe roll-up when the container is running.
+
+``issues`` use stable ``component:code:message``-style strings where applicable; the service
+normalizes empty issue lists to ``None`` for a stable JSON/API shape.
+"""
 
 from __future__ import annotations
 

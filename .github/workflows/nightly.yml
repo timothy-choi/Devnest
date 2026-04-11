@@ -7,9 +7,15 @@ name: Nightly Full Validation
 # markers (and workspace_image / topology_linux) so CI stays fast; this job catches regressions
 # in stress, failure-injection, privileged networking, and image builds.
 
+# Schedule: GitHub Actions cron is UTC-only (no timezone field).
+# `0 8 * * *` = 08:00 UTC daily ≈ midnight America/Los_Angeles during PST (UTC−8).
+# During PDT (UTC−7), the same cron runs at 01:00 Pacific. To target midnight PDT instead, use `0 7 * * *`.
+#
+# Scheduled workflows only run from the default branch (e.g. main). A copy of this file on another
+# branch will not trigger on a timer until it is merged to default. Use workflow_dispatch to test.
 on:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "0 8 * * *"
   workflow_dispatch:
 
 concurrency:

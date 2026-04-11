@@ -61,6 +61,6 @@ class OrchestratorService(ABC):
     ) -> WorkspaceUpdateResult:
         """Apply ``requested_config_version`` (no-op when already current, else restart-based V1)."""
 
+    @abstractmethod
     def check_workspace_runtime_health(self, *, workspace_id: str) -> WorkspaceBringUpResult:
-        """Read-only health snapshot (no repair)."""
-        raise NotImplementedError
+        """Read-only probe roll-up for an existing workspace runtime (no repair, no topology mutation)."""
