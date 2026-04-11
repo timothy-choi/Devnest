@@ -102,6 +102,41 @@ class WorkspaceListResponse(BaseModel):
     total: int
 
 
+class WorkspaceAccessResponse(BaseModel):
+    """Read-only access coordinates when the workspace runtime is ready (GET /access)."""
+
+    workspace_id: int
+    success: bool
+    status: str
+    runtime_ready: bool
+    endpoint_ref: str | None = None
+    public_host: str | None = None
+    internal_endpoint: str | None = None
+    gateway_url: str | None = Field(
+        default=None,
+        description="TODO: public URL via edge gateway when route registration exists; V1 returns null.",
+    )
+    issues: list[str] = Field(default_factory=list)
+
+
+class WorkspaceAttachResponse(BaseModel):
+    """Attach increments a lightweight session counter when access is granted (POST /attach)."""
+
+    workspace_id: int
+    accepted: bool
+    status: str
+    runtime_ready: bool
+    active_sessions_count: int
+    endpoint_ref: str | None = None
+    public_host: str | None = None
+    internal_endpoint: str | None = None
+    gateway_url: str | None = Field(
+        default=None,
+        description="TODO: public URL via edge gateway when route registration exists; V1 returns null.",
+    )
+    issues: list[str] = Field(default_factory=list)
+
+
 class WorkspaceDetailResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

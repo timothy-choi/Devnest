@@ -10,6 +10,8 @@ from app.services.workspace_service.api.schemas import (
     CreateWorkspaceAcceptedResponse,
     CreateWorkspaceRequest,
     PatchWorkspaceUpdateRequest,
+    WorkspaceAccessResponse,
+    WorkspaceAttachResponse,
     WorkspaceDetailResponse,
     WorkspaceIntentAcceptedResponse,
     WorkspaceListResponse,
@@ -44,6 +46,35 @@ def _intent_response(
         job_id=out.job_id,
         job_type=out.job_type,
         requested_config_version=out.requested_config_version,
+        issues=list(out.issues),
+    )
+
+
+def _access_response(out: workspace_intent_service.WorkspaceAccessResult) -> WorkspaceAccessResponse:
+    return WorkspaceAccessResponse(
+        workspace_id=out.workspace_id,
+        success=out.success,
+        status=out.status,
+        runtime_ready=out.runtime_ready,
+        endpoint_ref=out.endpoint_ref,
+        public_host=out.public_host,
+        internal_endpoint=out.internal_endpoint,
+        gateway_url=out.gateway_url,
+        issues=list(out.issues),
+    )
+
+
+def _attach_response(out: workspace_intent_service.WorkspaceAttachResult) -> WorkspaceAttachResponse:
+    return WorkspaceAttachResponse(
+        workspace_id=out.workspace_id,
+        accepted=out.accepted,
+        status=out.status,
+        runtime_ready=out.runtime_ready,
+        active_sessions_count=out.active_sessions_count,
+        endpoint_ref=out.endpoint_ref,
+        public_host=out.public_host,
+        internal_endpoint=out.internal_endpoint,
+        gateway_url=out.gateway_url,
         issues=list(out.issues),
     )
 
@@ -220,6 +251,64 @@ def patch_workspace_update(
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
     return _intent_response(out)
+
+
+@router.post(
+    "/attach/{workspace_id}",
+    response_model=WorkspaceAttachResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Attach to workspace (access when RUNNING)",
+    description=(
+        "Grants access when the workspace is RUNNING and runtime placement exists. "
+        "Does not start the workspace — use POST /workspaces/start/{id} first. "
+        "V1 bumps active_sessions_count as a lightweight session surrogate."
+    ),
+)
+def post_workspace_attach(
+    workspace_id: int,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> WorkspaceAttachResponse:
+    assert current.user_auth_id is not None
+    uid = current.user_auth_id
+    try:
+        out = workspace_intent_service.request_attach_workspace(
+            session,
+            workspace_id=workspace_id,
+            owner_user_id=uid,
+            requested_by_user_id=uid,
+        )
+    except WorkspaceServiceError as exc:
+        _raise_workspace_http(exc)
+    return _attach_response(out)
+
+
+@router.get(
+    "/{workspace_id}/access",
+    response_model=WorkspaceAccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get workspace access coordinates",
+    description=(
+        "Returns endpoint metadata when RUNNING and runtime is placed. "
+        "Read-only; does not enqueue jobs or increment sessions. "
+        "Use POST /workspaces/attach/{id} to record an attach / bump session count."
+    ),
+)
+def get_workspace_access_route(
+    workspace_id: int,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> WorkspaceAccessResponse:
+    assert current.user_auth_id is not None
+    try:
+        out = workspace_intent_service.get_workspace_access(
+            session,
+            workspace_id=workspace_id,
+            owner_user_id=current.user_auth_id,
+        )
+    except WorkspaceServiceError as exc:
+        _raise_workspace_http(exc)
+    return _access_response(out)
 
 
 @router.get(

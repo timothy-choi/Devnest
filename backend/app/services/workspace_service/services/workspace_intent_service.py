@@ -25,6 +25,8 @@ from app.services.workspace_service.models import (
     WorkspaceJob,
     WorkspaceJobStatus,
     WorkspaceJobType,
+    WorkspaceRuntime,
+    WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
 )
 
@@ -47,6 +49,37 @@ class WorkspaceIntentResult:
     job_id: int
     job_type: str
     requested_config_version: int
+    issues: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceAccessResult:
+    """Normalized access coordinates (read-only); ``success`` is True only when runtime is ready."""
+
+    workspace_id: int
+    success: bool
+    status: str
+    runtime_ready: bool
+    endpoint_ref: str | None
+    public_host: str | None
+    internal_endpoint: str | None
+    gateway_url: str | None
+    issues: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceAttachResult:
+    """Attach when RUNNING + runtime placed; increments ``active_sessions_count`` (V1 stand-in for sessions)."""
+
+    workspace_id: int
+    accepted: bool
+    status: str
+    runtime_ready: bool
+    active_sessions_count: int
+    endpoint_ref: str | None
+    public_host: str | None
+    internal_endpoint: str | None
+    gateway_url: str | None
     issues: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -90,6 +123,122 @@ def _intent_config_version(session: Session, workspace_id: int) -> int:
     if v is None:
         raise WorkspaceInvalidStateError("Workspace has no configuration version")
     return v
+
+
+def _get_workspace_runtime(session: Session, workspace_id: int) -> WorkspaceRuntime | None:
+    stmt = select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id)
+    return session.exec(stmt).first()
+
+
+def _runtime_ready_for_access(ws: Workspace, rt: WorkspaceRuntime | None) -> bool:
+    if ws.status != WorkspaceStatus.RUNNING.value:
+        return False
+    if rt is None:
+        return False
+    return bool((rt.container_id or "").strip())
+
+
+def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
+    # TODO: return edge-registered URL once gateway reconciles workspace routes (orchestrator TODO today).
+    _ = (ws, rt)
+    return None
+
+
+def _access_issues_for_runtime(rt: WorkspaceRuntime) -> tuple[str, ...]:
+    if rt.health_status == WorkspaceRuntimeHealthStatus.HEALTHY.value:
+        return ()
+    return (f"access:runtime:health:{rt.health_status}",)
+
+
+def _ensure_workspace_running_for_access(ws: Workspace) -> None:
+    """Attach/access require a settled RUNNING control-plane state (use /start to provision, not attach)."""
+    _require_not_busy(ws)
+    if ws.status != WorkspaceStatus.RUNNING.value:
+        raise WorkspaceInvalidStateError(
+            "Access requires workspace status RUNNING; use POST /workspaces/start/{id} "
+            f"or wait for provisioning (current={ws.status})",
+        )
+
+
+def get_workspace_access(
+    session: Session,
+    *,
+    workspace_id: int,
+    owner_user_id: int,
+) -> WorkspaceAccessResult:
+    """
+    Return normalized access fields when the workspace runtime is ready.
+
+    Does not enqueue jobs and does not mutate rows. Read-only after auth check.
+    """
+    ws = _get_owned_workspace(session, workspace_id, owner_user_id)
+    _ensure_workspace_running_for_access(ws)
+    rt = _get_workspace_runtime(session, workspace_id)
+    if not _runtime_ready_for_access(ws, rt):
+        raise WorkspaceInvalidStateError(
+            "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
+        )
+    assert rt is not None
+    issues = _access_issues_for_runtime(rt)
+    return WorkspaceAccessResult(
+        workspace_id=workspace_id,
+        success=True,
+        status=ws.status,
+        runtime_ready=True,
+        endpoint_ref=ws.endpoint_ref,
+        public_host=ws.public_host,
+        internal_endpoint=rt.internal_endpoint,
+        gateway_url=_derive_gateway_url_v1(ws, rt),
+        issues=issues,
+    )
+
+
+def request_attach_workspace(
+    session: Session,
+    *,
+    workspace_id: int,
+    owner_user_id: int,
+    requested_by_user_id: int,
+) -> WorkspaceAttachResult:
+    """
+    Grant access when RUNNING + runtime placed: same checks as :func:`get_workspace_access`, then bump
+    ``active_sessions_count`` as a V1 session surrogate (no token table yet).
+
+    Does **not** start or provision the workspace; callers use ``POST /workspaces/start/{id}`` first.
+    ``requested_by_user_id`` reserved for future audit / per-user sessions.
+    """
+    _ = requested_by_user_id
+    ws = _get_owned_workspace(session, workspace_id, owner_user_id)
+    _ensure_workspace_running_for_access(ws)
+    rt = _get_workspace_runtime(session, workspace_id)
+    if not _runtime_ready_for_access(ws, rt):
+        raise WorkspaceInvalidStateError(
+            "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
+        )
+    assert rt is not None
+    issues = _access_issues_for_runtime(rt)
+    now = datetime.now(timezone.utc)
+    ws.active_sessions_count = int(ws.active_sessions_count or 0) + 1
+    ws.updated_at = now
+    session.add(ws)
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    session.refresh(ws)
+    return WorkspaceAttachResult(
+        workspace_id=workspace_id,
+        accepted=True,
+        status=ws.status,
+        runtime_ready=True,
+        active_sessions_count=ws.active_sessions_count,
+        endpoint_ref=ws.endpoint_ref,
+        public_host=ws.public_host,
+        internal_endpoint=rt.internal_endpoint,
+        gateway_url=_derive_gateway_url_v1(ws, rt),
+        issues=issues,
+    )
 
 
 def _persist_intent(
