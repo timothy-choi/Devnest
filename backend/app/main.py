@@ -10,6 +10,7 @@ from app.services.notification_service.api.routers import internal_notifications
 from app.services.user_service.api.routers import users_router
 from app.services.workspace_service.api.routers import (
     internal_workspace_jobs_router,
+    internal_workspace_reconcile_router,
     workspaces_router,
 )
 
@@ -27,3 +28,4 @@ app.include_router(workspaces_router)
 app.include_router(notifications_router)
 app.include_router(internal_notifications_router)
 app.include_router(internal_workspace_jobs_router)
+app.include_router(internal_workspace_reconcile_router)

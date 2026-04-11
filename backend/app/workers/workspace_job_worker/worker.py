@@ -616,6 +616,12 @@ def _execute_job_body(
         _finalize_update_result(session, ws, job, result)
         return
 
+    if jt == WorkspaceJobType.RECONCILE_RUNTIME.value:
+        from app.services.reconcile_service.reconcile_runtime import execute_reconcile_runtime_job
+
+        execute_reconcile_runtime_job(session, orchestrator, ws, job)
+        return
+
     raise UnsupportedWorkspaceJobTypeError(f"Unsupported WorkspaceJob.type={jt!r}")
 
 

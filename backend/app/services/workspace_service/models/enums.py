@@ -33,6 +33,7 @@ class WorkspaceJobType(str, Enum):
     RESTART = "RESTART"
     DELETE = "DELETE"
     UPDATE = "UPDATE"
+    RECONCILE_RUNTIME = "RECONCILE_RUNTIME"
 
 
 class WorkspaceJobStatus(str, Enum):
