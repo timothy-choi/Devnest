@@ -77,6 +77,52 @@ def _strict_deregister_route(workspace_id: int) -> None:
     DevnestGatewayClient.from_settings(settings).deregister_route(str(workspace_id))
 
 
+def _best_effort_remove_orphan_gateway_route(
+    session: Session,
+    ws: Workspace,
+    job: WorkspaceJob,
+    *,
+    workspace_id: int,
+    message: str,
+) -> bool:
+    """
+    If route-admin still lists a route for this workspace, DELETE it.
+
+    Used after stop finalization (worker deregister is best-effort) and for explicit orphan cleanup.
+    Does not raise: logs and returns False on gateway errors so a succeeded job is not reversed.
+    """
+    settings = get_settings()
+    if not settings.devnest_gateway_enabled:
+        return False
+    try:
+        routes = _strict_list_routes()
+    except GatewayClientError as e:
+        logger.warning(
+            "reconcile_gateway_list_failed_best_effort",
+            extra={"workspace_id": workspace_id, "error": str(e)},
+        )
+        return False
+    if route_row_for_workspace(routes, workspace_id) is None:
+        return False
+    try:
+        _strict_deregister_route(workspace_id)
+    except GatewayClientError as e:
+        logger.warning(
+            "reconcile_gateway_deregister_failed_best_effort",
+            extra={"workspace_id": workspace_id, "error": str(e)},
+        )
+        return False
+    record_workspace_event(
+        session,
+        workspace_id=workspace_id,
+        event_type=WorkspaceStreamEventType.RECONCILE_CLEANED_ORPHAN,
+        status=ws.status,
+        message=message,
+        payload={"job_id": job.workspace_job_id},
+    )
+    return True
+
+
 def _runtime_snapshot(session: Session, workspace_id: int) -> tuple[str | None, str | None, str | None]:
     row = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id)).first()
     if row is None:
@@ -173,7 +219,7 @@ def _reconcile_deleted(session: Session, ws: Workspace, job: WorkspaceJob) -> No
     record_workspace_event(
         session,
         workspace_id=wid,
-        event_type=WorkspaceStreamEventType.RECONCILE_FIXED_ROUTE,
+        event_type=WorkspaceStreamEventType.RECONCILE_CLEANED_ORPHAN,
         status=ws.status,
         message="Removed orphan gateway route for deleted workspace",
         payload={"job_id": job.workspace_job_id},
@@ -221,16 +267,21 @@ def _reconcile_error_cleanup(session: Session, ws: Workspace, job: WorkspaceJob)
     record_workspace_event(
         session,
         workspace_id=wid,
-        event_type=WorkspaceStreamEventType.RECONCILE_FIXED_ROUTE,
+        event_type=WorkspaceStreamEventType.RECONCILE_CLEANED_ORPHAN,
         status=ws.status,
-        message="Removed gateway route while workspace in ERROR",
+        message="Removed orphan gateway route while workspace in ERROR",
         payload={"job_id": job.workspace_job_id},
     )
     wmod._mark_job_succeeded(session, job)
 
 
 def _fail_reconcile(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
-    """Mark reconcile job failed. Only moves workspace to ERROR when status is RUNNING (or other active)."""
+    """Mark reconcile job failed.
+
+    ``STOPPED`` / ``ERROR`` / ``DELETED``: job failed only (workspace status unchanged).
+
+    ``RUNNING`` (and any other non-terminal): workspace moves to ``ERROR`` via worker finalizer.
+    """
     wid = ws.workspace_id
     assert wid is not None
     record_workspace_event(
@@ -275,15 +326,34 @@ def _reconcile_stopped(
             _fail_reconcile(session, ws, job, f"reconcile:stop_failed:{e}")
             return
         wmod._finalize_stop_result(session, ws, job, stop_res)
-        if job.status == WorkspaceJobStatus.SUCCEEDED.value:
+        session.refresh(ws)
+        session.refresh(job)
+        if job.status != WorkspaceJobStatus.SUCCEEDED.value:
             record_workspace_event(
                 session,
                 workspace_id=wid,
-                event_type=WorkspaceStreamEventType.RECONCILE_FIXED_RUNTIME,
+                event_type=WorkspaceStreamEventType.RECONCILE_FAILED,
                 status=ws.status,
-                message="Stopped lingering runtime while workspace was STOPPED",
+                message=(job.error_msg or "reconcile:stop_finalize_failed"),
                 payload={"job_id": job.workspace_job_id},
             )
+            return
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.RECONCILE_FIXED_RUNTIME,
+            status=ws.status,
+            message="Stopped lingering runtime while workspace was STOPPED",
+            payload={"job_id": job.workspace_job_id},
+        )
+        session.refresh(ws)
+        _best_effort_remove_orphan_gateway_route(
+            session,
+            ws,
+            job,
+            workspace_id=wid,
+            message="Removed orphan gateway route after stop reconcile (strict cleanup)",
+        )
         return
 
     fixed_route = False
@@ -305,9 +375,9 @@ def _reconcile_stopped(
             record_workspace_event(
                 session,
                 workspace_id=wid,
-                event_type=WorkspaceStreamEventType.RECONCILE_FIXED_ROUTE,
+                event_type=WorkspaceStreamEventType.RECONCILE_CLEANED_ORPHAN,
                 status=ws.status,
-                message="Removed gateway route while workspace was STOPPED",
+                message="Removed orphan gateway route while workspace was STOPPED",
                 payload={"job_id": job.workspace_job_id},
             )
 
@@ -346,6 +416,7 @@ def _reconcile_running(
         return
 
     before = _runtime_snapshot(session, wid)
+    # ``requested_config_version`` is frozen at enqueue time (matches other job types).
     wmod._apply_runtime_bringup_like(
         session,
         wid,

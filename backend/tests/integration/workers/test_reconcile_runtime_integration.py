@@ -277,6 +277,103 @@ def test_reconcile_stopped_stops_lingering_container(
     assert ws2.status == WorkspaceStatus.STOPPED.value
 
 
+def test_reconcile_running_second_job_emits_noop(
+    db_session: Session,
+    patch_worker_now: None,
+) -> None:
+    """After runtime matches health, a second reconcile should not rewrite gateway/runtime."""
+    owner = _seed_owner(db_session)
+    wid = _seed_running_workspace(db_session, owner)
+    orch = _orch()
+    orch.check_workspace_runtime_health.return_value = _health_ok(str(wid))
+
+    for _ in range(2):
+        job = WorkspaceJob(
+            workspace_id=wid,
+            job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
+            status="QUEUED",
+            requested_by_user_id=owner,
+            requested_config_version=CFG_V,
+            attempt=0,
+        )
+        db_session.add(job)
+        db_session.commit()
+        run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+        db_session.expire_all()
+
+    evs = db_session.exec(
+        select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wid).order_by(WorkspaceEvent.workspace_event_id)
+    ).all()
+    types = [e.event_type for e in evs]
+    assert types.count(WorkspaceStreamEventType.RECONCILE_NOOP) >= 1
+
+
+def test_reconcile_stopped_stop_failure_emits_reconcile_failed(
+    db_session: Session,
+    patch_worker_now: None,
+) -> None:
+    from datetime import datetime, timezone
+
+    owner = _seed_owner(db_session)
+    now = datetime.now(timezone.utc)
+    ws = Workspace(
+        name="rc-stopped-fail",
+        description="",
+        owner_user_id=owner,
+        status=WorkspaceStatus.STOPPED.value,
+        is_private=True,
+        created_at=now,
+        updated_at=now,
+    )
+    db_session.add(ws)
+    db_session.flush()
+    for v in (1, CFG_V):
+        db_session.add(
+            WorkspaceConfig(workspace_id=ws.workspace_id, version=v, config_json={"v": v}),
+        )
+    db_session.add(
+        WorkspaceRuntime(
+            workspace_id=ws.workspace_id,
+            node_id=NODE_ID,
+            container_id=CONTAINER_ID,
+            container_state="running",
+            topology_id=99,
+            internal_endpoint=INTERNAL_EP,
+            config_version=CFG_V,
+            health_status=WorkspaceRuntimeHealthStatus.HEALTHY.value,
+        )
+    )
+    job = WorkspaceJob(
+        workspace_id=ws.workspace_id,
+        job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
+        status="QUEUED",
+        requested_by_user_id=owner,
+        requested_config_version=CFG_V,
+        attempt=0,
+    )
+    db_session.add(job)
+    db_session.commit()
+    wid = ws.workspace_id
+    jid = job.workspace_job_id
+
+    orch = _orch()
+    orch.check_workspace_runtime_health.return_value = _health_ok(str(wid))
+    orch.stop_workspace_runtime.return_value = WorkspaceStopResult(
+        workspace_id=str(wid),
+        success=False,
+        issues=["stop:engine:failed"],
+    )
+
+    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    db_session.expire_all()
+
+    job2 = db_session.get(WorkspaceJob, jid)
+    assert job2 is not None
+    assert job2.status == WorkspaceJobStatus.FAILED.value
+    evs = db_session.exec(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wid)).all()
+    assert any(e.event_type == WorkspaceStreamEventType.RECONCILE_FAILED for e in evs)
+
+
 def test_enqueue_reconcile_runtime_via_service(
     db_session: Session,
 ) -> None:
@@ -352,5 +449,8 @@ def test_reconcile_deleted_deregisters_when_route_present(
     job2 = db_session.get(WorkspaceJob, jid)
     assert job2 is not None
     assert job2.status == WorkspaceJobStatus.SUCCEEDED.value
+
+    evs = db_session.exec(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wid)).all()
+    assert any(e.event_type == WorkspaceStreamEventType.RECONCILE_CLEANED_ORPHAN for e in evs)
 
     get_settings.cache_clear()
