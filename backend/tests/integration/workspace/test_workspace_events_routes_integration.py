@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import threading
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 from fastapi import status
 from sqlmodel import Session, select
@@ -70,6 +71,42 @@ def _fast_sse_poll_all(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workspaces_router, "SSE_POLL_INTERVAL_SEC", 0.01)
 
 
+async def _read_sse_until_data_line_async(
+    app,
+    path: str,
+    headers: dict[str, str],
+    *,
+    max_bytes: int = 64_000,
+    max_chunks: int = 256,
+    read_timeout_s: float = 20.0,
+) -> bytes:
+    """
+    ``httpx.ASGITransport`` implements the **async** transport API only; sync ``httpx.Client`` cannot use it.
+
+    Do not call Starlette ``TestClient`` from another thread (it deadlocks under ``pytest-xdist``).
+    """
+    transport = httpx.ASGITransport(app=app)
+    timeout = httpx.Timeout(connect=5.0, read=read_timeout_s, write=10.0, pool=5.0)
+    buf = b""
+    n_chunks = 0
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=timeout) as ac:
+        async with ac.stream("GET", path, headers=headers) as res:
+            assert res.status_code == status.HTTP_200_OK
+            assert res.headers.get("content-type", "").startswith("text/event-stream")
+            async for chunk in res.aiter_bytes(chunk_size=512):
+                n_chunks += 1
+                buf += chunk
+                if b"data: " in buf and b"\n\n" in buf:
+                    return buf
+                if len(buf) >= max_bytes or n_chunks >= max_chunks:
+                    break
+    if b"data: " not in buf or b"\n\n" not in buf:
+        pytest.fail(
+            f"SSE incomplete after {n_chunks} chunks / {len(buf)} bytes (expected a full data:…\\n\\n frame)"
+        )
+    return buf
+
+
 def _read_sse_until_data_line(
     testclient,
     path: str,
@@ -79,85 +116,45 @@ def _read_sse_until_data_line(
     max_chunks: int = 256,
     read_timeout_s: float = 20.0,
 ) -> bytes:
-    """
-    Read the first full SSE ``data:`` frame using Starlette ``TestClient`` on a daemon thread.
-
-    ``TestClient.stream(..., timeout=...)`` does not reliably cap blocking ``iter_bytes()`` reads.
-    Mixing ``httpx.Client`` with ``httpx.ASGITransport`` across Starlette/pip resolutions can yield
-    transports without ``handle_request``. A wall-clock ``Event.wait`` on the main thread bounds the
-    worker so ``pytest-xdist`` does not hang indefinitely.
-    """
-    state: dict[str, object] = {"buf": b"", "n_chunks": 0, "err": None}
-    done = threading.Event()
-
-    def worker() -> None:
-        try:
-            with testclient.stream("GET", path, headers=headers) as res:
-                assert res.status_code == status.HTTP_200_OK
-                assert res.headers.get("content-type", "").startswith("text/event-stream")
-                buf = b""
-                n_chunks = 0
-                for chunk in res.iter_bytes(chunk_size=512):
-                    n_chunks += 1
-                    buf += chunk
-                    state["buf"] = buf
-                    state["n_chunks"] = n_chunks
-                    if b"data: " in buf and b"\n\n" in buf:
-                        return
-                    if len(buf) >= max_bytes or n_chunks >= max_chunks:
-                        return
-        except Exception as e:
-            state["err"] = e
-        finally:
-            done.set()
-
-    threading.Thread(target=worker, daemon=True).start()
-    slack_s = 5.0
-    if not done.wait(timeout=read_timeout_s + slack_s):
-        pytest.fail(
-            f"SSE read exceeded wall-clock {read_timeout_s + slack_s}s "
-            f"(chunks={state['n_chunks']}, bytes={len(state['buf'])})"
+    try:
+        return asyncio.run(
+            _read_sse_until_data_line_async(
+                testclient.app,
+                path,
+                headers,
+                max_bytes=max_bytes,
+                max_chunks=max_chunks,
+                read_timeout_s=read_timeout_s,
+            )
         )
-    err = state["err"]
-    if err is not None:
-        assert isinstance(err, BaseException)
-        raise err
-    buf = state["buf"]
-    assert isinstance(buf, bytes)
-    n_chunks = state["n_chunks"]
-    assert isinstance(n_chunks, int)
-    if b"data: " not in buf or b"\n\n" not in buf:
-        pytest.fail(
-            f"SSE incomplete after {n_chunks} chunks / {len(buf)} bytes (expected a full data:…\\n\\n frame)"
-        )
-    return buf
+    except httpx.ReadTimeout as e:
+        pytest.fail(f"SSE read timed out after {read_timeout_s}s: {e}")
 
 
-def _sse_open_headers_only_bounded(testclient, path: str, headers: dict[str, str], *, wall_timeout_s: float) -> None:
-    """Open the SSE stream, assert headers, exit without reading the body; bounded wall time."""
-    state: dict[str, object] = {"err": None}
-    done = threading.Event()
-
-    def worker() -> None:
-        try:
-            with testclient.stream("GET", path, headers=headers) as res:
+async def _sse_open_headers_only_async(
+    app,
+    path: str,
+    headers: dict[str, str],
+    *,
+    wall_timeout_s: float,
+) -> None:
+    transport = httpx.ASGITransport(app=app)
+    timeout = httpx.Timeout(connect=5.0, read=wall_timeout_s, write=10.0, pool=5.0)
+    async with asyncio.timeout(wall_timeout_s):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=timeout) as ac:
+            async with ac.stream("GET", path, headers=headers) as res:
                 assert res.status_code == status.HTTP_200_OK
                 assert res.headers.get("content-type", "").startswith("text/event-stream")
                 assert res.headers.get("cache-control") == "no-cache"
-        except Exception as e:
-            state["err"] = e
-        finally:
-            done.set()
 
-    threading.Thread(target=worker, daemon=True).start()
-    if not done.wait(timeout=wall_timeout_s):
+
+def _sse_open_headers_only_bounded(testclient, path: str, headers: dict[str, str], *, wall_timeout_s: float) -> None:
+    try:
+        asyncio.run(_sse_open_headers_only_async(testclient.app, path, headers, wall_timeout_s=wall_timeout_s))
+    except TimeoutError:
         pytest.fail(
             f"SSE open/close exceeded {wall_timeout_s}s (stream teardown may be blocking on an infinite body)"
         )
-    err = state["err"]
-    if err is not None:
-        assert isinstance(err, BaseException)
-        raise err
 
 
 def test_get_workspace_events_404_missing(client, db_session: Session) -> None:
