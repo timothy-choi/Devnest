@@ -127,7 +127,7 @@ def test_reconcile_running_syncs_runtime_and_succeeds(
     patch_worker_now: None,
 ) -> None:
     owner = _seed_owner(db_session)
-    wid = _seed_running_workspace(db_session)
+    wid = _seed_running_workspace(db_session, owner)
     job = WorkspaceJob(
         workspace_id=wid,
         job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
@@ -175,7 +175,7 @@ def test_reconcile_running_unhealthy_marks_workspace_error(
     patch_worker_now: None,
 ) -> None:
     owner = _seed_owner(db_session)
-    wid = _seed_running_workspace(db_session)
+    wid = _seed_running_workspace(db_session, owner)
     job = WorkspaceJob(
         workspace_id=wid,
         job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
@@ -281,7 +281,7 @@ def test_enqueue_reconcile_runtime_via_service(
     db_session: Session,
 ) -> None:
     owner = _seed_owner(db_session)
-    wid = _seed_running_workspace(db_session)
+    wid = _seed_running_workspace(db_session, owner)
 
     out = workspace_intent_service.enqueue_reconcile_runtime_job(db_session, workspace_id=wid)
 

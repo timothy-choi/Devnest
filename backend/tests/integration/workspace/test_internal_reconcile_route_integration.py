@@ -50,7 +50,7 @@ def test_post_reconcile_runtime_returns_202_and_queues_job(
     db_session: Session,
 ) -> None:
     owner = _seed_owner(db_session)
-    wid = _seed_running(db_session)
+    wid = _seed_running(db_session, owner)
     db_session.commit()
 
     r = client.post(f"/internal/workspaces/{wid}/reconcile-runtime", headers=INTERNAL_HEADERS)
