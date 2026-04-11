@@ -1,14 +1,16 @@
-"""System tests: full workspace control-plane loop (API → job → worker → orchestrator → DB).
+"""End-to-end workspace control-plane tests (API → job → worker → orchestrator → DB).
 
-Exercises the documented flow with real FastAPI routes, PostgreSQL, Docker runtime,
-``DbTopologyAdapter``, ``DefaultProbeRunner`` (TCP connect stubbed — workspace IP is not host-routable;
-see ``e2e_probe_socket_patch`` in ``conftest.py``).
+Lives under ``tests/integration/workspace/`` so PostgreSQL + ``TestClient`` fixtures come from
+``tests/integration/conftest.py`` without forbidden nested ``pytest_plugins``.
 
-Markers: ``system`` (Docker + DB). Suitable for the non-sudo system CI job alongside other ``system``
-tests; not privileged. Heavier than unit/integration; keep this module small.
+Uses real FastAPI routes, Docker runtime, ``DbTopologyAdapter``, ``DefaultProbeRunner`` (TCP
+connect stubbed via ``e2e_probe_socket_patch`` in this package's ``conftest.py``).
 
-Failure injection uses a mocked orchestrator from the worker runner boundary; detailed
-``success=False`` roll-ups remain covered in unit tests.
+Markers:
+- ``integration`` — participates in the integration CI job (Postgres).
+- ``system`` — requires Docker; use ``-m "not system"`` only if you intentionally skip these.
+
+Failure injection mocks the orchestrator factory; ``success=False`` roll-ups stay in unit tests.
 """
 
 from __future__ import annotations
@@ -36,14 +38,20 @@ from app.services.workspace_service.models import (
 )
 
 pytestmark = [
+    pytest.mark.integration,
     pytest.mark.system,
-    pytest.mark.usefixtures("_workspace_control_plane_env", "orchestrator_topology", "e2e_probe_socket_patch"),
+    pytest.mark.usefixtures(
+        "docker_client",
+        "_workspace_control_plane_env",
+        "orchestrator_topology",
+        "e2e_probe_socket_patch",
+    ),
 ]
 
 
 def _internal_headers() -> dict[str, str]:
     key = os.environ.get("INTERNAL_API_KEY", "")
-    assert key, "INTERNAL_API_KEY must be set (integration conftest autouse when plugin is active)"
+    assert key, "INTERNAL_API_KEY must be set (integration conftest autouse)"
     return {"X-Internal-API-Key": key}
 
 
@@ -66,7 +74,7 @@ def _create_workspace(client, token: str, *, name: str | None = None) -> tuple[i
         "/workspaces",
         json={
             "name": name or f"cp-{uuid.uuid4().hex[:10]}",
-            "description": "control-plane system test",
+            "description": "control-plane E2E test",
             "is_private": True,
         },
         headers=_auth_header(token),
