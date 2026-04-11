@@ -110,7 +110,7 @@ def test_access_and_attach_return_public_host_and_gateway_url(
     assert acc["public_host"] == expected_host
     assert acc["gateway_url"] == f"http://{expected_host}/"
 
-    r_att = client.post(f"/workspaces/{wid}/attach", headers=helpers.auth_header(token))
+    r_att = client.post(f"/workspaces/attach/{wid}", headers=helpers.auth_header(token))
     assert r_att.status_code == status.HTTP_200_OK, r_att.text
     att = r_att.json()
     assert att["public_host"] == expected_host
