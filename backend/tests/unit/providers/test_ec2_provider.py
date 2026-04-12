@@ -14,7 +14,12 @@ from app.services.providers.ec2_provider import (
     register_ec2_instance,
 )
 from app.services.providers.errors import Ec2InstanceNotFoundError, Ec2ProviderError
-from app.services.placement_service.models import ExecutionNodeProviderType, ExecutionNodeStatus
+from app.services.placement_service.models import (
+    ExecutionNode,
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+    ExecutionNodeStatus,
+)
 
 
 @pytest.fixture
@@ -101,6 +106,22 @@ def test_describe_ec2_instance_not_found() -> None:
     stubber.deactivate()
 
 
+def test_describe_instances_unauthorized_maps_to_provider_error() -> None:
+    client = _stub_ec2_client()
+    stubber = Stubber(client)
+    stubber.add_client_error(
+        "describe_instances",
+        service_error_code="UnauthorizedOperation",
+        service_message="not allowed",
+        http_status_code=403,
+        expected_params={"InstanceIds": ["i-0a1b2c3d4e5f6788"]},
+    )
+    stubber.activate()
+    with pytest.raises(Ec2ProviderError, match="AWS denied EC2 describe_instances"):
+        describe_ec2_instance("i-0a1b2c3d4e5f6788", ec2_client=client)
+    stubber.deactivate()
+
+
 def test_invalid_instance_id_raises() -> None:
     client = _stub_ec2_client()
     with pytest.raises(Ec2ProviderError, match="invalid EC2 instance id"):
@@ -117,6 +138,126 @@ def test_list_ec2_instances_empty() -> None:
     )
     stubber.activate()
     assert list_ec2_instances(ec2_client=client) == []
+    stubber.deactivate()
+
+
+def test_register_rejects_node_key_used_by_local_node(sqlite_engine) -> None:
+    client = _stub_ec2_client()
+    stubber = Stubber(client)
+    iid = "i-0a1b2c3d4e5f6799"
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": iid,
+                            "State": {"Name": "running"},
+                            "InstanceType": "t3.micro",
+                            "PrivateIpAddress": "10.0.0.1",
+                            "Placement": {"AvailabilityZone": "us-east-1a"},
+                            "Tags": [],
+                        },
+                    ],
+                },
+            ],
+        },
+        {"InstanceIds": [iid]},
+    )
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    with Session(sqlite_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="reserved-key",
+                name="local",
+                provider_type=ExecutionNodeProviderType.LOCAL.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+        with pytest.raises(Ec2ProviderError, match="already used by a local execution node"):
+            register_ec2_instance(session, iid, ec2_client=client, node_key="reserved-key")
+    stubber.deactivate()
+
+
+def test_register_rejects_node_key_bound_to_other_instance(sqlite_engine) -> None:
+    client = _stub_ec2_client()
+    stubber = Stubber(client)
+    iid_new = "i-0a1b2c3d4e5f6703"
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": iid_new,
+                            "State": {"Name": "running"},
+                            "InstanceType": "t3.micro",
+                            "PrivateIpAddress": "10.0.0.2",
+                            "Placement": {"AvailabilityZone": "us-east-1a"},
+                            "Tags": [],
+                        },
+                    ],
+                },
+            ],
+        },
+        {"InstanceIds": [iid_new]},
+    )
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    with Session(sqlite_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="shared-key",
+                name="old",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                provider_instance_id="i-0aaaaaaaaaaaaaaaa",
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.SSH_DOCKER.value,
+                private_ip="10.0.0.99",
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+        with pytest.raises(Ec2ProviderError, match="already bound to instance"):
+            register_ec2_instance(session, iid_new, ec2_client=client, node_key="shared-key")
     stubber.deactivate()
 
 

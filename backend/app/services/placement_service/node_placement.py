@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
@@ -19,10 +19,15 @@ def _provider_type_clause():
     Optional placement pool filter from ``DEVNEST_NODE_PROVIDER`` (``local`` | ``ec2`` | ``all``).
 
     Default ``all`` does not restrict by provider; local-only and EC2-only clusters can narrow the pool.
+    ``local`` also allows ``provider_type=unspecified`` for legacy rows.
     """
     mode = (get_settings().devnest_node_provider or "all").strip().lower()
     if mode == "local":
-        return ExecutionNode.provider_type == ExecutionNodeProviderType.LOCAL.value
+        # Treat legacy / unset provider label like local for backward compatibility.
+        return or_(
+            ExecutionNode.provider_type == ExecutionNodeProviderType.LOCAL.value,
+            ExecutionNode.provider_type == ExecutionNodeProviderType.UNSPECIFIED.value,
+        )
     if mode == "ec2":
         return ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value
     return None

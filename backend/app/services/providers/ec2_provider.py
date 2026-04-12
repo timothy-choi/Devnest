@@ -9,6 +9,7 @@ SSH keys, security groups, and Docker on the instance are operator concerns (TOD
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,7 +30,19 @@ from app.services.placement_service.models import (
 
 from .errors import Ec2InstanceNotFoundError, Ec2ProviderError
 
+logger = logging.getLogger(__name__)
+
 _INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,32}$", re.IGNORECASE)
+
+_AWS_AUTH_CODES = frozenset(
+    {
+        "AuthFailure",
+        "UnauthorizedOperation",
+        "InvalidClientTokenId",
+        "ExpiredToken",
+        "RequestExpired",
+    },
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +123,10 @@ def describe_ec2_instance(
         code = (e.response.get("Error") or {}).get("Code", "")
         if code == "InvalidInstanceID.NotFound":
             raise Ec2InstanceNotFoundError(f"EC2 instance not found: {iid}") from e
+        if code in _AWS_AUTH_CODES:
+            raise Ec2ProviderError(
+                f"AWS denied EC2 describe_instances ({code}); check credentials, region, and IAM: {e}",
+            ) from e
         raise Ec2ProviderError(f"describe_instances failed for {iid}: {e}") from e
 
     reservations = resp.get("Reservations") or []
@@ -147,7 +164,11 @@ def _instance_type_capacity(client: BaseClient, instance_type: str) -> tuple[flo
         return 4.0, 8192
     try:
         resp = client.describe_instance_types(InstanceTypes=[it])
-    except ClientError:
+    except ClientError as e:
+        logger.warning(
+            "ec2_describe_instance_types_fallback",
+            extra={"instance_type": it, "error": str(e)},
+        )
         return 4.0, 8192
     types = resp.get("InstanceTypes") or []
     if not types:
@@ -174,32 +195,41 @@ def list_ec2_instances(
     flt = filters if filters is not None else [{"Name": "instance-state-name", "Values": ["running"]}]
     out: list[Ec2InstanceDescription] = []
     paginator = client.get_paginator("describe_instances")
-    for page in paginator.paginate(Filters=flt):
-        for res in page.get("Reservations") or []:
-            for inst in res.get("Instances") or []:
-                iid = (inst.get("InstanceId") or "").strip()
-                if not iid:
-                    continue
-                state = ((inst.get("State") or {}).get("Name") or "").strip().lower() or "unknown"
-                priv = (inst.get("PrivateIpAddress") or "").strip() or None
-                pub = (inst.get("PublicIpAddress") or "").strip() or None
-                az = ((inst.get("Placement") or {}).get("AvailabilityZone") or "").strip() or None
-                itype = (inst.get("InstanceType") or "").strip() or "unknown"
-                name = _name_from_tags(inst.get("Tags"))
-                profile = _profile_name_from_instance(inst)
-                out.append(
-                    Ec2InstanceDescription(
-                        instance_id=iid,
-                        state=state,
-                        instance_type=itype,
-                        private_ip=priv,
-                        public_ip=pub,
-                        availability_zone=az,
-                        region=region,
-                        name_tag=name,
-                        iam_instance_profile_name=profile,
-                    ),
-                )
+    try:
+        for page in paginator.paginate(Filters=flt):
+            for res in page.get("Reservations") or []:
+                for inst in res.get("Instances") or []:
+                    iid = (inst.get("InstanceId") or "").strip()
+                    if not iid:
+                        continue
+                    state = ((inst.get("State") or {}).get("Name") or "").strip().lower() or "unknown"
+                    priv = (inst.get("PrivateIpAddress") or "").strip() or None
+                    pub = (inst.get("PublicIpAddress") or "").strip() or None
+                    az = ((inst.get("Placement") or {}).get("AvailabilityZone") or "").strip() or None
+                    itype = (inst.get("InstanceType") or "").strip() or "unknown"
+                    name = _name_from_tags(inst.get("Tags"))
+                    profile = _profile_name_from_instance(inst)
+                    out.append(
+                        Ec2InstanceDescription(
+                            instance_id=iid,
+                            state=state,
+                            instance_type=itype,
+                            private_ip=priv,
+                            public_ip=pub,
+                            availability_zone=az,
+                            region=region,
+                            name_tag=name,
+                            iam_instance_profile_name=profile,
+                        ),
+                    )
+    except ClientError as e:
+        code = (e.response.get("Error") or {}).get("Code", "")
+        if code in _AWS_AUTH_CODES:
+            raise Ec2ProviderError(
+                f"AWS denied EC2 describe_instances ({code}); check credentials, region, and IAM: {e}",
+            ) from e
+        logger.error("ec2_list_instances_failed", extra={"error": str(e), "code": code})
+        raise Ec2ProviderError(f"describe_instances (list) failed: {e}") from e
     return out
 
 
@@ -238,6 +268,18 @@ def register_ec2_instance(
     if row is None:
         stmt_key = select(ExecutionNode).where(ExecutionNode.node_key == key)
         row = session.exec(stmt_key).first()
+        if row is not None:
+            if row.provider_type == ExecutionNodeProviderType.LOCAL.value:
+                raise Ec2ProviderError(
+                    f"node_key {key!r} is already used by a local execution node; "
+                    "choose a different --node-key",
+                )
+            other = (row.provider_instance_id or "").strip()
+            if other and other.lower() != iid.lower():
+                raise Ec2ProviderError(
+                    f"node_key {key!r} is already bound to instance {other!r}; "
+                    "choose another --node-key or remove the conflicting row",
+                )
 
     now = datetime.now(timezone.utc)
     meta_patch = {
@@ -303,6 +345,16 @@ def register_ec2_instance(
         session.add(row)
 
     session.flush()
+    logger.info(
+        "ec2_execution_node_registered",
+        extra={
+            "node_key": row.node_key,
+            "provider_instance_id": iid,
+            "schedulable": row.schedulable,
+            "status": row.status,
+            "execution_mode": row.execution_mode,
+        },
+    )
     return row
 
 
@@ -322,10 +374,7 @@ def sync_ec2_instances(
     """
     client = ec2_client or build_ec2_client()
     if instance_ids:
-        out: list[ExecutionNode] = []
-        for raw in instance_ids:
-            out.append(register_ec2_instance(session, raw.strip(), ec2_client=client))
-        return out
+        return [register_ec2_instance(session, raw.strip(), ec2_client=client) for raw in instance_ids]
 
     stmt = select(ExecutionNode).where(ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value)
     rows = [r for r in session.exec(stmt).all() if (r.provider_instance_id or "").strip()]
@@ -334,5 +383,12 @@ def sync_ec2_instances(
         pid = (row.provider_instance_id or "").strip()
         if not pid:
             continue
-        updated.append(register_ec2_instance(session, pid, ec2_client=client))
+        try:
+            updated.append(register_ec2_instance(session, pid, ec2_client=client))
+        except Ec2ProviderError as e:
+            logger.warning(
+                "ec2_sync_instance_failed",
+                extra={"instance_id": pid, "error": str(e)},
+            )
+            raise
     return updated

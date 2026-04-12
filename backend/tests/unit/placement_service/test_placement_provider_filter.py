@@ -82,6 +82,23 @@ def test_placement_local_excludes_ec2(placement_engine, monkeypatch) -> None:
         assert picked.node_key == "local-only"
 
 
+def test_placement_local_includes_unspecified_provider(placement_engine, monkeypatch) -> None:
+    def _settings():
+        m = MagicMock()
+        m.devnest_node_provider = "local"
+        return m
+
+    monkeypatch.setattr(
+        "app.services.placement_service.node_placement.get_settings",
+        _settings,
+    )
+    with Session(placement_engine) as session:
+        _add_node(session, key="unspec", provider=ExecutionNodeProviderType.UNSPECIFIED.value, cpu=8.0)
+        _add_node(session, key="ec2-x", provider=ExecutionNodeProviderType.EC2.value, cpu=8.0)
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "unspec"
+
+
 def test_placement_ec2_excludes_local(placement_engine, monkeypatch) -> None:
     def _settings():
         m = MagicMock()

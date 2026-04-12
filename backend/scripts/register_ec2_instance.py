@@ -34,22 +34,27 @@ def main() -> int:
     from sqlmodel import Session
 
     from app.libs.db.database import get_engine
+    from app.services.providers.errors import Ec2ProviderError
     from app.services.providers.ec2_provider import register_ec2_instance
 
     engine = get_engine()
-    with Session(engine) as session:
-        node = register_ec2_instance(
-            session,
-            args.instance_id.strip(),
-            node_key=args.node_key,
-            ssh_user=args.ssh_user,
-        )
-        session.commit()
-        print(
-            f"Registered execution node id={node.id} node_key={node.node_key!r} "
-            f"provider_instance_id={node.provider_instance_id!r} status={node.status!r} "
-            f"schedulable={node.schedulable}",
-        )
+    try:
+        with Session(engine) as session:
+            node = register_ec2_instance(
+                session,
+                args.instance_id.strip(),
+                node_key=args.node_key,
+                ssh_user=args.ssh_user,
+            )
+            session.commit()
+            print(
+                f"Registered execution node id={node.id} node_key={node.node_key!r} "
+                f"provider_instance_id={node.provider_instance_id!r} status={node.status!r} "
+                f"schedulable={node.schedulable}",
+            )
+    except Ec2ProviderError as e:
+        print(f"EC2 registration failed: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
