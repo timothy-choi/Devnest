@@ -283,21 +283,22 @@ class TestAuthAudit:
         assert rows[0].resource_type == "user"
         assert rows[0].outcome == "success"
 
-    def test_register_audit_row_missing_without_session_commit_rollback(self, client, db_session) -> None:
-        """Second registration with same email must produce no audit row (transaction rolls back)."""
+    def test_duplicate_register_produces_no_extra_audit_row(self, client, db_session) -> None:
+        """Second registration with the same email is rejected (409); exactly one audit row must exist."""
         email = "dup_aud@test.dev"
-        client.post("/auth/register", json={"username": "aud_dup1", "email": email, "password": "pw1"})
-        r2 = client.post("/auth/register", json={"username": "aud_dup2", "email": email, "password": "pw2"})
+        r1 = client.post("/auth/register", json={"username": "aud_dup1", "email": email, "password": "securepass1"})
+        assert r1.status_code == status.HTTP_201_CREATED
+        uid1 = r1.json()["user_auth_id"]
+
+        r2 = client.post("/auth/register", json={"username": "aud_dup2", "email": email, "password": "securepass2"})
         assert r2.status_code == status.HTTP_409_CONFLICT
 
         rows = db_session.exec(
-            select(AuditLog).where(AuditLog.action == AuditAction.USER_REGISTERED.value)
+            select(AuditLog)
+            .where(AuditLog.action == AuditAction.USER_REGISTERED.value)
+            .where(AuditLog.actor_user_id == uid1),
         ).all()
-        registered_emails_audited = [
-            r for r in rows
-            if db_session.get(__import__("app.services.auth_service.models", fromlist=["UserAuth"]).UserAuth, r.actor_user_id) is not None
-        ]
-        assert len(registered_emails_audited) >= 1
+        assert len(rows) == 1
 
 
 class TestAuditApiFilters:

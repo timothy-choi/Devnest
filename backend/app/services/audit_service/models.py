@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, DateTime, Index
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer
 from sqlalchemy.types import JSON
 from sqlmodel import Field, SQLModel
 
@@ -20,10 +20,15 @@ class AuditLog(SQLModel, table=True):
     __tablename__ = "audit_log"
 
     audit_log_id: int | None = Field(default=None, primary_key=True)
+    # ON DELETE SET NULL: deleting a user preserves the audit trail with actor_user_id nulled out.
     actor_user_id: int | None = Field(
         default=None,
-        foreign_key="user_auth.user_auth_id",
-        index=True,
+        sa_column=Column(
+            Integer,
+            ForeignKey("user_auth.user_auth_id", ondelete="SET NULL"),
+            index=True,
+            nullable=True,
+        ),
         description="Authenticated user who triggered the action; None for internal/system actions.",
     )
     actor_type: str = Field(

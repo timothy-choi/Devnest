@@ -297,13 +297,10 @@ def delete_account(
 ) -> DeleteAccountResponse:
     assert current.user_auth_id is not None
     uid = current.user_auth_id
-    try:
-        delete_account_for_current_user(session, current, password=body.password)
-    except InvalidAccountPasswordError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Password required or invalid",
-        ) from None
+    # Record audit BEFORE the delete so actor_user_id FK is still valid when we flush.
+    # delete_account_for_current_user commits the transaction (including this flush).
+    # The ON DELETE SET NULL FK on audit_log.actor_user_id then nulls the reference
+    # when the user row is removed in the same commit.
     record_audit(
         session,
         action=AuditAction.USER_DELETED.value,
@@ -313,7 +310,14 @@ def delete_account(
         actor_type=AuditActorType.USER.value,
         outcome=AuditOutcome.SUCCESS.value,
     )
-    session.commit()
+    try:
+        delete_account_for_current_user(session, current, password=body.password)
+    except InvalidAccountPasswordError:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Password required or invalid",
+        ) from None
     return DeleteAccountResponse()
 
 
