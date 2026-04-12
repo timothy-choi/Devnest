@@ -44,6 +44,10 @@ from app.services.workspace_service.services.workspace_session_service import (
     create_workspace_session,
     resolve_workspace_session_for_access,
 )
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.service import record_usage
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +247,17 @@ def get_workspace_access(
         token_plain=workspace_session_token or "",
         correlation_id=correlation_id,
     )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_ACCESS_GRANTED.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        actor_user_id=owner_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=workspace_id,
+        correlation_id=correlation_id,
+    )
     try:
         session.commit()
     except Exception:
@@ -292,6 +307,25 @@ def request_attach_workspace(
         workspace_id=workspace_id,
         user_id=owner_user_id,
         client_metadata=client_metadata,
+        correlation_id=correlation_id,
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_ATTACH_GRANTED.value,
+        resource_type="workspace_session",
+        resource_id=row.workspace_session_id,
+        actor_user_id=owner_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=workspace_id,
+        correlation_id=correlation_id,
+        metadata={"session_id": row.workspace_session_id},
+    )
+    record_usage(
+        session,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        event_type=UsageEventType.SESSION_CREATED.value,
         correlation_id=correlation_id,
     )
     try:
@@ -370,6 +404,28 @@ def _persist_intent(
             "job_type": job_type,
             "requested_config_version": requested_config_version,
         },
+    )
+
+    _JOB_TYPE_TO_AUDIT_ACTION: dict[str, str] = {
+        WorkspaceJobType.START.value: AuditAction.WORKSPACE_START_REQUESTED.value,
+        WorkspaceJobType.STOP.value: AuditAction.WORKSPACE_STOP_REQUESTED.value,
+        WorkspaceJobType.RESTART.value: AuditAction.WORKSPACE_RESTART_REQUESTED.value,
+        WorkspaceJobType.DELETE.value: AuditAction.WORKSPACE_DELETE_REQUESTED.value,
+        WorkspaceJobType.UPDATE.value: AuditAction.WORKSPACE_UPDATE_REQUESTED.value,
+    }
+    audit_action = _JOB_TYPE_TO_AUDIT_ACTION.get(job_type, f"workspace.{job_type}.requested")
+    record_audit(
+        session,
+        action=audit_action,
+        resource_type="workspace",
+        resource_id=ws.workspace_id,
+        actor_user_id=requested_by_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=ws.workspace_id,
+        job_id=job.workspace_job_id,
+        correlation_id=cid,
+        metadata={"job_type": job_type, "new_status": new_status},
     )
 
     try:
@@ -760,6 +816,27 @@ def create_workspace(
             "job_type": WorkspaceJobType.CREATE.value,
             "requested_config_version": 1,
         },
+    )
+
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_CREATE_REQUESTED.value,
+        resource_type="workspace",
+        resource_id=ws.workspace_id,
+        actor_user_id=owner_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=ws.workspace_id,
+        job_id=job.workspace_job_id,
+        correlation_id=cid,
+        metadata={"name": ws.name},
+    )
+    record_usage(
+        session,
+        workspace_id=int(ws.workspace_id),
+        owner_user_id=owner_user_id,
+        event_type=UsageEventType.WORKSPACE_CREATED.value,
+        correlation_id=cid,
     )
 
     try:

@@ -82,6 +82,10 @@ from app.services.workspace_service.services.workspace_event_service import (
     record_workspace_event,
 )
 from app.services.workspace_service.services.workspace_session_service import revoke_all_workspace_sessions
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.service import record_usage
 
 from app.libs.common.config import get_settings
 from app.libs.observability.correlation import correlation_scope
@@ -525,6 +529,28 @@ def _finalize_job_failed_workspace_error(
     _touch_workspace(session, ws)
     if ws.workspace_id is not None:
         _clear_runtime_capacity_reservation(session, ws.workspace_id)
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_JOB_FAILED.value,
+        resource_type="workspace",
+        resource_id=ws.workspace_id,
+        actor_user_id=job.requested_by_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.FAILURE.value,
+        workspace_id=ws.workspace_id,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        reason=message[:4096],
+        metadata={"job_type": job.job_type, "failure_stage": fs},
+    )
+    record_usage(
+        session,
+        workspace_id=int(ws.workspace_id),
+        owner_user_id=int(ws.owner_user_id),
+        event_type=UsageEventType.WORKSPACE_JOB_FAILED.value,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+    )
 
 
 def _resolve_orchestrator_result_failure(
@@ -598,6 +624,29 @@ def _finalize_runtime_running_success(
         correlation_id=job.correlation_id,
     )
     _gateway_try_register_running(ws, internal_endpoint)
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
+        resource_type="workspace",
+        resource_id=wid,
+        actor_user_id=job.requested_by_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        node_id=node_id,
+        correlation_id=job.correlation_id,
+        metadata={"job_type": job.job_type, "new_status": WorkspaceStatus.RUNNING.value},
+    )
+    record_usage(
+        session,
+        workspace_id=wid,
+        owner_user_id=int(ws.owner_user_id),
+        event_type=UsageEventType.WORKSPACE_STARTED.value,
+        node_id=node_id,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+    )
 
 
 def _finalize_bringup_result(
@@ -653,6 +702,27 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
             correlation_id=job.correlation_id,
         )
         _gateway_try_deregister(wid)
+        record_audit(
+            session,
+            action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
+            resource_type="workspace",
+            resource_id=wid,
+            actor_user_id=job.requested_by_user_id,
+            actor_type=AuditActorType.SYSTEM.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            workspace_id=wid,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+            metadata={"job_type": job.job_type, "new_status": WorkspaceStatus.STOPPED.value},
+        )
+        record_usage(
+            session,
+            workspace_id=wid,
+            owner_user_id=int(ws.owner_user_id),
+            event_type=UsageEventType.WORKSPACE_STOPPED.value,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+        )
         return
 
     msg = _format_issues(result.issues) or "Stop completed without success"
@@ -682,6 +752,27 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
             correlation_id=job.correlation_id,
         )
         _gateway_try_deregister(wid)
+        record_audit(
+            session,
+            action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
+            resource_type="workspace",
+            resource_id=wid,
+            actor_user_id=job.requested_by_user_id,
+            actor_type=AuditActorType.SYSTEM.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            workspace_id=wid,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+            metadata={"job_type": job.job_type, "new_status": WorkspaceStatus.DELETED.value},
+        )
+        record_usage(
+            session,
+            workspace_id=wid,
+            owner_user_id=int(ws.owner_user_id),
+            event_type=UsageEventType.WORKSPACE_DELETED.value,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+        )
         return
 
     msg = _format_issues(result.issues) or "Delete completed without success"
@@ -872,6 +963,28 @@ def _execute_snapshot_create_job(
             workspace_snapshot_id=sid,
             phase="materialized",
         )
+        record_audit(
+            session,
+            action=AuditAction.WORKSPACE_SNAPSHOT_CREATED.value,
+            resource_type="workspace_snapshot",
+            resource_id=sid,
+            actor_user_id=job.requested_by_user_id,
+            actor_type=AuditActorType.SYSTEM.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            workspace_id=wid,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+            metadata={"size_bytes": snap.size_bytes},
+        )
+        record_usage(
+            session,
+            workspace_id=wid,
+            owner_user_id=int(ws.owner_user_id),
+            event_type=UsageEventType.SNAPSHOT_CREATED.value,
+            quantity=int(snap.size_bytes or 0),
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+        )
         return
 
     msg = "; ".join(res.issues or ["snapshot:create:failed"])
@@ -908,6 +1021,19 @@ def _execute_snapshot_create_job(
         workspace_id=wid,
         workspace_snapshot_id=sid,
         phase="create",
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_SNAPSHOT_CREATE_FAILED.value,
+        resource_type="workspace_snapshot",
+        resource_id=sid,
+        actor_user_id=job.requested_by_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.FAILURE.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        reason=msg,
     )
 
 
@@ -1009,6 +1135,26 @@ def _execute_snapshot_restore_job(
             correlation_id=job.correlation_id,
             workspace_id=wid,
             workspace_snapshot_id=sid,
+        )
+        record_audit(
+            session,
+            action=AuditAction.WORKSPACE_SNAPSHOT_RESTORED.value,
+            resource_type="workspace_snapshot",
+            resource_id=sid,
+            actor_user_id=job.requested_by_user_id,
+            actor_type=AuditActorType.SYSTEM.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            workspace_id=wid,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+        )
+        record_usage(
+            session,
+            workspace_id=wid,
+            owner_user_id=int(ws.owner_user_id),
+            event_type=UsageEventType.SNAPSHOT_RESTORED.value,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
         )
         return
 

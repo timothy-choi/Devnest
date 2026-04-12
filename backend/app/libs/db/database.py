@@ -31,6 +31,8 @@ from ...services.workspace_service.models import (  # noqa: F401 — register me
     WorkspaceSession,
     WorkspaceSnapshot,
 )
+from ...services.audit_service.models import AuditLog  # noqa: F401 — register metadata
+from ...services.usage_service.models import WorkspaceUsageRecord  # noqa: F401 — register metadata
 
 _engine = None
 _session_factory = None

@@ -34,6 +34,10 @@ from app.services.workspace_service.services.workspace_event_service import (
     assert_workspace_owner,
     record_workspace_event,
 )
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.service import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +185,19 @@ def create_snapshot(
             "requested_config_version": cfg_v,
         },
     )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_SNAPSHOT_CREATE_REQUESTED.value,
+        resource_type="workspace_snapshot",
+        resource_id=sid,
+        actor_user_id=owner_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=workspace_id,
+        job_id=jid,
+        correlation_id=cid,
+        metadata={"snapshot_name": name.strip()[:255]},
+    )
     session.commit()
     session.refresh(snap)
     return CreateSnapshotResult(
@@ -258,6 +275,16 @@ def delete_snapshot(
         LogEvent.WORKSPACE_SNAPSHOT_DELETED,
         workspace_id=wid,
         workspace_snapshot_id=sid,
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_SNAPSHOT_DELETED.value,
+        resource_type="workspace_snapshot",
+        resource_id=sid,
+        actor_user_id=owner_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
     )
     session.delete(snap)
     session.commit()
@@ -349,6 +376,18 @@ def restore_snapshot(
             "workspace_snapshot_id": snap.workspace_snapshot_id,
             "requested_config_version": cfg_v,
         },
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_SNAPSHOT_RESTORE_REQUESTED.value,
+        resource_type="workspace_snapshot",
+        resource_id=sid,
+        actor_user_id=owner_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
+        job_id=jid,
+        correlation_id=cid,
     )
     session.commit()
     session.refresh(snap)

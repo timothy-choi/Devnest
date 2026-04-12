@@ -16,6 +16,10 @@ from app.libs.db.database import get_db
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.security.dependencies import require_internal_api_key
 from app.libs.security.internal_auth import InternalApiScope
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.service import record_usage
 
 from ...models import ScaleDownEvaluation, ScaleUpEvaluation
 from ...service import (
@@ -90,6 +94,21 @@ def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> Provisi
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(e),
         ) from e
+    record_audit(
+        session,
+        action=AuditAction.AUTOSCALER_SCALE_UP.value,
+        resource_type="node",
+        resource_id=(node.node_key if node else None),
+        actor_type=AuditActorType.INTERNAL_SERVICE.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        node_id=(node.node_key if node else None),
+        metadata={"instance_id": (node.provider_instance_id or "") if node else None},
+    )
+    record_usage(
+        session,
+        event_type=UsageEventType.NODE_PROVISIONED.value,
+        node_id=(node.node_key if node else None),
+    )
     session.commit()
     iid = (node.provider_instance_id or "").strip() if node else ""
     return ProvisionOneResponse(
@@ -117,5 +136,19 @@ def post_autoscaler_reclaim_one_idle(session: Session = Depends(get_db)) -> Recl
     if node is None:
         down = evaluate_scale_down(session)
         return ReclaimOneResponse(reclaimed=False, node_key=None, reason=down.reason)
+    record_audit(
+        session,
+        action=AuditAction.AUTOSCALER_SCALE_DOWN.value,
+        resource_type="node",
+        resource_id=node.node_key,
+        actor_type=AuditActorType.INTERNAL_SERVICE.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        node_id=node.node_key,
+    )
+    record_usage(
+        session,
+        event_type=UsageEventType.NODE_TERMINATED.value,
+        node_id=node.node_key,
+    )
     session.commit()
     return ReclaimOneResponse(reclaimed=True, node_key=node.node_key, reason=None)

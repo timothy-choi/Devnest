@@ -121,6 +121,8 @@ class LogEvent:
     WORKSPACE_ACCESS_DENIED = "workspace.access.denied"
     WORKSPACE_ACCESS_GRANTED = "workspace.access.granted"
 
+    AUDIT_EVENT_RECORDED = "audit.event.recorded"
+
 
 def log_event(
     logger: logging.Logger,
