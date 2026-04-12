@@ -303,9 +303,8 @@ class TestBringUpNetnsFailureBeforeAttach:
         mock_runtime.get_container_netns_ref.side_effect = netns_side_effect
 
         svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
-        # Second get_container_netns_ref runs inside the topology try; NetnsRefError is not wrapped
-        # as WorkspaceBringUpError (only TopologyError is).
-        with pytest.raises(NetnsRefError, match="stale pid"):
+        # First call: ``ensure_running_runtime_only``; second: attach handoff — wrapped as bring-up error.
+        with pytest.raises(WorkspaceBringUpError, match="runtime topology handoff failed"):
             svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
 
         mock_topology.ensure_node_topology.assert_called_once()

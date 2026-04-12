@@ -42,6 +42,9 @@ def _workspace_control_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE", "1")
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "1")
     monkeypatch.setenv("WORKSPACE_CONTAINER_IMAGE", "nginx:alpine")
+    # Hermetic placement / execution for parallel CI (xdist): avoid stale env forcing ec2-only or SSM.
+    monkeypatch.setenv("DEVNEST_NODE_PROVIDER", "all")
+    monkeypatch.delenv("DEVNEST_EXECUTION_MODE", raising=False)
     from app.libs.common.config import get_settings
 
     get_settings.cache_clear()

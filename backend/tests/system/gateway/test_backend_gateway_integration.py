@@ -167,8 +167,8 @@ def test_bringup_failure_does_not_register_gateway_route(
         "gateway-system-injected-bringup-failure",
     )
     monkeypatch.setattr(
-        "app.workers.workspace_job_runner.build_default_orchestrator_for_session",
-        lambda _session: orch,
+        "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
+        lambda _session, _ws, _job: orch,
     )
 
     helpers.process_job(client, jid)

@@ -8,6 +8,8 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.services.auth_service.models import UserAuth
+from app.services.placement_service.bootstrap import ensure_default_local_execution_node
+from app.services.placement_service.models import ExecutionNode  # noqa: F401 — register metadata
 from app.services.workspace_service.models import (  # noqa: F401 — register metadata
     Workspace,
     WorkspaceConfig,
@@ -25,6 +27,9 @@ def workspace_job_worker_engine() -> Engine:
         poolclass=StaticPool,
     )
     SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        ensure_default_local_execution_node(session)
+        session.commit()
     return engine
 
 

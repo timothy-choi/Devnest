@@ -21,6 +21,7 @@ from ...services.notification_service.models import (  # noqa: F401 — register
     PushSubscription,
 )
 from ...services.user_service.models import UserProfile, UserSettings  # noqa: F401 — register metadata
+from ...services.placement_service.models import ExecutionNode  # noqa: F401 — register metadata
 from ...services.workspace_service.models import (  # noqa: F401 — register metadata
     Workspace,
     WorkspaceConfig,
@@ -77,4 +78,10 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    SQLModel.metadata.create_all(get_engine())
+    engine = get_engine()
+    SQLModel.metadata.create_all(engine)
+    from app.services.placement_service.bootstrap import ensure_default_local_execution_node
+
+    with Session(engine) as session:
+        ensure_default_local_execution_node(session)
+        session.commit()

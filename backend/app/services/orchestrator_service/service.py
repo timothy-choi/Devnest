@@ -14,8 +14,8 @@ import logging
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 from app.libs.probes.interfaces import ProbeRunner
 from app.libs.runtime.errors import RuntimeAdapterError
@@ -30,6 +30,10 @@ from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
 from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult
+
+from app.services.node_execution_service.workspace_project_dir import (
+    default_local_ensure_workspace_project_dir,
+)
 
 from .errors import (
     WorkspaceBringUpError,
@@ -54,15 +58,26 @@ _CONFIG_VERSION_LABEL = "devnest.config_version"
 
 logger = logging.getLogger(__name__)
 
+_EnsureWorkspaceProjectDir = Callable[[str, str], str]
+
+
+def _env_skip_linux_topology_attachment() -> bool:
+    """True when ``DbTopologyAdapter`` skips Linux veth wiring (same truthiness as adapter env check)."""
+    return os.environ.get("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
 
 @dataclass(frozen=True)
 class _BringUpContext:
-    """Validated bring-up inputs and derived paths (no I/O beyond ``host_dir`` creation)."""
+    """Validated bring-up inputs; ``workspace_host_path`` is on the execution host (local or remote)."""
 
     wid: str
     ws_int: int
     container_name: str
-    host_dir: Path
+    workspace_host_path: str
     labels: dict[str, str]
 
 
@@ -154,6 +169,7 @@ class DefaultOrchestratorService(OrchestratorService):
         node_id: str = "node-1",
         workspace_projects_base: str | None = None,
         workspace_image: str | None = None,
+        ensure_workspace_project_dir: _EnsureWorkspaceProjectDir | None = None,
     ) -> None:
         self._runtime_adapter = runtime_adapter
         self._topology_service = topology_service
@@ -165,6 +181,9 @@ class DefaultOrchestratorService(OrchestratorService):
             "devnest-workspaces",
         )
         self._workspace_image = workspace_image
+        self._ensure_workspace_project_dir = (
+            ensure_workspace_project_dir or default_local_ensure_workspace_project_dir
+        )
 
     def _bring_up_build_context(
         self,
@@ -178,11 +197,10 @@ class DefaultOrchestratorService(OrchestratorService):
 
         ws_int = _parse_topology_workspace_id(wid)
         name = _sanitize_container_name(wid)
-        host_dir = Path(self._workspace_projects_base).resolve() / wid
         try:
-            host_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise WorkspaceBringUpError(f"cannot create workspace project directory {host_dir}: {e}") from e
+            workspace_host_path = self._ensure_workspace_project_dir(self._workspace_projects_base, wid)
+        except ValueError as e:
+            raise WorkspaceBringUpError(str(e)) from e
 
         labels: dict[str, str] = {
             "devnest.workspace_id": wid,
@@ -195,12 +213,12 @@ class DefaultOrchestratorService(OrchestratorService):
             wid=wid,
             ws_int=ws_int,
             container_name=name,
-            host_dir=host_dir,
+            workspace_host_path=workspace_host_path,
             labels=labels,
         )
 
     def _bring_up_start_container(self, ctx: _BringUpContext) -> EnsureRunningRuntimeResult:
-        """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns)."""
+        """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns unless skip-linux-attach)."""
         try:
             return ensure_running_runtime_only(
                 self._runtime_adapter,
@@ -208,7 +226,8 @@ class DefaultOrchestratorService(OrchestratorService):
                 image=self._workspace_image,
                 ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
                 labels=ctx.labels,
-                workspace_host_path=str(ctx.host_dir),
+                workspace_host_path=ctx.workspace_host_path,
+                skip_netns_resolution=_env_skip_linux_topology_attachment(),
             )
         except RuntimeAdapterError as e:
             raise WorkspaceBringUpError(f"runtime bring-up failed: {e}") from e
@@ -229,7 +248,16 @@ class DefaultOrchestratorService(OrchestratorService):
                 node_id=self._node_id,
                 workspace_id=ctx.ws_int,
             )
-            netns = self._runtime_adapter.get_container_netns_ref(container_id=running.container_id)
+            # When Linux veth attachment is disabled, ``ensure_running_runtime_only`` already used a
+            # placeholder netns; reuse it (no second ``get_container_netns_ref``).
+            if _env_skip_linux_topology_attachment():
+                netns = NetnsRefResult(
+                    container_id=running.container_id,
+                    pid=running.pid,
+                    netns_ref=running.netns_ref,
+                )
+            else:
+                netns = self._runtime_adapter.get_container_netns_ref(container_id=running.container_id)
             attach_res = self._topology_service.attach_workspace(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
@@ -240,6 +268,8 @@ class DefaultOrchestratorService(OrchestratorService):
             )
         except TopologyError as e:
             raise WorkspaceBringUpError(f"topology bring-up failed: {e}") from e
+        except RuntimeAdapterError as e:
+            raise WorkspaceBringUpError(f"runtime topology handoff failed: {e}") from e
         return netns, attach_res
 
     def _bring_up_run_probe(

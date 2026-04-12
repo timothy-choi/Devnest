@@ -72,6 +72,61 @@ class Settings(BaseSettings):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
+    # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
+    aws_region: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    # Placement filter: ``all`` (default) = local + EC2 nodes; ``local`` / ``ec2`` = restrict pool.
+    devnest_node_provider: str = "all"
+    # Default SSH user when registering EC2 nodes (Amazon Linux / Ubuntu images).
+    devnest_ec2_ssh_user_default: str = "ubuntu"
+    # Default ``ExecutionNode.execution_mode`` for new EC2 registry rows (``ssm_docker`` preferred; ``ssh_docker`` fallback).
+    devnest_ec2_default_execution_mode: str = "ssm_docker"
+    # Optional worker override: ``local`` = force worker-local Docker for local provider nodes only;
+    # ``ssm`` = force SSM path for EC2 nodes only; empty = use each node's ``execution_mode``.
+    devnest_execution_mode: str = ""
+
+    @field_validator("devnest_ec2_default_execution_mode", mode="before")
+    @classmethod
+    def _normalize_devnest_ec2_default_execution_mode(cls, v):  # noqa: ANN001
+        s = str(v or "").strip().lower()
+        if s in ("ssh_docker", "ssm_docker"):
+            return s
+        return "ssm_docker"
+
+    @field_validator("devnest_execution_mode", mode="before")
+    @classmethod
+    def _normalize_devnest_execution_mode(cls, v):  # noqa: ANN001
+        s = str(v or "").strip().lower()
+        if s in ("", "local", "ssm"):
+            return s
+        return ""
+
+    @field_validator("devnest_node_provider", mode="before")
+    @classmethod
+    def _normalize_devnest_node_provider(cls, v):  # noqa: ANN001
+        if v is None:
+            return "all"
+        s = str(v).strip().lower()
+        if s in ("", "any", "*"):
+            return "all"
+        if s in ("local", "ec2", "all"):
+            return s
+        return "all"
+
+    # EC2 provisioning defaults (explicit; empty AMI/subnet/SG means provision CLI/API must pass overrides).
+    devnest_ec2_ami_id: str = ""
+    devnest_ec2_instance_type: str = "t3.medium"
+    devnest_ec2_subnet_id: str = ""
+    # Comma-separated security group ids for ``run_instances`` (VPC).
+    devnest_ec2_security_group_ids: str = ""
+    # IAM instance profile **name** (not ARN) attached to new instances (SSM agent / instance role).
+    devnest_ec2_instance_profile: str = ""
+    # Optional EC2 key pair name (prefer SSM + instance role; keys are often unnecessary).
+    devnest_ec2_key_name: str = ""
+    # Prefix for ``{prefix}:managed`` and ``{prefix}:node_key`` tags on provisioned instances.
+    devnest_ec2_tag_prefix: str = "devnest"
+
 
 @lru_cache
 def get_settings() -> Settings:

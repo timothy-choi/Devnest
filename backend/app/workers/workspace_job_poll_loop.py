@@ -23,7 +23,7 @@ import threading
 import time
 
 from app.libs.db.database import get_engine
-from app.services.orchestrator_service.app_factory import build_default_orchestrator_for_session
+from app.services.orchestrator_service.app_factory import build_orchestrator_for_workspace_job
 from app.services.orchestrator_service.errors import AppOrchestratorBindingError
 
 from .workspace_job_worker.worker import poll_workspace_jobs_tick
@@ -93,7 +93,7 @@ def run_poll_loop(
         try:
             tick = poll_workspace_jobs_tick(
                 engine,
-                get_orchestrator=build_default_orchestrator_for_session,
+                get_orchestrator=build_orchestrator_for_workspace_job,
                 limit=limit,
             )
         except AppOrchestratorBindingError as e:

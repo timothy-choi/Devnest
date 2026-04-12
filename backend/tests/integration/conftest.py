@@ -18,6 +18,7 @@ from sqlmodel import Session, SQLModel
 
 from app.libs.common.config import get_settings
 from app.libs.db.database import init_db, reset_engine
+from app.services.placement_service.bootstrap import ensure_default_local_execution_node
 
 
 ADMIN_DATABASE_URL = "postgresql+psycopg://test:test@127.0.0.1:5432/postgres"
@@ -110,6 +111,10 @@ def _clean_tables(test_engine: Engine):
                 text(f'TRUNCATE TABLE "{table.name}" RESTART IDENTITY CASCADE')
             )
         conn.commit()
+
+    with Session(test_engine) as seed_session:
+        ensure_default_local_execution_node(seed_session)
+        seed_session.commit()
 
     yield
 
