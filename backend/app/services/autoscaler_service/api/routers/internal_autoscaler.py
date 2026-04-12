@@ -1,17 +1,21 @@
 """
 Internal admin routes: autoscaler evaluate / provision / reclaim.
 
-Requires ``X-Internal-API-Key``. Does not replace explicit EC2 lifecycle routes under
+Requires ``X-Internal-API-Key`` scoped to autoscaler (or legacy ``INTERNAL_API_KEY``). Does not replace explicit EC2 lifecycle routes under
 ``/internal/execution-nodes`` — this is a thin orchestration layer for fleet ops.
 """
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session
 
 from app.libs.db.database import get_db
-from app.services.notification_service.api.dependencies import require_internal_api_key
+from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.security.dependencies import require_internal_api_key
+from app.libs.security.internal_auth import InternalApiScope
 
 from ...models import ScaleDownEvaluation, ScaleUpEvaluation
 from ...service import (
@@ -28,10 +32,12 @@ from ..schemas import (
     ScaleUpEvaluationResponse,
 )
 
+_logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/internal/autoscaler",
     tags=["internal-autoscaler"],
-    dependencies=[Depends(require_internal_api_key)],
+    dependencies=[Depends(require_internal_api_key(InternalApiScope.AUTOSCALER))],
 )
 
 
@@ -68,6 +74,7 @@ def get_autoscaler_evaluate(session: Session = Depends(get_db)) -> AutoscalerEva
     summary="Provision one EC2 node if scale-up evaluation allows",
 )
 def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> ProvisionOneResponse:
+    log_event(_logger, LogEvent.AUDIT_INTERNAL_AUTOSCALER_PROVISION_ONE)
     ev = evaluate_scale_up(session, insufficient_capacity=True)
     if not ev.should_provision:
         return ProvisionOneResponse(
@@ -99,6 +106,7 @@ def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> Provisi
     summary="Drain and terminate one idle EC2 node (destructive; conservative policy)",
 )
 def post_autoscaler_reclaim_one_idle(session: Session = Depends(get_db)) -> ReclaimOneResponse:
+    log_event(_logger, LogEvent.AUDIT_INTERNAL_AUTOSCALER_RECLAIM_ONE)
     try:
         node = reclaim_one_idle_ec2_node(session)
     except Exception as e:

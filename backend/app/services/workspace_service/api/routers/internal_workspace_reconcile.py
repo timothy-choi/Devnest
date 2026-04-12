@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlmodel import Session
 
 from app.libs.db.database import get_db
-from app.services.notification_service.api.dependencies import require_internal_api_key
+from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.security.dependencies import require_internal_api_key
+from app.libs.security.internal_auth import InternalApiScope
 from app.services.workspace_service.api.schemas.workspace_schemas import WorkspaceIntentAcceptedResponse
 from app.services.workspace_service.errors import (
     WorkspaceBusyError,
@@ -15,10 +19,12 @@ from app.services.workspace_service.errors import (
 )
 from app.services.workspace_service.services import workspace_intent_service
 
+_logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/internal/workspaces",
     tags=["internal-workspaces"],
-    dependencies=[Depends(require_internal_api_key)],
+    dependencies=[Depends(require_internal_api_key(InternalApiScope.WORKSPACE_RECONCILE))],
 )
 
 
@@ -37,8 +43,14 @@ def post_enqueue_reconcile_runtime(
     workspace_id: int,
     session: Session = Depends(get_db),
 ) -> WorkspaceIntentAcceptedResponse:
+    cid = getattr(request.state, "correlation_id", None)
+    log_event(
+        _logger,
+        LogEvent.AUDIT_INTERNAL_WORKSPACE_RECONCILE_RUNTIME,
+        correlation_id=cid,
+        workspace_id=workspace_id,
+    )
     try:
-        cid = getattr(request.state, "correlation_id", None)
         out = workspace_intent_service.enqueue_reconcile_runtime_job(
             session,
             workspace_id=workspace_id,

@@ -1,18 +1,22 @@
 """
 Internal admin routes: EC2 provisioning and execution-node lifecycle.
 
-Requires ``X-Internal-API-Key``. Intended for operators and automation — not end-user facing.
+Requires ``X-Internal-API-Key`` scoped to infrastructure / execution nodes (or legacy ``INTERNAL_API_KEY``).
+Intended for operators and automation — not end-user facing.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlmodel import Session
 
 from app.libs.db.database import get_db
-from app.services.notification_service.api.dependencies import require_internal_api_key
+from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.security.dependencies import require_internal_api_key
+from app.libs.security.internal_auth import InternalApiScope
 from app.services.placement_service.errors import ExecutionNodeNotFoundError
 from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
 
@@ -34,11 +38,17 @@ from ..schemas import (
     SyncExecutionNodeBody,
 )
 
+_logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/internal/execution-nodes",
     tags=["internal-execution-nodes"],
-    dependencies=[Depends(require_internal_api_key)],
+    dependencies=[Depends(require_internal_api_key(InternalApiScope.INFRASTRUCTURE))],
 )
+
+
+def _audit_mutation(action: str, **fields: object) -> None:
+    log_event(_logger, LogEvent.AUDIT_INTERNAL_EXECUTION_NODES_MUTATION, action=action, **fields)
 
 
 def _select_kwargs(body: NodeKeyOrIdBody) -> dict:
@@ -93,6 +103,7 @@ def post_provision_execution_node(
     body: ProvisionExecutionNodeRequest = Body(default_factory=ProvisionExecutionNodeRequest),
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("provision")
     b = body
     try:
         req = _merge_provision_request(b)
@@ -122,6 +133,7 @@ def post_register_existing_ec2(
     body: RegisterExistingEc2Body,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("register_existing", instance_id=body.instance_id.strip())
     try:
         node = register_existing_ec2_node(
             session,
@@ -148,6 +160,7 @@ def post_sync_execution_node(
     body: SyncExecutionNodeBody,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("sync", node_id=body.node_id, node_key=body.node_key)
     try:
         node = sync_node_state(
             session,
@@ -174,6 +187,7 @@ def post_drain_execution_node(
     body: NodeKeyOrIdBody,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("drain", node_id=body.node_id, node_key=body.node_key)
     try:
         node = mark_node_draining(session, **_select_kwargs(body))
         session.commit()
@@ -192,6 +206,7 @@ def post_deregister_execution_node(
     body: NodeKeyOrIdBody,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("deregister", node_id=body.node_id, node_key=body.node_key)
     try:
         node = deregister_node(session, **_select_kwargs(body))
         session.commit()
@@ -210,6 +225,7 @@ def post_terminate_execution_node(
     body: NodeKeyOrIdBody,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("terminate", node_id=body.node_id, node_key=body.node_key)
     try:
         node = terminate_ec2_node(session, **_select_kwargs(body))
         session.commit()

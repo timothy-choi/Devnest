@@ -45,6 +45,7 @@ def get_ready() -> dict[str, str]:
     summary="Prometheus metrics",
     description=(
         "OpenMetrics/Prometheus exposition. Refreshes queue and entity-count gauges per scrape. "
+        "Includes ``devnest_internal_auth_failures_total`` (per internal surface scope). "
         "TODO: secure behind internal network or bearer token at the edge."
     ),
 )
