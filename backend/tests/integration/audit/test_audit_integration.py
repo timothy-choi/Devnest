@@ -198,7 +198,7 @@ class TestAdminAuditApi:
 
         resp = client.get(
             f"/internal/audit-logs/workspaces/{wid}",
-            headers={"X-Internal-API-Key": "integration-test-key"},
+            headers={"X-Internal-API-Key": "integration-test-internal-key"},
         )
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()
@@ -216,7 +216,7 @@ class TestAdminAuditApi:
 
         resp = client.get(
             f"/internal/audit-logs/users/{uid}",
-            headers={"X-Internal-API-Key": "integration-test-key"},
+            headers={"X-Internal-API-Key": "integration-test-internal-key"},
         )
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()
@@ -239,7 +239,7 @@ class TestAdminUsageApi:
 
         resp = client.get(
             f"/internal/usage/workspaces/{wid}",
-            headers={"X-Internal-API-Key": "integration-test-key"},
+            headers={"X-Internal-API-Key": "integration-test-internal-key"},
         )
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()
@@ -257,7 +257,7 @@ class TestAdminUsageApi:
 
         resp = client.get(
             f"/internal/usage/users/{uid}",
-            headers={"X-Internal-API-Key": "integration-test-key"},
+            headers={"X-Internal-API-Key": "integration-test-internal-key"},
         )
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()
