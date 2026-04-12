@@ -48,6 +48,10 @@ from app.services.orchestrator_service.errors import (
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
 from app.services.autoscaler_service.service import maybe_provision_on_no_schedulable_capacity
+from app.services.placement_service.constants import (
+    DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+)
 from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.orchestrator_service.results import (
@@ -95,6 +99,21 @@ _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
 
 
+def _clear_runtime_capacity_reservation(session: Session, workspace_id: int) -> None:
+    """Zero ``WorkspaceRuntime.reserved_*`` when workspace moves to a non-scheduling terminal error path."""
+    rt = session.exec(
+        select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
+    ).first()
+    if rt is None:
+        return
+    if float(rt.reserved_cpu or 0) <= 0 and int(rt.reserved_memory_mb or 0) <= 0:
+        return
+    rt.reserved_cpu = 0.0
+    rt.reserved_memory_mb = 0
+    rt.updated_at = _now()
+    session.add(rt)
+
+
 def _fail_job_from_placement(
     session: Session,
     ws: Workspace,
@@ -108,6 +127,8 @@ def _fail_job_from_placement(
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_PLACEMENT, message)
     _touch_workspace(session, ws)
+    assert ws.workspace_id is not None
+    _clear_runtime_capacity_reservation(session, ws.workspace_id)
 
 
 def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
@@ -117,6 +138,8 @@ def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: Wo
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_ORCHESTRATOR_BINDING, message)
     _touch_workspace(session, ws)
+    assert ws.workspace_id is not None
+    _clear_runtime_capacity_reservation(session, ws.workspace_id)
 
 
 def _worker_sessionmaker(bind: Engine):
@@ -272,6 +295,8 @@ def _apply_runtime_bringup_like(
     internal_endpoint: str | None,
     config_version: int,
     probe_healthy: bool | None,
+    reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
+    reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 ) -> None:
     """Persist placement + health snapshot after a successful bring-up / restart / update (running)."""
     rt = _get_or_create_runtime(session, workspace_id)
@@ -282,6 +307,13 @@ def _apply_runtime_bringup_like(
     rt.container_state = container_state
     rt.internal_endpoint = internal_endpoint
     rt.config_version = config_version
+    nk = (node_id or "").strip()
+    if nk:
+        rt.reserved_cpu = float(reserved_cpu)
+        rt.reserved_memory_mb = int(reserved_memory_mb)
+    else:
+        rt.reserved_cpu = 0.0
+        rt.reserved_memory_mb = 0
     rt.health_status = _health_from_probe(probe_healthy)
     if probe_healthy is True:
         rt.last_heartbeat_at = ts
@@ -297,6 +329,8 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
         rt.container_id = result.container_id
     if result.container_state is not None:
         rt.container_state = result.container_state
+    rt.reserved_cpu = 0.0
+    rt.reserved_memory_mb = 0
     rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     rt.updated_at = ts
     session.add(rt)
@@ -313,6 +347,8 @@ def _clear_runtime_after_delete(session: Session, workspace_id: int) -> None:
     row.container_id = None
     row.container_state = "deleted"
     row.internal_endpoint = None
+    row.reserved_cpu = 0.0
+    row.reserved_memory_mb = 0
     row.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     row.last_heartbeat_at = None
     row.updated_at = ts
@@ -428,6 +464,8 @@ def _finalize_job_failed_workspace_error(
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_JOB, message)
     _touch_workspace(session, ws)
+    if ws.workspace_id is not None:
+        _clear_runtime_capacity_reservation(session, ws.workspace_id)
 
 
 def _finalize_runtime_running_success(
@@ -442,6 +480,8 @@ def _finalize_runtime_running_success(
     container_state: str | None,
     internal_endpoint: str | None,
     probe_healthy: bool | None,
+    reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
+    reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 ) -> None:
     """
     Shared success path for CREATE/START, RESTART, and UPDATE (restart path): persist runtime,
@@ -459,6 +499,8 @@ def _finalize_runtime_running_success(
         internal_endpoint=internal_endpoint,
         config_version=config_version,
         probe_healthy=probe_healthy,
+        reserved_cpu=reserved_cpu,
+        reserved_memory_mb=reserved_memory_mb,
     )
     _mark_job_succeeded(session, job)
     ws.status = WorkspaceStatus.RUNNING.value
@@ -595,6 +637,8 @@ def _finalize_update_result(
         rt.container_state = result.container_state
         rt.internal_endpoint = result.internal_endpoint
         rt.config_version = cfg_v
+        rt.reserved_cpu = 0.0
+        rt.reserved_memory_mb = 0
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
         rt.last_heartbeat_at = None
         rt.updated_at = ts
@@ -779,6 +823,7 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
         ws.status = WorkspaceStatus.ERROR.value
         _workspace_set_error(ws, _ERROR_CODE_ORCH, str(e))
         _touch_workspace(session, ws)
+        _clear_runtime_capacity_reservation(session, wid)
     except UnsupportedWorkspaceJobTypeError as e:
         logger.error(
             "workspace_job_unsupported_type",
@@ -788,6 +833,7 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
         ws.status = WorkspaceStatus.ERROR.value
         _workspace_set_error(ws, _ERROR_CODE_JOB, str(e))
         _touch_workspace(session, ws)
+        _clear_runtime_capacity_reservation(session, wid)
 
     _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
 

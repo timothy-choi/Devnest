@@ -17,15 +17,19 @@ class ExecutionNode(SQLModel, table=True):
     - **Primary key** ``id`` — stable control-plane identifier (use this for FKs in future phases).
     - **Placement identity** ``node_key`` — string wired into :class:`~app.services.workspace_service.models.WorkspaceRuntime.node_id` and the orchestrator/topology stack (same role as historical ``DEVNEST_NODE_ID``).
     - **Provider** — ``provider_type`` / ``provider_instance_id`` reserve space for EC2 instance IDs without provisioning logic yet.
-    - **Capacity** — ``total_*`` vs ``allocatable_*`` support future reservation accounting; V1 policy filters on allocatable only.
+    - **Capacity** — ``total_*`` is the catalog envelope; ``allocatable_*`` is what the scheduler may use
+      (after node-level overhead). **Effective free** capacity subtracts sums of
+      ``WorkspaceRuntime.reserved_*`` for workloads pinned to this ``node_key`` that still hold a
+      schedulable slot (not ``STOPPED``, ``DELETED``, or ``ERROR``; see
+      :mod:`app.services.placement_service.capacity`).
 
     **Status vs schedulable:** only ``READY`` + ``schedulable=True`` are candidates for V1 placement.
     ``PROVISIONING``, ``NOT_READY``, ``DRAINING``, ``TERMINATING``, ``TERMINATED``, and ``ERROR`` are
     excluded. EC2 lifecycle is driven by :mod:`app.services.infrastructure_service` plus EC2/SSM sync.
 
-    **Capacity:** ``allocatable_*`` must not exceed ``total_*`` (enforced at DB layer). V1 placement
-    filters on allocatable only and does not decrement it — concurrent workspaces can exceed
-    real capacity until reservation accounting lands (TODO).
+    **Capacity:** ``allocatable_*`` must not exceed ``total_*`` (enforced at DB layer). Placement uses
+    effective free = ``allocatable_*`` minus workspace runtime reservations (ledger on
+    ``WorkspaceRuntime``).
 
     **Execution:** ``execution_mode`` selects how :mod:`app.services.node_execution_service` builds
     a Docker client and Linux command runner. ``LOCAL_DOCKER`` uses the worker process environment
@@ -42,7 +46,7 @@ class ExecutionNode(SQLModel, table=True):
     ``availability_zone``, ``instance_type``, ``public_ip``, ``iam_instance_profile_name``, and
     ``last_synced_at`` are filled by :mod:`app.services.providers.ec2_provider` (no provisioning).
 
-    TODO: Node agent heartbeats, persistent CPU/RAM reservations, auto sync on events.
+    TODO: Node agent heartbeats, cgroup usage telemetry vs reservation, auto sync on events.
     """
 
     __tablename__ = "execution_node"
