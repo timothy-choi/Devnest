@@ -89,6 +89,17 @@ class LogEvent:
     EC2_NODE_PROVISIONED = "ec2.node.provisioned"
     EC2_NODE_TERMINATED = "ec2.node.terminated"
 
+    # Internal control-plane audit (who triggered sensitive HTTP surfaces; no secrets in fields).
+    AUDIT_INTERNAL_WORKSPACE_JOBS_PROCESS = "audit.internal.workspace_jobs.process"
+    AUDIT_INTERNAL_WORKSPACE_RECONCILE_RUNTIME = "audit.internal.workspace.reconcile_runtime"
+    AUDIT_INTERNAL_AUTOSCALER_PROVISION_ONE = "audit.internal.autoscaler.provision_one"
+    AUDIT_INTERNAL_AUTOSCALER_RECLAIM_ONE = "audit.internal.autoscaler.reclaim_one"
+    AUDIT_INTERNAL_EXECUTION_NODES_MUTATION = "audit.internal.execution_nodes.mutation"
+    AUDIT_INTERNAL_NOTIFICATIONS_CREATE = "audit.internal.notifications.create"
+    AUDIT_INTERNAL_NOTIFICATIONS_RETRY_DELIVERY = "audit.internal.notifications.retry_delivery"
+
+    SECURITY_INTERNAL_AUTH_FAILED = "security.internal.auth_failed"
+
 
 def log_event(
     logger: logging.Logger,

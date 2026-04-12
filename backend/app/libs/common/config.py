@@ -29,8 +29,15 @@ class Settings(BaseSettings):
     oauth_google_client_id: str = ""
     oauth_google_client_secret: str = ""
 
-    # Service-to-service: required for POST /internal/notifications (header X-Internal-API-Key).
+    # --- Internal platform auth (sensitive; header X-Internal-API-Key) ---
+    # Legacy single key: used for any internal surface whose scope-specific key is unset.
+    # Prefer per-scope keys in production so workers, autoscaler, infra automation, etc. do not share one secret.
     internal_api_key: str = ""
+    internal_api_key_workspace_jobs: str = ""
+    internal_api_key_workspace_reconcile: str = ""
+    internal_api_key_autoscaler: str = ""
+    internal_api_key_infrastructure: str = ""
+    internal_api_key_notifications: str = ""
 
     # Workspace orchestrator (Docker): image for workspace containers; empty falls back to env then nginx:alpine.
     workspace_container_image: str = ""
