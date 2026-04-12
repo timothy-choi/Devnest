@@ -24,3 +24,4 @@ class ExecutionNodeExecutionMode(str, Enum):
 
     LOCAL_DOCKER = "local_docker"
     SSH_DOCKER = "ssh_docker"
+    SSM_DOCKER = "ssm_docker"

@@ -1,8 +1,8 @@
 """Construct a real :class:`DefaultOrchestratorService` for API / worker execution (request-scoped DB session).
 
 Uses :mod:`app.services.node_execution_service` to bind Docker + Linux commands to the placed
-``ExecutionNode`` (local engine or ``ssh_docker``). Topology persistence stays :class:`DbTopologyAdapter`;
-probes use :class:`DefaultProbeRunner` (remote service checks via SSH ``nc`` when applicable).
+``ExecutionNode`` (local engine, ``ssh_docker``, or ``ssm_docker``). Topology persistence stays
+:class:`DbTopologyAdapter`; probes use :class:`DefaultProbeRunner` (remote checks when a runner is set).
 
 Image and paths are configurable via settings / env; see :func:`build_default_orchestrator_for_session`.
 """
@@ -38,14 +38,13 @@ def build_default_orchestrator_for_session(
 
     When ``execution_node_key`` / ``topology_id`` are omitted, values come from
     ``DEVNEST_NODE_ID`` / ``DEVNEST_TOPOLOGY_ID`` (legacy single-process dev). Docker and topology
-    commands still use the local host unless a matching ``ExecutionNode`` row selects ``ssh_docker``.
+    commands still use the local host unless a matching ``ExecutionNode`` row selects a remote mode.
 
-    For ``ssh_docker``, ``workspace_projects_base`` (settings / default temp dir) must be an
-    **absolute path on the remote Docker host**; the node execution layer creates workspace dirs
-    there via SSH.
+    For ``ssh_docker`` / ``ssm_docker``, ``workspace_projects_base`` must be an **absolute path on the
+    remote Docker host**; workspace dirs are created there via SSH or SSM respectively.
 
     Raises:
-        AppOrchestratorBindingError: if Docker / SSH binding fails.
+        AppOrchestratorBindingError: if Docker / SSH / SSM binding fails.
     """
     try:
         bundle = resolve_node_execution_bundle(session, execution_node_key)
@@ -74,7 +73,14 @@ def build_default_orchestrator_for_session(
     if not node_id:
         node_id = (os.environ.get("DEVNEST_NODE_ID", "node-1") or "").strip() or "node-1"
 
-    runtime = DockerRuntimeAdapter(client=bundle.docker_client)
+    if bundle.runtime_adapter is not None:
+        runtime = bundle.runtime_adapter
+    else:
+        if bundle.docker_client is None:
+            raise AppOrchestratorBindingError(
+                "node execution bundle has no runtime_adapter and no docker_client",
+            )
+        runtime = DockerRuntimeAdapter(client=bundle.docker_client)
     topology = DbTopologyAdapter(session, command_runner=bundle.topology_command_runner)
     probe = DefaultProbeRunner(
         runtime=runtime,

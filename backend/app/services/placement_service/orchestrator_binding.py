@@ -1,8 +1,8 @@
 """Map workspace jobs to orchestrator placement (node_key + topology_id).
 
 ``node_key`` selects the :class:`~app.services.placement_service.models.ExecutionNode` row used by
-:mod:`app.services.node_execution_service` to build the Docker client and host command runner
-(local engine or ``ssh_docker``). The same key is persisted on ``WorkspaceRuntime.node_id`` after
+:mod:`app.services.node_execution_service` to build runtime + host command execution (local Docker,
+``ssh_docker``, or ``ssm_docker``). The same key is persisted on ``WorkspaceRuntime.node_id`` after
 bring-up. EC2 provisioning and SSM/agent transports are out of scope for V1 (see node execution
 TODOs).
 

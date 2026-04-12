@@ -4,7 +4,7 @@ Register and refresh :class:`~app.services.placement_service.models.ExecutionNod
 Uses ``describe_instances`` / ``describe_instance_types`` only — **no** ``run_instances``,
 autoscaling, or SSM. Operators (or a future provisioner) create instances; DevNest maps them.
 
-SSH keys, security groups, and Docker on the instance are operator concerns (TODO: runbooks).
+SSH keys, security groups, SSM agent, and Docker on the instance are operator concerns (TODO: runbooks).
 """
 
 from __future__ import annotations
@@ -246,7 +246,7 @@ def register_ec2_instance(
     Upsert an :class:`ExecutionNode` for an existing EC2 instance.
 
     - ``node_key`` defaults to ``ec2-{instance_id}``.
-    - ``execution_mode`` defaults to ``ssh_docker`` (Docker on the instance reachable via SSH).
+    - ``execution_mode`` defaults from ``DEVNEST_EC2_DEFAULT_EXECUTION_MODE`` (``ssm_docker`` or ``ssh_docker``).
     - Sets ``schedulable`` and ``status`` from instance state (running → READY + schedulable).
 
     Caller should ``commit`` the session. Does not call ``session.commit()``.
@@ -255,8 +255,17 @@ def register_ec2_instance(
     client = ec2_client or build_ec2_client()
     desc = describe_ec2_instance(iid, ec2_client=client)
     key = (node_key or "").strip() or f"ec2-{iid}"
-    mode = (execution_mode or ExecutionNodeExecutionMode.SSH_DOCKER.value).strip().lower()
-    user = (ssh_user or "").strip() or get_settings().devnest_ec2_ssh_user_default.strip() or "ubuntu"
+    settings = get_settings()
+    default_em = settings.devnest_ec2_default_execution_mode.strip().lower()
+    raw_em = (execution_mode or default_em).strip().lower()
+    allowed = (
+        ExecutionNodeExecutionMode.SSH_DOCKER.value,
+        ExecutionNodeExecutionMode.SSM_DOCKER.value,
+    )
+    if raw_em not in allowed:
+        raw_em = default_em if default_em in allowed else ExecutionNodeExecutionMode.SSM_DOCKER.value
+    mode = raw_em
+    user = (ssh_user or "").strip() or settings.devnest_ec2_ssh_user_default.strip() or "ubuntu"
 
     vcpu, mem_mb = _instance_type_capacity(client, desc.instance_type)
     running = desc.state == "running"

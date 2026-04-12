@@ -7,3 +7,7 @@ class NodeExecutionError(Exception):
 
 class NodeExecutionBindingError(NodeExecutionError):
     """Cannot build Docker client or host command runner for the selected execution node."""
+
+
+class SsmExecutionError(NodeExecutionError):
+    """AWS SSM Run Command failed or returned a non-success invocation status."""

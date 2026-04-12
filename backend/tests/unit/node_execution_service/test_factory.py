@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.libs.runtime.ssm_docker_runtime import SsmDockerRuntimeAdapter
 from app.services.node_execution_service import NodeExecutionBackend, NodeExecutionBundle
 from app.services.node_execution_service.errors import NodeExecutionBindingError
 from app.services.node_execution_service.factory import resolve_node_execution_bundle
@@ -224,3 +225,154 @@ def test_ssh_docker_falls_back_to_private_ip(mock_docker_client_cls, ne_engine) 
                 resolve_node_execution_bundle(session, "r-priv")
     base_url = mock_docker_client_cls.call_args.kwargs["base_url"]
     assert "172.31.12.34" in base_url
+
+
+def test_ssm_docker_requires_instance_id(ne_engine) -> None:
+    with Session(ne_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ssm-no-iid",
+                name="ssm-no-iid",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                provider_instance_id=None,
+                region="us-east-1",
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+        with pytest.raises(NodeExecutionBindingError, match="provider_instance_id"):
+            resolve_node_execution_bundle(session, "ssm-no-iid")
+
+
+def test_ssm_docker_requires_region(ne_engine) -> None:
+    with Session(ne_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ssm-no-region",
+                name="ssm-no-region",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                provider_instance_id="i-0abc123",
+                region=None,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+    settings = MagicMock()
+    settings.devnest_execution_mode = ""
+    settings.aws_region = ""
+    settings.devnest_ec2_ssh_user_default = "ubuntu"
+    settings.aws_access_key_id = ""
+    settings.aws_secret_access_key = ""
+    with patch("app.services.node_execution_service.factory.get_settings", return_value=settings):
+        with Session(ne_engine) as session:
+            with pytest.raises(NodeExecutionBindingError, match="region"):
+                resolve_node_execution_bundle(session, "ssm-no-region")
+
+
+@patch("app.services.node_execution_service.factory.SsmRemoteCommandRunner")
+def test_ssm_docker_bundle_uses_runtime_adapter(mock_runner_cls, ne_engine) -> None:
+    runner_inst = MagicMock()
+    runner_inst.run.return_value = ""
+    mock_runner_cls.return_value = runner_inst
+    with Session(ne_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ssm-ok",
+                name="ssm-ok",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                provider_instance_id="i-0ssmtest00000001",
+                region="us-west-2",
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+        settings = MagicMock()
+        settings.devnest_execution_mode = ""
+        settings.aws_region = ""
+        with patch("app.services.node_execution_service.factory.get_settings", return_value=settings):
+            bundle = resolve_node_execution_bundle(session, "ssm-ok")
+    assert bundle.docker_client is None
+    assert isinstance(bundle.runtime_adapter, SsmDockerRuntimeAdapter)
+    assert bundle.topology_command_runner is runner_inst
+    runner_inst.run.assert_called()
+    mock_runner_cls.assert_called_once_with(instance_id="i-0ssmtest00000001", region="us-west-2")
+
+
+@patch("app.services.node_execution_service.factory.SsmRemoteCommandRunner")
+def test_devnest_execution_mode_ssm_overrides_ssh_docker(mock_runner_cls, ne_engine) -> None:
+    """``DEVNEST_EXECUTION_MODE=ssm`` uses SSM even when the row still says ``ssh_docker``."""
+    runner_inst = MagicMock()
+    runner_inst.run.return_value = ""
+    mock_runner_cls.return_value = runner_inst
+    with Session(ne_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-ssh-row",
+                name="ec2-ssh-row",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.SSH_DOCKER.value,
+                ssh_host="10.0.0.1",
+                provider_instance_id="i-0override0000001",
+                region="eu-west-1",
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+        settings = MagicMock()
+        settings.devnest_execution_mode = "ssm"
+        settings.aws_region = ""
+        with patch("app.services.node_execution_service.factory.get_settings", return_value=settings):
+            bundle = resolve_node_execution_bundle(session, "ec2-ssh-row")
+    assert bundle.docker_client is None
+    assert isinstance(bundle.runtime_adapter, SsmDockerRuntimeAdapter)
+    mock_runner_cls.assert_called_once_with(instance_id="i-0override0000001", region="eu-west-1")
+
+
+def test_devnest_execution_mode_local_on_ec2_raises(ne_engine) -> None:
+    with Session(ne_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-local-override",
+                name="ec2-local-override",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                provider_instance_id="i-0x",
+                region="us-east-1",
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+    settings = MagicMock()
+    settings.devnest_execution_mode = "local"
+    with patch("app.services.node_execution_service.factory.get_settings", return_value=settings):
+        with Session(ne_engine) as session:
+            with pytest.raises(NodeExecutionBindingError, match="DEVNEST_EXECUTION_MODE=local"):
+                resolve_node_execution_bundle(session, "ec2-local-override")

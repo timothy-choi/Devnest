@@ -1,6 +1,7 @@
 """Runtime adapter: normalized types for container lifecycle (orchestrator-facing)."""
 
 from .docker_runtime import DockerRuntimeAdapter
+from .ssm_docker_runtime import SsmDockerRuntimeAdapter
 from .errors import (
     ContainerCreateError,
     ContainerDeleteError,
@@ -35,6 +36,7 @@ __all__ = [
     "CODE_SERVER_OPTIONAL_PERSISTENCE_CONTAINER_PATHS",
     "ContainerCreateError",
     "DockerRuntimeAdapter",
+    "SsmDockerRuntimeAdapter",
     "WORKSPACE_IDE_CONTAINER_PORT",
     "WORKSPACE_PROJECT_CONTAINER_PATH",
     "WorkspaceExtraBindMountSpec",

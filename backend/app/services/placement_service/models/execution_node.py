@@ -31,14 +31,17 @@ class ExecutionNode(SQLModel, table=True):
     (``docker.from_env()``). ``SSH_DOCKER`` uses Docker's ``ssh://`` transport to the daemon. The SSH target is resolved in
     order: ``ssh_host``, then ``hostname``, then ``private_ip`` (useful once EC2 sets private IP).
     Requires SSH keys in the worker environment; ``paramiko`` for docker-py. Topology bridge/veth
-    commands run on the same host as the daemon via the SSH-backed runner. ``ssh_*`` and IP fields
-    are ignored for ``LOCAL_DOCKER``.
+    commands run on the same host as the daemon via the SSH-backed runner. ``SSM_DOCKER`` runs the
+    Docker CLI on the instance via AWS SSM Run Command (no SSH keys on the worker); requires SSM
+    agent on the instance, ``provider_instance_id``, and ``region`` (or ``AWS_REGION``). ``ssh_*``
+    and IP fields are ignored for ``LOCAL_DOCKER`` and largely unused for ``SSM_DOCKER`` (connectivity
+    is instance id + region).
 
     When ``provider_type=ec2``, ``provider_instance_id`` is the instance id. ``region``,
     ``availability_zone``, ``instance_type``, ``public_ip``, ``iam_instance_profile_name``, and
     ``last_synced_at`` are filled by :mod:`app.services.providers.ec2_provider` (no provisioning).
 
-    TODO: Node agent heartbeats, persistent CPU/RAM reservations, SSM transport, auto sync on events.
+    TODO: Node agent heartbeats, persistent CPU/RAM reservations, auto sync on events.
     """
 
     __tablename__ = "execution_node"
@@ -87,7 +90,7 @@ class ExecutionNode(SQLModel, table=True):
         default=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
         max_length=32,
         index=True,
-        description="local_docker | ssh_docker — see ExecutionNodeExecutionMode.",
+        description="local_docker | ssh_docker | ssm_docker — see ExecutionNodeExecutionMode.",
     )
     ssh_host: str | None = Field(default=None, max_length=255)
     ssh_port: int = Field(default=22, ge=1, le=65535)

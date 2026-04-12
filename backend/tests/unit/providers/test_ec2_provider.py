@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 import boto3
 from botocore.stub import Stubber
@@ -299,14 +301,19 @@ def test_register_ec2_instance_inserts_row(sqlite_engine) -> None:
         {"InstanceTypes": ["t3.micro"]},
     )
     stubber.activate()
-    with Session(sqlite_engine) as session:
-        node = register_ec2_instance(session, iid, ec2_client=client)
-        session.commit()
-        assert node.node_key == f"ec2-{iid}"
-        assert node.provider_type == ExecutionNodeProviderType.EC2.value
-        assert node.private_ip == "10.0.0.8"
-        assert node.last_synced_at is not None
-        assert node.schedulable is True
+    sm = MagicMock()
+    sm.devnest_ec2_default_execution_mode = "ssm_docker"
+    sm.devnest_ec2_ssh_user_default = "ubuntu"
+    with patch("app.services.providers.ec2_provider.get_settings", return_value=sm):
+        with Session(sqlite_engine) as session:
+            node = register_ec2_instance(session, iid, ec2_client=client)
+            session.commit()
+            assert node.node_key == f"ec2-{iid}"
+            assert node.provider_type == ExecutionNodeProviderType.EC2.value
+            assert node.private_ip == "10.0.0.8"
+            assert node.last_synced_at is not None
+            assert node.schedulable is True
+            assert node.execution_mode == ExecutionNodeExecutionMode.SSM_DOCKER.value
     stubber.deactivate()
 
 

@@ -46,6 +46,10 @@ def ssh_remote_ensure_workspace_project_dir(
     return remote_path
 
 
+# Same as :func:`ssh_remote_ensure_workspace_project_dir` — used when ``runner`` is SSM-backed.
+remote_shell_ensure_workspace_project_dir = ssh_remote_ensure_workspace_project_dir
+
+
 def _validate_workspace_id_for_path(workspace_id: str) -> str:
     wid = (workspace_id or "").strip()
     if not wid or not _WORKSPACE_ID_SAFE.match(wid):

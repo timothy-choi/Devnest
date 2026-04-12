@@ -80,6 +80,27 @@ class Settings(BaseSettings):
     devnest_node_provider: str = "all"
     # Default SSH user when registering EC2 nodes (Amazon Linux / Ubuntu images).
     devnest_ec2_ssh_user_default: str = "ubuntu"
+    # Default ``ExecutionNode.execution_mode`` for new EC2 registry rows (``ssm_docker`` preferred; ``ssh_docker`` fallback).
+    devnest_ec2_default_execution_mode: str = "ssm_docker"
+    # Optional worker override: ``local`` = force worker-local Docker for local provider nodes only;
+    # ``ssm`` = force SSM path for EC2 nodes only; empty = use each node's ``execution_mode``.
+    devnest_execution_mode: str = ""
+
+    @field_validator("devnest_ec2_default_execution_mode", mode="before")
+    @classmethod
+    def _normalize_devnest_ec2_default_execution_mode(cls, v):  # noqa: ANN001
+        s = str(v or "").strip().lower()
+        if s in ("ssh_docker", "ssm_docker"):
+            return s
+        return "ssm_docker"
+
+    @field_validator("devnest_execution_mode", mode="before")
+    @classmethod
+    def _normalize_devnest_execution_mode(cls, v):  # noqa: ANN001
+        s = str(v or "").strip().lower()
+        if s in ("", "local", "ssm"):
+            return s
+        return ""
 
     @field_validator("devnest_node_provider", mode="before")
     @classmethod

@@ -7,7 +7,9 @@ Run from the ``backend`` directory::
 
     PYTHONPATH=. python scripts/register_ec2_instance.py i-0123456789abcdef0
 
-Optional: ``AWS_REGION``, ``DEVNEST_EC2_SSH_USER_DEFAULT`` (default ``ubuntu``).
+Optional env: ``AWS_REGION``, ``DEVNEST_EC2_SSH_USER_DEFAULT`` (for ``ssh_docker``),
+``DEVNEST_EC2_DEFAULT_EXECUTION_MODE`` (``ssm_docker`` default, or ``ssh_docker``),
+``DEVNEST_EXECUTION_MODE`` (worker override; see settings).
 
 TODO: Internal admin API + auth; sync job for periodic refresh.
 """
@@ -29,6 +31,12 @@ def main() -> int:
     parser.add_argument("instance_id", help="EC2 instance id (e.g. i-0123456789abcdef0)")
     parser.add_argument("--node-key", default=None, help="Override ExecutionNode.node_key (default ec2-<instance_id>)")
     parser.add_argument("--ssh-user", default=None, help="SSH user for ssh_docker (default from settings)")
+    parser.add_argument(
+        "--execution-mode",
+        default=None,
+        choices=["ssm_docker", "ssh_docker"],
+        help="ExecutionNode.execution_mode (default from DEVNEST_EC2_DEFAULT_EXECUTION_MODE)",
+    )
     args = parser.parse_args()
 
     from sqlmodel import Session
@@ -49,8 +57,8 @@ def main() -> int:
             session.commit()
             print(
                 f"Registered execution node id={node.id} node_key={node.node_key!r} "
-                f"provider_instance_id={node.provider_instance_id!r} status={node.status!r} "
-                f"schedulable={node.schedulable}",
+                f"provider_instance_id={node.provider_instance_id!r} execution_mode={node.execution_mode!r} "
+                f"status={node.status!r} schedulable={node.schedulable}",
             )
     except Ec2ProviderError as e:
         print(f"EC2 registration failed: {e}", file=sys.stderr)
