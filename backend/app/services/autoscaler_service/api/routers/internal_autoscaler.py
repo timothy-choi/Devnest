@@ -106,6 +106,11 @@ def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> Provisi
     )
     record_usage(
         session,
+        event_type=UsageEventType.AUTOSCALER_SCALE_UP.value,
+        node_id=(node.node_key if node else None),
+    )
+    record_usage(
+        session,
         event_type=UsageEventType.NODE_PROVISIONED.value,
         node_id=(node.node_key if node else None),
     )
@@ -143,6 +148,11 @@ def post_autoscaler_reclaim_one_idle(session: Session = Depends(get_db)) -> Recl
         resource_id=node.node_key,
         actor_type=AuditActorType.INTERNAL_SERVICE.value,
         outcome=AuditOutcome.SUCCESS.value,
+        node_id=node.node_key,
+    )
+    record_usage(
+        session,
+        event_type=UsageEventType.AUTOSCALER_SCALE_DOWN.value,
         node_id=node.node_key,
     )
     record_usage(

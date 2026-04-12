@@ -32,6 +32,8 @@ from app.workers.workspace_job_worker.failure_handling import (
     classify_reconcile_failure,
     try_schedule_workspace_job_retry,
 )
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +205,19 @@ def execute_reconcile_runtime_job(
         },
     )
 
+    record_audit(
+        session,
+        action=AuditAction.RECONCILE_STARTED.value,
+        resource_type="workspace",
+        resource_id=wid,
+        actor_type=AuditActorType.INTERNAL_SERVICE.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        metadata={"workspace_status": ws.status},
+    )
+
     _repair_runtime_capacity_ledger(session, ws)
 
     if ws.status in _BUSY_RECONCILE:
@@ -364,6 +379,19 @@ def _fail_reconcile(session: Session, ws: Workspace, job: WorkspaceJob, message:
         message=message[:500],
         failure_stage=stage.value,
         retryable=False,
+    )
+    record_audit(
+        session,
+        action=AuditAction.RECONCILE_FAILED.value,
+        resource_type="workspace",
+        resource_id=wid,
+        actor_type=AuditActorType.INTERNAL_SERVICE.value,
+        outcome=AuditOutcome.FAILURE.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        reason=message[:4096],
+        metadata={"failure_stage": stage.value, "workspace_status": ws.status},
     )
     if ws.status in (
         WorkspaceStatus.STOPPED.value,

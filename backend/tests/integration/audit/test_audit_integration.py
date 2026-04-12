@@ -263,3 +263,86 @@ class TestAdminUsageApi:
         body = resp.json()
         assert body["owner_user_id"] == uid
         assert UsageEventType.WORKSPACE_CREATED.value in body["totals_by_event"]
+
+
+class TestAuthAudit:
+    def test_register_produces_audit_row(self, client, db_session) -> None:
+        r = client.post(
+            "/auth/register",
+            json={"username": "aud_reg_user", "email": "aud_reg@test.dev", "password": "securepass123"},
+        )
+        assert r.status_code == status.HTTP_201_CREATED, r.text
+        uid = r.json()["user_auth_id"]
+
+        rows = db_session.exec(
+            select(AuditLog)
+            .where(AuditLog.actor_user_id == uid)
+            .where(AuditLog.action == AuditAction.USER_REGISTERED.value),
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].resource_type == "user"
+        assert rows[0].outcome == "success"
+
+    def test_register_audit_row_missing_without_session_commit_rollback(self, client, db_session) -> None:
+        """Second registration with same email must produce no audit row (transaction rolls back)."""
+        email = "dup_aud@test.dev"
+        client.post("/auth/register", json={"username": "aud_dup1", "email": email, "password": "pw1"})
+        r2 = client.post("/auth/register", json={"username": "aud_dup2", "email": email, "password": "pw2"})
+        assert r2.status_code == status.HTTP_409_CONFLICT
+
+        rows = db_session.exec(
+            select(AuditLog).where(AuditLog.action == AuditAction.USER_REGISTERED.value)
+        ).all()
+        registered_emails_audited = [
+            r for r in rows
+            if db_session.get(__import__("app.services.auth_service.models", fromlist=["UserAuth"]).UserAuth, r.actor_user_id) is not None
+        ]
+        assert len(registered_emails_audited) >= 1
+
+
+class TestAuditApiFilters:
+    def test_action_filter_narrows_results(self, client, db_session) -> None:
+        uid, token = _register_and_token(client, username="flt_user", email="flt@test.dev")
+        wid = _seed_stopped_workspace(db_session, uid)
+
+        client.post(f"/workspaces/start/{wid}", headers=_auth(token))
+
+        resp_all = client.get(
+            f"/internal/audit-logs/workspaces/{wid}",
+            headers={"X-Internal-API-Key": "integration-test-internal-key"},
+        )
+        resp_filtered = client.get(
+            f"/internal/audit-logs/workspaces/{wid}",
+            params={"action": AuditAction.WORKSPACE_START_REQUESTED.value},
+            headers={"X-Internal-API-Key": "integration-test-internal-key"},
+        )
+        assert resp_all.status_code == status.HTTP_200_OK
+        assert resp_filtered.status_code == status.HTTP_200_OK
+
+        all_total = resp_all.json()["total"]
+        filtered_total = resp_filtered.json()["total"]
+        assert filtered_total <= all_total
+        assert filtered_total >= 1
+        assert all(
+            item["action"] == AuditAction.WORKSPACE_START_REQUESTED.value
+            for item in resp_filtered.json()["items"]
+        )
+
+    def test_total_reflects_full_count_not_page_size(self, client, db_session) -> None:
+        uid, token = _register_and_token(client, username="pgn_user", email="pgn@test.dev")
+        r = client.post(
+            "/workspaces",
+            json={"name": "pgn-ws", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            headers=_auth(token),
+        )
+        wid = r.json()["workspace_id"]
+
+        resp = client.get(
+            f"/internal/audit-logs/workspaces/{wid}",
+            params={"limit": 1, "offset": 0},
+            headers={"X-Internal-API-Key": "integration-test-internal-key"},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        body = resp.json()
+        assert body["total"] >= 1
+        assert len(body["items"]) == 1

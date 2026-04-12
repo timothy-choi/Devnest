@@ -14,7 +14,12 @@ from app.libs.db.database import get_db
 from app.libs.security.dependencies import require_internal_api_key
 from app.libs.security.internal_auth import InternalApiScope
 
-from ..service import list_audit_logs_for_user, list_audit_logs_for_workspace
+from ..service import (
+    count_audit_logs_for_user,
+    count_audit_logs_for_workspace,
+    list_audit_logs_for_user,
+    list_audit_logs_for_workspace,
+)
 from .schemas import AuditLogListResponse, AuditLogResponse
 
 router = APIRouter(
@@ -48,15 +53,20 @@ def get_workspace_audit_logs(
     workspace_id: int,
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    action: str | None = Query(default=None, description="Filter by exact action name, e.g. workspace.start.requested"),
+    outcome: str | None = Query(default=None, description="Filter by outcome: success | failure | denied"),
     session: Session = Depends(get_db),
 ) -> AuditLogListResponse:
+    total = count_audit_logs_for_workspace(session, workspace_id=workspace_id, action=action, outcome=outcome)
     rows = list_audit_logs_for_workspace(
         session,
         workspace_id=workspace_id,
         limit=limit,
         offset=offset,
+        action=action,
+        outcome=outcome,
     )
-    return AuditLogListResponse(items=[_to_response(r) for r in rows], total=len(rows))
+    return AuditLogListResponse(items=[_to_response(r) for r in rows], total=total)
 
 
 @router.get("/users/{user_id}", response_model=AuditLogListResponse)
@@ -64,12 +74,17 @@ def get_user_audit_logs(
     user_id: int,
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    action: str | None = Query(default=None, description="Filter by exact action name"),
+    outcome: str | None = Query(default=None, description="Filter by outcome: success | failure | denied"),
     session: Session = Depends(get_db),
 ) -> AuditLogListResponse:
+    total = count_audit_logs_for_user(session, actor_user_id=user_id, action=action, outcome=outcome)
     rows = list_audit_logs_for_user(
         session,
         actor_user_id=user_id,
         limit=limit,
         offset=offset,
+        action=action,
+        outcome=outcome,
     )
-    return AuditLogListResponse(items=[_to_response(r) for r in rows], total=len(rows))
+    return AuditLogListResponse(items=[_to_response(r) for r in rows], total=total)

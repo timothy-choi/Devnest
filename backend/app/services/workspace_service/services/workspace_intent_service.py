@@ -49,6 +49,16 @@ from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
 
+# Stable mapping from job type to audit action name; defined at module level to avoid
+# re-creating the dict on every intent request.
+_INTENT_JOB_TYPE_TO_AUDIT_ACTION: dict[str, str] = {
+    WorkspaceJobType.START.value: AuditAction.WORKSPACE_START_REQUESTED.value,
+    WorkspaceJobType.STOP.value: AuditAction.WORKSPACE_STOP_REQUESTED.value,
+    WorkspaceJobType.RESTART.value: AuditAction.WORKSPACE_RESTART_REQUESTED.value,
+    WorkspaceJobType.DELETE.value: AuditAction.WORKSPACE_DELETE_REQUESTED.value,
+    WorkspaceJobType.UPDATE.value: AuditAction.WORKSPACE_UPDATE_REQUESTED.value,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CreateWorkspaceResult:
@@ -406,14 +416,7 @@ def _persist_intent(
         },
     )
 
-    _JOB_TYPE_TO_AUDIT_ACTION: dict[str, str] = {
-        WorkspaceJobType.START.value: AuditAction.WORKSPACE_START_REQUESTED.value,
-        WorkspaceJobType.STOP.value: AuditAction.WORKSPACE_STOP_REQUESTED.value,
-        WorkspaceJobType.RESTART.value: AuditAction.WORKSPACE_RESTART_REQUESTED.value,
-        WorkspaceJobType.DELETE.value: AuditAction.WORKSPACE_DELETE_REQUESTED.value,
-        WorkspaceJobType.UPDATE.value: AuditAction.WORKSPACE_UPDATE_REQUESTED.value,
-    }
-    audit_action = _JOB_TYPE_TO_AUDIT_ACTION.get(job_type, f"workspace.{job_type}.requested")
+    audit_action = _INTENT_JOB_TYPE_TO_AUDIT_ACTION.get(job_type, f"workspace.{job_type.lower()}.requested")
     record_audit(
         session,
         action=audit_action,
