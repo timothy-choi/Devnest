@@ -11,7 +11,8 @@ Optional env: ``AWS_REGION``, ``DEVNEST_EC2_SSH_USER_DEFAULT`` (for ``ssh_docker
 ``DEVNEST_EC2_DEFAULT_EXECUTION_MODE`` (``ssm_docker`` default, or ``ssh_docker``),
 ``DEVNEST_EXECUTION_MODE`` (worker override; see settings).
 
-TODO: Internal admin API + auth; sync job for periodic refresh.
+See also: ``scripts/provision_ec2_node.py`` (new instances) and
+``POST /internal/execution-nodes/register-existing`` (``X-Internal-API-Key``).
 """
 
 from __future__ import annotations

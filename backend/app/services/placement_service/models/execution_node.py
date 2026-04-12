@@ -20,7 +20,8 @@ class ExecutionNode(SQLModel, table=True):
     - **Capacity** — ``total_*`` vs ``allocatable_*`` support future reservation accounting; V1 policy filters on allocatable only.
 
     **Status vs schedulable:** only ``READY`` + ``schedulable=True`` are candidates for V1 placement.
-    ``NOT_READY`` / ``DRAINING`` are excluded until an operator or agent transitions them.
+    ``PROVISIONING``, ``NOT_READY``, ``DRAINING``, ``TERMINATING``, ``TERMINATED``, and ``ERROR`` are
+    excluded. EC2 lifecycle is driven by :mod:`app.services.infrastructure_service` plus EC2/SSM sync.
 
     **Capacity:** ``allocatable_*`` must not exceed ``total_*`` (enforced at DB layer). V1 placement
     filters on allocatable only and does not decrement it — concurrent workspaces can exceed

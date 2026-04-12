@@ -1,0 +1,221 @@
+"""
+Internal admin routes: EC2 provisioning and execution-node lifecycle.
+
+Requires ``X-Internal-API-Key``. Intended for operators and automation — not end-user facing.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from fastapi import APIRouter, Body, Depends, HTTPException, status
+from sqlmodel import Session
+
+from app.libs.db.database import get_db
+from app.services.notification_service.api.dependencies import require_internal_api_key
+from app.services.placement_service.errors import ExecutionNodeNotFoundError
+from app.services.providers.errors import Ec2ProviderError
+
+from ...errors import Ec2ProvisionConfigurationError, NodeLifecycleError
+from ...lifecycle import (
+    deregister_node,
+    mark_node_draining,
+    provision_ec2_node,
+    register_existing_ec2_node,
+    sync_node_state,
+    terminate_ec2_node,
+)
+from ...models import Ec2ProvisionRequest
+from ..schemas import (
+    ExecutionNodeSummaryResponse,
+    NodeKeyOrIdBody,
+    ProvisionExecutionNodeRequest,
+    RegisterExistingEc2Body,
+    SyncExecutionNodeBody,
+)
+
+router = APIRouter(
+    prefix="/internal/execution-nodes",
+    tags=["internal-execution-nodes"],
+    dependencies=[Depends(require_internal_api_key)],
+)
+
+
+def _select_kwargs(body: NodeKeyOrIdBody) -> dict:
+    if body.node_id is not None:
+        return {"node_id": body.node_id}
+    return {"node_key": str(body.node_key).strip()}
+
+
+def _merge_provision_request(body: ProvisionExecutionNodeRequest) -> Ec2ProvisionRequest:
+    req = Ec2ProvisionRequest.from_settings()
+    if body.ami_id is not None and str(body.ami_id).strip():
+        req = replace(req, ami_id=str(body.ami_id).strip())
+    if body.instance_type is not None and str(body.instance_type).strip():
+        req = replace(req, instance_type=str(body.instance_type).strip())
+    if body.subnet_id is not None and str(body.subnet_id).strip():
+        req = replace(req, subnet_id=str(body.subnet_id).strip())
+    if body.security_group_ids is not None:
+        req = replace(req, security_group_ids=list(body.security_group_ids))
+    if body.iam_instance_profile_name is not None:
+        v = str(body.iam_instance_profile_name).strip()
+        req = replace(req, iam_instance_profile_name=v or None)
+    if body.key_name is not None:
+        v = str(body.key_name).strip()
+        req = replace(req, key_name=v or None)
+    if body.region is not None:
+        v = str(body.region).strip()
+        req = replace(req, region=v or None)
+    if body.node_key is not None:
+        v = str(body.node_key).strip()
+        req = replace(req, node_key=v or None)
+    if body.name_tag is not None:
+        v = str(body.name_tag).strip()
+        req = replace(req, name_tag=v or None)
+    if body.execution_mode is not None:
+        v = str(body.execution_mode).strip()
+        req = replace(req, execution_mode=v or None)
+    if body.ssh_user is not None:
+        v = str(body.ssh_user).strip()
+        req = replace(req, ssh_user=v or None)
+    if body.extra_tags:
+        req = replace(req, extra_tags=dict(body.extra_tags))
+    return req
+
+
+@router.post(
+    "/provision",
+    response_model=ExecutionNodeSummaryResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Provision one EC2 instance and create a PROVISIONING execution node",
+)
+def post_provision_execution_node(
+    body: ProvisionExecutionNodeRequest = Body(default_factory=ProvisionExecutionNodeRequest),
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    b = body
+    try:
+        req = _merge_provision_request(b)
+        node = provision_ec2_node(
+            session,
+            req,
+            wait_until_running=b.wait_until_running,
+        )
+        session.commit()
+        session.refresh(node)
+    except Ec2ProvisionConfigurationError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Ec2ProviderError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    except NodeLifecycleError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
+    "/register-existing",
+    response_model=ExecutionNodeSummaryResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a pre-existing EC2 instance (immediate READY if running, unless lifecycle state blocks)",
+)
+def post_register_existing_ec2(
+    body: RegisterExistingEc2Body,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    try:
+        node = register_existing_ec2_node(
+            session,
+            body.instance_id.strip(),
+            node_key=body.node_key,
+            ssh_user=body.ssh_user,
+            execution_mode=body.execution_mode,
+        )
+        session.commit()
+        session.refresh(node)
+    except Ec2ProviderError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
+    "/sync",
+    response_model=ExecutionNodeSummaryResponse,
+    summary="Refresh EC2 fields and optionally promote PROVISIONING → READY (SSM check for ssm_docker)",
+)
+def post_sync_execution_node(
+    body: SyncExecutionNodeBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    try:
+        node = sync_node_state(
+            session,
+            promote_provisioning_when_ready=body.promote_provisioning_when_ready,
+            **_select_kwargs(body),
+        )
+        session.commit()
+        session.refresh(node)
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except NodeLifecycleError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Ec2ProviderError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
+    "/drain",
+    response_model=ExecutionNodeSummaryResponse,
+    summary="Mark node DRAINING and not schedulable",
+)
+def post_drain_execution_node(
+    body: NodeKeyOrIdBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    try:
+        node = mark_node_draining(session, **_select_kwargs(body))
+        session.commit()
+        session.refresh(node)
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
+    "/deregister",
+    response_model=ExecutionNodeSummaryResponse,
+    summary="Soft deregister: TERMINATED + not schedulable (does not stop EC2)",
+)
+def post_deregister_execution_node(
+    body: NodeKeyOrIdBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    try:
+        node = deregister_node(session, **_select_kwargs(body))
+        session.commit()
+        session.refresh(node)
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
+    "/terminate",
+    response_model=ExecutionNodeSummaryResponse,
+    summary="EC2 only: terminate_instances in AWS and move through TERMINATING → TERMINATED",
+)
+def post_terminate_execution_node(
+    body: NodeKeyOrIdBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    try:
+        node = terminate_ec2_node(session, **_select_kwargs(body))
+        session.commit()
+        session.refresh(node)
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except NodeLifecycleError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Ec2ProviderError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)

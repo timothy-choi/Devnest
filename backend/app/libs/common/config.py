@@ -114,6 +114,19 @@ class Settings(BaseSettings):
             return s
         return "all"
 
+    # EC2 provisioning defaults (explicit; empty AMI/subnet/SG means provision CLI/API must pass overrides).
+    devnest_ec2_ami_id: str = ""
+    devnest_ec2_instance_type: str = "t3.medium"
+    devnest_ec2_subnet_id: str = ""
+    # Comma-separated security group ids for ``run_instances`` (VPC).
+    devnest_ec2_security_group_ids: str = ""
+    # IAM instance profile **name** (not ARN) attached to new instances (SSM agent / instance role).
+    devnest_ec2_instance_profile: str = ""
+    # Optional EC2 key pair name (prefer SSM + instance role; keys are often unnecessary).
+    devnest_ec2_key_name: str = ""
+    # Prefix for ``{prefix}:managed`` and ``{prefix}:node_key`` tags on provisioned instances.
+    devnest_ec2_tag_prefix: str = "devnest"
+
 
 @lru_cache
 def get_settings() -> Settings:

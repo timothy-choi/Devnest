@@ -1,8 +1,9 @@
 """
 Register and refresh :class:`~app.services.placement_service.models.ExecutionNode` rows from AWS EC2.
 
-Uses ``describe_instances`` / ``describe_instance_types`` only — **no** ``run_instances``,
-autoscaling, or SSM. Operators (or a future provisioner) create instances; DevNest maps them.
+Uses ``describe_instances`` / ``describe_instance_types`` for registry sync. **Provisioning**
+(``run_instances``) lives in :mod:`app.services.infrastructure_service` so this module stays
+describe/register oriented.
 
 SSH keys, security groups, SSM agent, and Docker on the instance are operator concerns (TODO: runbooks).
 """
@@ -157,7 +158,44 @@ def describe_ec2_instance(
     )
 
 
-def _instance_type_capacity(client: BaseClient, instance_type: str) -> tuple[float, int]:
+def compute_status_schedulable_after_ec2_sync(
+    *,
+    existing_row: ExecutionNode | None,
+    desc: Ec2InstanceDescription,
+) -> tuple[str, bool]:
+    """
+    Map EC2 describe state onto ``ExecutionNode.status`` / ``schedulable`` without clobbering
+    control-plane lifecycle states (``PROVISIONING``, ``DRAINING``, ``TERMINATING``, …).
+
+    New rows (``existing_row is None``) follow the legacy rule: running → ``READY`` + schedulable.
+    """
+    running = desc.state == "running"
+    if existing_row is None:
+        if running:
+            return ExecutionNodeStatus.READY.value, True
+        return ExecutionNodeStatus.NOT_READY.value, False
+
+    st = (existing_row.status or "").strip().upper()
+    if st == ExecutionNodeStatus.PROVISIONING.value:
+        if desc.state in ("terminated", "shutting-down"):
+            return ExecutionNodeStatus.ERROR.value, False
+        return ExecutionNodeStatus.PROVISIONING.value, False
+    if st == ExecutionNodeStatus.DRAINING.value:
+        return ExecutionNodeStatus.DRAINING.value, False
+    if st == ExecutionNodeStatus.TERMINATING.value:
+        if desc.state in ("terminated", "shutting-down"):
+            return ExecutionNodeStatus.TERMINATED.value, False
+        return ExecutionNodeStatus.TERMINATING.value, False
+    if st == ExecutionNodeStatus.TERMINATED.value:
+        return ExecutionNodeStatus.TERMINATED.value, False
+    if st == ExecutionNodeStatus.ERROR.value:
+        return ExecutionNodeStatus.ERROR.value, False
+    if running:
+        return ExecutionNodeStatus.READY.value, True
+    return ExecutionNodeStatus.NOT_READY.value, False
+
+
+def ec2_instance_type_capacity(client: BaseClient, instance_type: str) -> tuple[float, int]:
     """Default vCPU and memory (MiB) from ``describe_instance_types``; fallback if unknown."""
     it = (instance_type or "").strip()
     if not it or it == "unknown":
@@ -247,7 +285,8 @@ def register_ec2_instance(
 
     - ``node_key`` defaults to ``ec2-{instance_id}``.
     - ``execution_mode`` defaults from ``DEVNEST_EC2_DEFAULT_EXECUTION_MODE`` (``ssm_docker`` or ``ssh_docker``).
-    - Sets ``schedulable`` and ``status`` from instance state (running → READY + schedulable).
+    - Sets ``schedulable`` and ``status`` using :func:`compute_status_schedulable_after_ec2_sync`
+      (running → ``READY`` for normal rows; preserves ``PROVISIONING`` / ``DRAINING`` / etc.).
 
     Caller should ``commit`` the session. Does not call ``session.commit()``.
     """
@@ -267,10 +306,7 @@ def register_ec2_instance(
     mode = raw_em
     user = (ssh_user or "").strip() or settings.devnest_ec2_ssh_user_default.strip() or "ubuntu"
 
-    vcpu, mem_mb = _instance_type_capacity(client, desc.instance_type)
-    running = desc.state == "running"
-    status = ExecutionNodeStatus.READY.value if running else ExecutionNodeStatus.NOT_READY.value
-    schedulable = running
+    vcpu, mem_mb = ec2_instance_type_capacity(client, desc.instance_type)
 
     stmt = select(ExecutionNode).where(ExecutionNode.provider_instance_id == iid)
     row = session.exec(stmt).first()
@@ -298,7 +334,10 @@ def register_ec2_instance(
         },
     }
 
+    status: str
+    schedulable: bool
     if row is None:
+        status, schedulable = compute_status_schedulable_after_ec2_sync(existing_row=None, desc=desc)
         row = ExecutionNode(
             node_key=key,
             name=desc.name_tag or key,
@@ -326,6 +365,7 @@ def register_ec2_instance(
         )
         session.add(row)
     else:
+        status, schedulable = compute_status_schedulable_after_ec2_sync(existing_row=row, desc=desc)
         row.node_key = key
         row.name = desc.name_tag or row.name or key
         row.provider_type = ExecutionNodeProviderType.EC2.value

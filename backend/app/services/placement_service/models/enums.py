@@ -14,9 +14,13 @@ class ExecutionNodeProviderType(str, Enum):
 class ExecutionNodeStatus(str, Enum):
     """Liveness / scheduling gate for the placement policy."""
 
+    PROVISIONING = "PROVISIONING"
     READY = "READY"
     NOT_READY = "NOT_READY"
     DRAINING = "DRAINING"
+    TERMINATING = "TERMINATING"
+    TERMINATED = "TERMINATED"
+    ERROR = "ERROR"
 
 
 class ExecutionNodeExecutionMode(str, Enum):
