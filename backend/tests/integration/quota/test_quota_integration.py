@@ -135,14 +135,14 @@ class TestWorkspaceQuotaEnforcement:
         token, _ = _register_and_login(client, "no_quota@test.dev")
         for i in range(3):
             resp = _create_workspace(client, token, name=f"ws-{i}")
-            assert resp.status_code == 201
+            assert resp.status_code == 202
 
     def test_global_quota_blocks_at_limit(self, client: TestClient, db_session: Session) -> None:
         token, _ = _register_and_login(client, "global_q@test.dev")
         _seed_quota(db_session, scope_type=ScopeType.GLOBAL, max_workspaces=2)
 
-        assert _create_workspace(client, token, name="ws-1").status_code == 201
-        assert _create_workspace(client, token, name="ws-2").status_code == 201
+        assert _create_workspace(client, token, name="ws-1").status_code == 202
+        assert _create_workspace(client, token, name="ws-2").status_code == 202
         resp = _create_workspace(client, token, name="ws-3")
         assert resp.status_code == 429
         body = resp.json()
@@ -156,7 +156,7 @@ class TestWorkspaceQuotaEnforcement:
         _seed_quota(db_session, scope_type=ScopeType.USER, scope_id=uid, max_workspaces=3)
 
         for i in range(3):
-            assert _create_workspace(client, token, name=f"ws-{i}").status_code == 201
+            assert _create_workspace(client, token, name=f"ws-{i}").status_code == 202
         assert _create_workspace(client, token, name="ws-overflow").status_code == 429
 
     def test_quota_exceeded_writes_audit_row(self, client: TestClient, db_session: Session) -> None:
@@ -183,7 +183,7 @@ class TestSnapshotQuotaEnforcement:
         import uuid as _uuid
         token, uid = _register_and_login(client, f"snq{_uuid.uuid4().hex[:8]}@test.dev")
         resp = _create_workspace(client, token)
-        assert resp.status_code == 201, resp.json()
+        assert resp.status_code == 202, resp.json()
         ws_id = resp.json()["workspace_id"]
 
         from app.services.workspace_service.models import Workspace
@@ -216,4 +216,4 @@ class TestSnapshotQuotaEnforcement:
             json={"name": "snap1"},
             headers={"Authorization": f"Bearer {token}"},
         )
-        assert resp.status_code in (201, 202), resp.json()
+        assert resp.status_code == 202, resp.json()

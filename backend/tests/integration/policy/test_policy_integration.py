@@ -158,7 +158,7 @@ class TestWorkspaceCreationPolicyEnforcement:
     def test_no_policy_allows_workspace_creation(self, client: TestClient) -> None:
         token = _register_and_login(client, "no_pol@test.dev")
         resp = _create_workspace(client, token)
-        assert resp.status_code == 201
+        assert resp.status_code == 202
 
     def test_deny_workspace_creation_returns_403(self, client: TestClient, db_session: Session) -> None:
         token = _register_and_login(client, "deny_ws@test.dev")
@@ -174,11 +174,11 @@ class TestWorkspaceCreationPolicyEnforcement:
         resp = _create_workspace(client, token)
         assert resp.status_code == 403
 
-    def test_allowed_image_returns_201(self, client: TestClient, db_session: Session) -> None:
+    def test_allowed_image_returns_202(self, client: TestClient, db_session: Session) -> None:
         token = _register_and_login(client, "ok_img@test.dev")
         _seed_policy(db_session, rules={"allowed_runtime_images": ["nginx:alpine"]})
         resp = _create_workspace(client, token)
-        assert resp.status_code == 201
+        assert resp.status_code == 202
 
     def test_inactive_policy_does_not_block(self, client: TestClient, db_session: Session) -> None:
         token = _register_and_login(client, "inactive@test.dev")
@@ -195,7 +195,7 @@ class TestWorkspaceCreationPolicyEnforcement:
         db_session.add(p)
         db_session.commit()
         resp = _create_workspace(client, token)
-        assert resp.status_code == 201
+        assert resp.status_code == 202
 
     def test_policy_denial_writes_audit_row(self, client: TestClient, db_session: Session) -> None:
         from app.services.audit_service.models import AuditLog
