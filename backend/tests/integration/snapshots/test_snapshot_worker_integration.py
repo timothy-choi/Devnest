@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
+import tarfile
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import create_autospec
 
 import pytest
@@ -32,6 +35,27 @@ from app.workers.workspace_job_worker.worker import run_pending_jobs
 pytestmark = pytest.mark.integration
 
 NODE_ID = "node-snap-1"
+
+
+def _export_writes_minimal_archive(
+    *,
+    workspace_id: str,
+    archive_path: str,
+) -> WorkspaceSnapshotOperationResult:
+    """Autospec export mock must materialize a file: restore job checks ``os.path.isfile``."""
+    p = Path(archive_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(p, "w:gz") as tf:
+        data = b"restore-test-payload\n"
+        ti = tarfile.TarInfo(name="restored.txt")
+        ti.size = len(data)
+        tf.addfile(ti, io.BytesIO(data))
+    return WorkspaceSnapshotOperationResult(
+        workspace_id=workspace_id,
+        success=True,
+        size_bytes=int(p.stat().st_size),
+        issues=None,
+    )
 
 
 def _seed_owner(session: Session) -> int:
@@ -144,12 +168,7 @@ def test_snapshot_restore_job_succeeds(
     db_session.expire_all()
 
     orch = create_autospec(OrchestratorService, instance=True)
-    orch.export_workspace_filesystem_snapshot.return_value = WorkspaceSnapshotOperationResult(
-        workspace_id=str(wid),
-        success=True,
-        size_bytes=10,
-        issues=None,
-    )
+    orch.export_workspace_filesystem_snapshot.side_effect = _export_writes_minimal_archive
     run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
