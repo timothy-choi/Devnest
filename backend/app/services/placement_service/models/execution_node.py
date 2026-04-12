@@ -34,7 +34,11 @@ class ExecutionNode(SQLModel, table=True):
     commands run on the same host as the daemon via the SSH-backed runner. ``ssh_*`` and IP fields
     are ignored for ``LOCAL_DOCKER``.
 
-    TODO: Node agent heartbeats, persistent CPU/RAM reservations, EC2 lifecycle sync, SSM transport.
+    When ``provider_type=ec2``, ``provider_instance_id`` is the instance id. ``region``,
+    ``availability_zone``, ``instance_type``, ``public_ip``, ``iam_instance_profile_name``, and
+    ``last_synced_at`` are filled by :mod:`app.services.providers.ec2_provider` (no provisioning).
+
+    TODO: Node agent heartbeats, persistent CPU/RAM reservations, SSM transport, auto sync on events.
     """
 
     __tablename__ = "execution_node"
@@ -58,12 +62,25 @@ class ExecutionNode(SQLModel, table=True):
         max_length=32,
         index=True,
     )
-    provider_instance_id: str | None = Field(default=None, max_length=255)
+    provider_instance_id: str | None = Field(default=None, max_length=255, index=True)
+    region: str | None = Field(
+        default=None,
+        max_length=32,
+        description="Cloud region (e.g. AWS region) for EC2-backed nodes.",
+    )
+    availability_zone: str | None = Field(default=None, max_length=32)
+    instance_type: str | None = Field(default=None, max_length=64)
     hostname: str | None = Field(default=None, max_length=255)
     private_ip: str | None = Field(
         default=None,
         max_length=64,
         description="Optional; used as ssh_docker connect target when ssh_host and hostname are unset.",
+    )
+    public_ip: str | None = Field(default=None, max_length=64)
+    iam_instance_profile_name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="EC2 IAM instance profile name (not ARN), when attached.",
     )
 
     execution_mode: str = Field(
@@ -99,6 +116,11 @@ class ExecutionNode(SQLModel, table=True):
         description="Optional topology id when placing (soft ref; null uses DEVNEST_TOPOLOGY_ID).",
     )
 
+    last_synced_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+        description="Last successful EC2 describe / registry sync (control plane).",
+    )
     last_heartbeat_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),

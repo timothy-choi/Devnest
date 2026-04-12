@@ -72,6 +72,27 @@ class Settings(BaseSettings):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
+    # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
+    aws_region: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    # Placement filter: ``all`` (default) = local + EC2 nodes; ``local`` / ``ec2`` = restrict pool.
+    devnest_node_provider: str = "all"
+    # Default SSH user when registering EC2 nodes (Amazon Linux / Ubuntu images).
+    devnest_ec2_ssh_user_default: str = "ubuntu"
+
+    @field_validator("devnest_node_provider", mode="before")
+    @classmethod
+    def _normalize_devnest_node_provider(cls, v):  # noqa: ANN001
+        if v is None:
+            return "all"
+        s = str(v).strip().lower()
+        if s in ("", "any", "*"):
+            return "all"
+        if s in ("local", "ec2", "all"):
+            return s
+        return "all"
+
 
 @lru_cache
 def get_settings() -> Settings:

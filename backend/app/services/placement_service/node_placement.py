@@ -4,22 +4,46 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlmodel import Session, select
+
+from app.libs.common.config import get_settings
 
 from .constants import DEFAULT_WORKSPACE_REQUEST_CPU, DEFAULT_WORKSPACE_REQUEST_MEMORY_MB
 from .errors import ExecutionNodeNotFoundError, InvalidPlacementParametersError, NoSchedulableNodeError
-from .models import ExecutionNode, ExecutionNodeStatus
+from .models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
+
+
+def _provider_type_clause():
+    """
+    Optional placement pool filter from ``DEVNEST_NODE_PROVIDER`` (``local`` | ``ec2`` | ``all``).
+
+    Default ``all`` does not restrict by provider; local-only and EC2-only clusters can narrow the pool.
+    """
+    mode = (get_settings().devnest_node_provider or "all").strip().lower()
+    if mode == "local":
+        return ExecutionNode.provider_type == ExecutionNodeProviderType.LOCAL.value
+    if mode == "ec2":
+        return ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value
+    return None
+
+
+def _schedulable_base_predicates():
+    preds = [
+        ExecutionNode.schedulable == True,  # noqa: E712
+        ExecutionNode.status == ExecutionNodeStatus.READY.value,
+    ]
+    p = _provider_type_clause()
+    if p is not None:
+        preds.append(p)
+    return preds
 
 
 def _count_ready_schedulable_nodes(session: Session) -> int:
     stmt = (
         select(func.count())
         .select_from(ExecutionNode)
-        .where(
-            ExecutionNode.schedulable == True,  # noqa: E712
-            ExecutionNode.status == ExecutionNodeStatus.READY.value,
-        )
+        .where(and_(*_schedulable_base_predicates()))
     )
     raw = session.exec(stmt).one()
     return int(raw[0] if isinstance(raw, tuple) else raw)
@@ -29,10 +53,7 @@ def list_schedulable_nodes(session: Session) -> list[ExecutionNode]:
     """Nodes that pass the READY + schedulable gate (capacity not checked)."""
     stmt = (
         select(ExecutionNode)
-        .where(
-            ExecutionNode.schedulable == True,  # noqa: E712
-            ExecutionNode.status == ExecutionNodeStatus.READY.value,
-        )
+        .where(and_(*_schedulable_base_predicates()))
         .order_by(ExecutionNode.node_key.asc())
     )
     return list(session.exec(stmt).all())
@@ -71,6 +92,9 @@ def select_node_for_workspace(
 
     ``workspace_id`` is accepted for future affinity / anti-affinity; unused in V1.
 
+    When ``DEVNEST_NODE_PROVIDER`` is ``local`` or ``ec2``, only matching ``provider_type`` rows are
+    considered (see :func:`_provider_type_clause`).
+
     TODO: Optional staleness gate on ``last_heartbeat_at`` once node agents report in; keep
     ``NULL`` heartbeats valid for dev/single-node bootstrap.
 
@@ -87,14 +111,14 @@ def select_node_for_workspace(
             f"(got cpu={requested_cpu!r}, memory_mb={requested_memory_mb!r})",
         )
 
+    preds = [
+        *_schedulable_base_predicates(),
+        ExecutionNode.allocatable_cpu >= req_cpu,
+        ExecutionNode.allocatable_memory_mb >= req_mem,
+    ]
     stmt = (
         select(ExecutionNode)
-        .where(
-            ExecutionNode.schedulable == True,  # noqa: E712
-            ExecutionNode.status == ExecutionNodeStatus.READY.value,
-            ExecutionNode.allocatable_cpu >= req_cpu,
-            ExecutionNode.allocatable_memory_mb >= req_mem,
-        )
+        .where(and_(*preds))
         .order_by(
             ExecutionNode.allocatable_cpu.desc(),
             ExecutionNode.allocatable_memory_mb.desc(),
@@ -106,12 +130,17 @@ def select_node_for_workspace(
     row = session.exec(stmt).first()
     if row is None:
         n_gate = _count_ready_schedulable_nodes(session)
+        prov = (get_settings().devnest_node_provider or "all").strip().lower()
+        pool_hint = ""
+        if prov in ("local", "ec2"):
+            pool_hint = f" [placement pool: devnest_node_provider={prov!r}]"
         raise NoSchedulableNodeError(
             "no execution node matches placement policy "
             f"(need status=READY, schedulable=true, allocatable_cpu>={req_cpu}, "
             f"allocatable_memory_mb>={req_mem}; "
-            f"{n_gate} node(s) are READY+schedulable but none have enough allocatable capacity, "
-            "or there are no such rows — check execution_node and bootstrap)",
+            f"{n_gate} node(s) are READY+schedulable (after provider filter) but none have enough "
+            f"allocatable capacity, or there are no such rows — check execution_node and bootstrap)"
+            f"{pool_hint}",
         )
     return row
 
