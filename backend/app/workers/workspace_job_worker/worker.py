@@ -46,6 +46,7 @@ from app.services.orchestrator_service.errors import (
     WorkspaceUpdateError,
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
+from app.services.placement_service.errors import PlacementError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
@@ -85,6 +86,14 @@ _ORCHESTRATOR_EXCEPTIONS: tuple[type[Exception], ...] = (
 
 _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
 _ERROR_CODE_ORCH = "ORCHESTRATOR_EXCEPTION"
+_ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
+
+
+def _fail_job_from_placement(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
+    _mark_job_failed(session, job, message)
+    ws.status = WorkspaceStatus.ERROR.value
+    _workspace_set_error(ws, _ERROR_CODE_PLACEMENT, message)
+    _touch_workspace(session, ws)
 
 
 def _worker_sessionmaker(bind: Engine):
@@ -741,13 +750,35 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
     _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
 
 
-def _process_next_queued_job_return_id(session: Session, orchestrator: OrchestratorService) -> int | None:
+def _process_next_queued_job_return_id(
+    session: Session,
+    get_orchestrator: Callable[[Session, Workspace, WorkspaceJob], OrchestratorService],
+) -> int | None:
     """Claim one job under the current transaction and run it; return its id, or ``None`` if queue empty."""
     job = try_claim_next_queued_workspace_job(session)
     if job is None:
         return None
     jid = job.workspace_job_id
     assert jid is not None
+    wid = job.workspace_id
+    ws = session.get(Workspace, wid)
+    if ws is None:
+        _mark_job_failed(session, job, "Workspace row not found for job")
+        return jid
+    try:
+        orchestrator = get_orchestrator(session, ws, job)
+    except PlacementError as e:
+        logger.warning(
+            "workspace_job_placement_failed",
+            extra={
+                "workspace_id": wid,
+                "workspace_job_id": jid,
+                "job_type": job.job_type,
+                "error": str(e),
+            },
+        )
+        _fail_job_from_placement(session, ws, job, str(e))
+        return jid
     _process_claimed_running_job(session, orchestrator, job)
     return jid
 
@@ -771,7 +802,7 @@ def load_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:
 def run_pending_jobs(
     session: Session,
     *,
-    get_orchestrator: Callable[[Session], OrchestratorService],
+    get_orchestrator: Callable[[Session, Workspace, WorkspaceJob], OrchestratorService],
     limit: int = 1,
 ) -> WorkspaceJobWorkerTickResult:
     """
@@ -789,8 +820,7 @@ def run_pending_jobs(
     for _ in range(max(1, limit)):
         work = sm()
         try:
-            orch = get_orchestrator(work)
-            jid = _process_next_queued_job_return_id(work, orch)
+            jid = _process_next_queued_job_return_id(work, get_orchestrator)
             if jid is None:
                 work.rollback()
                 break
@@ -808,7 +838,7 @@ def run_pending_jobs(
 def run_one_pending_workspace_job(
     session: Session,
     *,
-    get_orchestrator: Callable[[Session], OrchestratorService],
+    get_orchestrator: Callable[[Session, Workspace, WorkspaceJob], OrchestratorService],
 ) -> WorkspaceJobWorkerTickResult:
     """Run at most one queued job; equivalent to ``run_pending_jobs(..., limit=1)``."""
     return run_pending_jobs(session, get_orchestrator=get_orchestrator, limit=1)
@@ -817,7 +847,7 @@ def run_one_pending_workspace_job(
 def run_queued_workspace_job_by_id(
     session: Session,
     *,
-    get_orchestrator: Callable[[Session], OrchestratorService],
+    get_orchestrator: Callable[[Session, Workspace, WorkspaceJob], OrchestratorService],
     workspace_job_id: int,
 ) -> WorkspaceJobWorkerTickResult:
     """
@@ -832,9 +862,31 @@ def run_queued_workspace_job_by_id(
         if job is None:
             work.rollback()
             return WorkspaceJobWorkerTickResult(processed_count=0, last_job_id=None)
-        orch = get_orchestrator(work)
+        wid = job.workspace_id
+        ws = work.get(Workspace, wid)
+        if ws is None:
+            _mark_job_failed(work, job, "Workspace row not found for job")
+            jid = job.workspace_job_id
+            assert jid is not None
+            work.commit()
+            return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
         jid = job.workspace_job_id
         assert jid is not None
+        try:
+            orch = get_orchestrator(work, ws, job)
+        except PlacementError as e:
+            logger.warning(
+                "workspace_job_placement_failed",
+                extra={
+                    "workspace_id": wid,
+                    "workspace_job_id": jid,
+                    "job_type": job.job_type,
+                    "error": str(e),
+                },
+            )
+            _fail_job_from_placement(work, ws, job, str(e))
+            work.commit()
+            return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
         _process_claimed_running_job(work, orch, job)
         work.commit()
         return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
@@ -848,7 +900,7 @@ def run_queued_workspace_job_by_id(
 def poll_workspace_jobs_tick(
     bind: Engine,
     *,
-    get_orchestrator: Callable[[Session], OrchestratorService],
+    get_orchestrator: Callable[[Session, Workspace, WorkspaceJob], OrchestratorService],
     limit: int = 1,
 ) -> WorkspaceJobWorkerTickResult:
     """

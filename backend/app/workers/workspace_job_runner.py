@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from sqlmodel import Session
 
-from app.services.orchestrator_service.app_factory import build_default_orchestrator_for_session
+from app.services.orchestrator_service.app_factory import build_orchestrator_for_workspace_job
 from app.services.orchestrator_service.errors import AppOrchestratorBindingError
 
 from .workspace_job_worker.results import WorkspaceJobWorkerTickResult
@@ -45,13 +45,13 @@ def execute_workspace_job_tick(
         if workspace_job_id is not None:
             tick = run_queued_workspace_job_by_id(
                 session,
-                get_orchestrator=build_default_orchestrator_for_session,
+                get_orchestrator=build_orchestrator_for_workspace_job,
                 workspace_job_id=workspace_job_id,
             )
         else:
             tick = run_pending_jobs(
                 session,
-                get_orchestrator=build_default_orchestrator_for_session,
+                get_orchestrator=build_orchestrator_for_workspace_job,
                 limit=limit,
             )
         session.commit()

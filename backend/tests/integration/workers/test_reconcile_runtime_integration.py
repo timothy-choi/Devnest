@@ -143,7 +143,7 @@ def test_reconcile_running_syncs_runtime_and_succeeds(
     orch = _orch()
     orch.check_workspace_runtime_health.return_value = _health_ok(str(wid))
 
-    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
     orch.check_workspace_runtime_health.assert_called_once_with(workspace_id=str(wid))
@@ -191,7 +191,7 @@ def test_reconcile_running_unhealthy_marks_workspace_error(
     orch = _orch()
     orch.check_workspace_runtime_health.return_value = _health_bad(str(wid))
 
-    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
     job2 = db_session.get(WorkspaceJob, jid)
@@ -265,7 +265,7 @@ def test_reconcile_stopped_stops_lingering_container(
         issues=None,
     )
 
-    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
     orch.stop_workspace_runtime.assert_called_once()
@@ -298,7 +298,7 @@ def test_reconcile_running_second_job_emits_noop(
         )
         db_session.add(job)
         db_session.commit()
-        run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+        run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
         db_session.expire_all()
 
     evs = db_session.exec(
@@ -364,7 +364,7 @@ def test_reconcile_stopped_stop_failure_emits_reconcile_failed(
         issues=["stop:engine:failed"],
     )
 
-    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
     job2 = db_session.get(WorkspaceJob, jid)
@@ -442,7 +442,7 @@ def test_reconcile_deleted_deregisters_when_route_present(
     ]
 
     orch = _orch()
-    run_pending_jobs(db_session, get_orchestrator=lambda _s: orch, limit=1)
+    run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
     inst.deregister_route.assert_called_once_with(str(wid))

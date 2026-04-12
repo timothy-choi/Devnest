@@ -263,7 +263,7 @@ def test_injected_bringup_failure_marks_job_and_workspace_error(
     orch = create_autospec(OrchestratorService, instance=True)
     orch.bring_up_workspace_runtime.side_effect = WorkspaceBringUpError("system-test-injected-bringup-failure")
     monkeypatch.setattr(
-        "app.workers.workspace_job_runner.build_default_orchestrator_for_session",
+        "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
         lambda _session: orch,
     )
 
