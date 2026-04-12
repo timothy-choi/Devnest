@@ -4,11 +4,25 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from .constants import DEFAULT_WORKSPACE_REQUEST_CPU, DEFAULT_WORKSPACE_REQUEST_MEMORY_MB
-from .errors import ExecutionNodeNotFoundError, NoSchedulableNodeError
+from .errors import ExecutionNodeNotFoundError, InvalidPlacementParametersError, NoSchedulableNodeError
 from .models import ExecutionNode, ExecutionNodeStatus
+
+
+def _count_ready_schedulable_nodes(session: Session) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(ExecutionNode)
+        .where(
+            ExecutionNode.schedulable == True,  # noqa: E712
+            ExecutionNode.status == ExecutionNodeStatus.READY.value,
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
 def list_schedulable_nodes(session: Session) -> list[ExecutionNode]:
@@ -25,7 +39,7 @@ def list_schedulable_nodes(session: Session) -> list[ExecutionNode]:
 
 
 def get_node(session: Session, *, node_id: int | None = None, node_key: str | None = None) -> ExecutionNode:
-    """Load a single node by primary key or ``node_key``."""
+    """Load a single node by database PK (``node_id`` = :class:`ExecutionNode`.id) or ``node_key``."""
     if node_id is not None:
         row = session.get(ExecutionNode, node_id)
         if row is None:
@@ -61,16 +75,25 @@ def select_node_for_workspace(
     ``NULL`` heartbeats valid for dev/single-node bootstrap.
 
     Raises:
+        InvalidPlacementParametersError: when request sizes are not positive.
         NoSchedulableNodeError: when no node qualifies.
     """
     _ = workspace_id  # reserved for affinity (V2+)
+    req_cpu = float(requested_cpu)
+    req_mem = int(requested_memory_mb)
+    if req_cpu <= 0 or req_mem <= 0:
+        raise InvalidPlacementParametersError(
+            "placement requires positive requested_cpu and requested_memory_mb "
+            f"(got cpu={requested_cpu!r}, memory_mb={requested_memory_mb!r})",
+        )
+
     stmt = (
         select(ExecutionNode)
         .where(
             ExecutionNode.schedulable == True,  # noqa: E712
             ExecutionNode.status == ExecutionNodeStatus.READY.value,
-            ExecutionNode.allocatable_cpu >= float(requested_cpu),
-            ExecutionNode.allocatable_memory_mb >= int(requested_memory_mb),
+            ExecutionNode.allocatable_cpu >= req_cpu,
+            ExecutionNode.allocatable_memory_mb >= req_mem,
         )
         .order_by(
             ExecutionNode.allocatable_cpu.desc(),
@@ -82,9 +105,13 @@ def select_node_for_workspace(
         stmt = stmt.with_for_update()
     row = session.exec(stmt).first()
     if row is None:
+        n_gate = _count_ready_schedulable_nodes(session)
         raise NoSchedulableNodeError(
-            "no schedulable execution node satisfies capacity policy "
-            f"(cpu>={requested_cpu}, memory_mb>={requested_memory_mb})",
+            "no execution node matches placement policy "
+            f"(need status=READY, schedulable=true, allocatable_cpu>={req_cpu}, "
+            f"allocatable_memory_mb>={req_mem}; "
+            f"{n_gate} node(s) are READY+schedulable but none have enough allocatable capacity, "
+            "or there are no such rows — check execution_node and bootstrap)",
         )
     return row
 

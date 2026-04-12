@@ -7,7 +7,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.services.placement_service.errors import ExecutionNodeNotFoundError, NoSchedulableNodeError
+from app.services.placement_service.errors import (
+    ExecutionNodeNotFoundError,
+    InvalidPlacementParametersError,
+    NoSchedulableNodeError,
+)
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 from app.services.placement_service.node_placement import (
     get_node,
@@ -37,14 +41,16 @@ def _add_node(
     alloc_cpu: float = 4.0,
     alloc_mem: int = 8192,
 ) -> ExecutionNode:
+    total_cpu = max(4.0, float(alloc_cpu))
+    total_memory_mb = max(8192, int(alloc_mem))
     n = ExecutionNode(
         node_key=key,
         name=key,
         provider_type=ExecutionNodeProviderType.LOCAL.value,
         status=status,
         schedulable=schedulable,
-        total_cpu=4.0,
-        total_memory_mb=8192,
+        total_cpu=total_cpu,
+        total_memory_mb=total_memory_mb,
         allocatable_cpu=alloc_cpu,
         allocatable_memory_mb=alloc_mem,
     )
@@ -84,6 +90,25 @@ def test_select_node_no_node_raises(placement_engine: Engine) -> None:
     with Session(placement_engine) as session:
         with pytest.raises(NoSchedulableNodeError):
             select_node_for_workspace(session, workspace_id=1)
+
+
+def test_select_node_rejects_non_positive_request(placement_engine: Engine) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="n", alloc_cpu=4.0)
+        with pytest.raises(InvalidPlacementParametersError):
+            select_node_for_workspace(
+                session,
+                workspace_id=1,
+                requested_cpu=0.0,
+                requested_memory_mb=512,
+            )
+        with pytest.raises(InvalidPlacementParametersError):
+            select_node_for_workspace(
+                session,
+                workspace_id=1,
+                requested_cpu=1.0,
+                requested_memory_mb=0,
+            )
 
 
 def test_select_node_insufficient_capacity(placement_engine: Engine) -> None:

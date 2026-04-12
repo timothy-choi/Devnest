@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, DateTime, Float, Integer
+from sqlalchemy import JSON, CheckConstraint, Column, DateTime, Float, Integer
 from sqlmodel import Field, SQLModel
 
 from .enums import ExecutionNodeProviderType, ExecutionNodeStatus
@@ -19,10 +19,28 @@ class ExecutionNode(SQLModel, table=True):
     - **Provider** — ``provider_type`` / ``provider_instance_id`` reserve space for EC2 instance IDs without provisioning logic yet.
     - **Capacity** — ``total_*`` vs ``allocatable_*`` support future reservation accounting; V1 policy filters on allocatable only.
 
+    **Status vs schedulable:** only ``READY`` + ``schedulable=True`` are candidates for V1 placement.
+    ``NOT_READY`` / ``DRAINING`` are excluded until an operator or agent transitions them.
+
+    **Capacity:** ``allocatable_*`` must not exceed ``total_*`` (enforced at DB layer). V1 placement
+    filters on allocatable only and does not decrement it — concurrent workspaces can exceed
+    real capacity until reservation accounting lands (TODO).
+
     TODO: Node agent heartbeats, persistent CPU/RAM reservations, EC2 lifecycle sync.
     """
 
     __tablename__ = "execution_node"
+    __table_args__ = (
+        CheckConstraint("allocatable_cpu >= 0", name="ck_exec_node_alloc_cpu_nonneg"),
+        CheckConstraint("total_cpu > 0", name="ck_exec_node_total_cpu_pos"),
+        CheckConstraint("allocatable_cpu <= total_cpu", name="ck_exec_node_cpu_alloc_lte_total"),
+        CheckConstraint("allocatable_memory_mb >= 0", name="ck_exec_node_alloc_mem_nonneg"),
+        CheckConstraint("total_memory_mb > 0", name="ck_exec_node_total_mem_pos"),
+        CheckConstraint(
+            "allocatable_memory_mb <= total_memory_mb",
+            name="ck_exec_node_mem_alloc_lte_total",
+        ),
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     node_key: str = Field(max_length=128, unique=True, index=True)

@@ -11,3 +11,7 @@ class NoSchedulableNodeError(PlacementError):
 
 class ExecutionNodeNotFoundError(PlacementError):
     """Requested node id/key does not exist."""
+
+
+class InvalidPlacementParametersError(PlacementError):
+    """Invalid inputs to placement (e.g. non-positive capacity request)."""

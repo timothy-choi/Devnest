@@ -78,6 +78,8 @@ def _seed_workspace_and_job(
 
 
 def _add_node(session: Session, *, key: str, alloc_cpu: float = 4.0, alloc_mem: int = 8192) -> None:
+    total_cpu = max(4.0, float(alloc_cpu))
+    total_memory_mb = max(8192, int(alloc_mem))
     session.add(
         ExecutionNode(
             node_key=key,
@@ -85,8 +87,8 @@ def _add_node(session: Session, *, key: str, alloc_cpu: float = 4.0, alloc_mem: 
             provider_type=ExecutionNodeProviderType.LOCAL.value,
             status=ExecutionNodeStatus.READY.value,
             schedulable=True,
-            total_cpu=4.0,
-            total_memory_mb=8192,
+            total_cpu=total_cpu,
+            total_memory_mb=total_memory_mb,
             allocatable_cpu=alloc_cpu,
             allocatable_memory_mb=alloc_mem,
         )

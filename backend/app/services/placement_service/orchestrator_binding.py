@@ -44,6 +44,10 @@ def resolve_orchestrator_placement(
     - Jobs that target an existing attachment prefer :class:`WorkspaceRuntime` placement.
     - Bring-up class jobs select via placement policy when no usable runtime placement exists.
     - Otherwise fall back to process env (legacy single-node dev).
+
+    **Caveat:** ``RECONCILE_RUNTIME`` with no ``WorkspaceRuntime`` row (or empty ``node_id``)
+    uses env fallback — acceptable for V1 local dev; multi-node should ensure runtime rows
+    exist or extend this path to call placement (TODO).
     """
     wid = ws.workspace_id
     assert wid is not None

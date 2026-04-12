@@ -1,7 +1,12 @@
 """Execution node registry and V1 placement selection."""
 
 from .bootstrap import ensure_default_local_execution_node
-from .errors import ExecutionNodeNotFoundError, NoSchedulableNodeError, PlacementError
+from .errors import (
+    ExecutionNodeNotFoundError,
+    InvalidPlacementParametersError,
+    NoSchedulableNodeError,
+    PlacementError,
+)
 from .models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 from .node_placement import (
     get_node,
@@ -17,6 +22,7 @@ __all__ = [
     "ExecutionNodeNotFoundError",
     "ExecutionNodeProviderType",
     "ExecutionNodeStatus",
+    "InvalidPlacementParametersError",
     "NoSchedulableNodeError",
     "PlacementError",
     "ensure_default_local_execution_node",
