@@ -4,7 +4,9 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from typing import Annotated
+
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
@@ -16,12 +18,14 @@ from app.services.workspace_service.api.schemas import (
     CreateWorkspaceRequest,
     PatchWorkspaceUpdateRequest,
     WorkspaceAccessResponse,
+    WorkspaceAttachRequest,
     WorkspaceAttachResponse,
     WorkspaceDetailResponse,
     WorkspaceIntentAcceptedResponse,
     WorkspaceListResponse,
 )
 from app.services.workspace_service.errors import (
+    WorkspaceAccessDeniedError,
     WorkspaceBusyError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
@@ -35,6 +39,7 @@ from app.services.workspace_service.services.workspace_event_service import (
     format_sse_data_line,
     list_workspace_events,
 )
+from app.services.workspace_service.services.workspace_session_service import WORKSPACE_SESSION_HTTP_HEADER
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -46,6 +51,8 @@ def _correlation_id_from_request(request: Request) -> str | None:
 def _raise_workspace_http(exc: WorkspaceServiceError) -> None:
     if isinstance(exc, WorkspaceNotFoundError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from exc
+    if isinstance(exc, WorkspaceAccessDeniedError):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceBusyError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceInvalidStateError):
@@ -87,6 +94,9 @@ def _attach_response(out: workspace_intent_service.WorkspaceAttachResult) -> Wor
         status=out.status,
         runtime_ready=out.runtime_ready,
         active_sessions_count=out.active_sessions_count,
+        workspace_session_id=out.workspace_session_id,
+        session_token=out.session_token,
+        session_expires_at=out.session_expires_at,
         endpoint_ref=out.endpoint_ref,
         public_host=out.public_host,
         internal_endpoint=out.internal_endpoint,
@@ -285,26 +295,31 @@ def patch_workspace_update(
     "/attach/{workspace_id}",
     response_model=WorkspaceAttachResponse,
     status_code=status.HTTP_200_OK,
-    summary="Attach to workspace (access when RUNNING)",
+    summary="Attach to workspace (session when RUNNING)",
     description=(
-        "Grants access when the workspace is RUNNING and runtime placement exists. "
+        "Creates a workspace session when the workspace is RUNNING and runtime placement exists. "
         "Does not start the workspace — use POST /workspaces/start/{id} first. "
-        "V1 bumps active_sessions_count as a lightweight session surrogate."
+        "Returns a one-time session_token; send it as header X-DevNest-Workspace-Session on GET /workspaces/{id}/access."
     ),
 )
 def post_workspace_attach(
+    request: Request,
     workspace_id: int,
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
+    body: Annotated[WorkspaceAttachRequest | None, Body()] = None,
 ) -> WorkspaceAttachResponse:
     assert current.user_auth_id is not None
     uid = current.user_auth_id
+    meta = body.client_metadata if body else {}
     try:
         out = workspace_intent_service.request_attach_workspace(
             session,
             workspace_id=workspace_id,
             owner_user_id=uid,
             requested_by_user_id=uid,
+            client_metadata=meta,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
@@ -385,15 +400,20 @@ async def stream_workspace_events(
     status_code=status.HTTP_200_OK,
     summary="Get workspace access coordinates",
     description=(
-        "Returns endpoint metadata when RUNNING and runtime is placed. "
-        "Read-only; does not enqueue jobs or increment sessions. "
-        "Use POST /workspaces/attach/{id} to record an attach / bump session count."
+        "Returns gateway/runtime metadata when RUNNING, runtime is ready, and X-DevNest-Workspace-Session "
+        "matches an active session from POST /workspaces/attach/{id}. "
+        "Refreshes session last_seen_at. Does not enqueue lifecycle jobs."
     ),
 )
 def get_workspace_access_route(
+    request: Request,
     workspace_id: int,
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
+    x_devnest_workspace_session: Annotated[
+        str | None,
+        Header(alias=WORKSPACE_SESSION_HTTP_HEADER, description="Opaque token from POST /workspaces/attach/{id}"),
+    ] = None,
 ) -> WorkspaceAccessResponse:
     assert current.user_auth_id is not None
     try:
@@ -401,6 +421,8 @@ def get_workspace_access_route(
             session,
             workspace_id=workspace_id,
             owner_user_id=current.user_auth_id,
+            workspace_session_token=x_devnest_workspace_session,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)

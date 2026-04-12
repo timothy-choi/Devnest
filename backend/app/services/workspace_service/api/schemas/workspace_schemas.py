@@ -78,6 +78,12 @@ class WorkspaceIntentAcceptedResponse(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+class WorkspaceAttachRequest(BaseModel):
+    """Optional metadata for POST /workspaces/attach/{id} (V1+ session row)."""
+
+    client_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class PatchWorkspaceUpdateRequest(BaseModel):
     """Intent to roll forward config: new ``WorkspaceConfig`` row at ``latest + 1`` (service-computed)."""
 
@@ -103,7 +109,7 @@ class WorkspaceListResponse(BaseModel):
 
 
 class WorkspaceAccessResponse(BaseModel):
-    """Read-only access coordinates when the workspace runtime is ready (GET /access)."""
+    """Access coordinates when RUNNING, runtime ready, and a valid workspace session token is supplied."""
 
     workspace_id: int
     success: bool
@@ -120,13 +126,19 @@ class WorkspaceAccessResponse(BaseModel):
 
 
 class WorkspaceAttachResponse(BaseModel):
-    """Attach increments a lightweight session counter when access is granted (POST /attach)."""
+    """Attach creates a workspace session when RUNNING + runtime ready; returns a one-time opaque token."""
 
     workspace_id: int
     accepted: bool
     status: str
     runtime_ready: bool
     active_sessions_count: int
+    workspace_session_id: int
+    session_token: str = Field(
+        ...,
+        description="Opaque bearer for X-DevNest-Workspace-Session on GET /workspaces/{id}/access. Shown once.",
+    )
+    session_expires_at: datetime
     endpoint_ref: str | None = None
     public_host: str | None = None
     internal_endpoint: str | None = None

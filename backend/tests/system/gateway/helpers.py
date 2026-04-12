@@ -10,6 +10,7 @@ from fastapi import status
 from fastapi.testclient import TestClient
 
 from app.services.auth_service.services.auth_token import create_access_token
+from app.services.workspace_service.services.workspace_session_service import WORKSPACE_SESSION_HTTP_HEADER
 
 
 def internal_headers() -> dict[str, str]:
@@ -20,6 +21,11 @@ def internal_headers() -> dict[str, str]:
 
 def auth_header(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def auth_and_workspace_session(access_token: str, workspace_session_token: str) -> dict[str, str]:
+    """GET /workspaces/{id}/access requires the opaque token from POST /workspaces/attach/{id}."""
+    return {**auth_header(access_token), WORKSPACE_SESSION_HTTP_HEADER: workspace_session_token}
 
 
 def register_and_token(client: TestClient, *, username: str, email: str) -> tuple[int, str]:

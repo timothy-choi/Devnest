@@ -13,6 +13,7 @@ from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.api.routers.workspaces import router
 from app.services.workspace_service.models import Workspace, WorkspaceConfig, WorkspaceRuntime
+from app.services.workspace_service.services.workspace_session_service import WORKSPACE_SESSION_HTTP_HEADER
 from app.services.workspace_service.models.enums import (
     WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
@@ -81,6 +82,10 @@ def _auth_user(owner_user_id: int):
     )
 
 
+def _ws_session_headers(session_token: str) -> dict[str, str]:
+    return {WORKSPACE_SESSION_HTTP_HEADER: session_token}
+
+
 def test_post_attach_200_and_payload(workspace_unit_engine, owner_user_id: int) -> None:
     with Session(workspace_unit_engine) as session:
         wid = _seed_ready_workspace(session, owner_user_id)
@@ -103,22 +108,23 @@ def test_post_attach_200_and_payload(workspace_unit_engine, owner_user_id: int) 
     assert data["gateway_url"] is None
     assert data["issues"] == []
     assert data["active_sessions_count"] == 1
+    assert data["workspace_session_id"] >= 1
+    assert data["session_token"].startswith("dnws_")
+    assert data["session_expires_at"]
 
 
 def test_get_access_200_and_payload(workspace_unit_engine, owner_user_id: int) -> None:
     with Session(workspace_unit_engine) as session:
         wid = _seed_ready_workspace(session, owner_user_id)
-        ws = session.get(Workspace, wid)
-        assert ws is not None
-        ws.active_sessions_count = 7
-        session.add(ws)
-        session.commit()
 
     app = _make_app(workspace_unit_engine)
     app.dependency_overrides[get_current_user] = lambda: _auth_user(owner_user_id)
 
     with TestClient(app) as client:
-        res = client.get(f"/workspaces/{wid}/access")
+        att = client.post(f"/workspaces/attach/{wid}")
+        assert att.status_code == 200, att.text
+        tok = att.json()["session_token"]
+        res = client.get(f"/workspaces/{wid}/access", headers=_ws_session_headers(tok))
 
     assert res.status_code == 200
     data = res.json()
@@ -135,7 +141,21 @@ def test_get_access_200_and_payload(workspace_unit_engine, owner_user_id: int) -
     with Session(workspace_unit_engine) as session:
         ws = session.get(Workspace, wid)
         assert ws is not None
-        assert ws.active_sessions_count == 7
+        assert ws.active_sessions_count == 1
+
+
+def test_get_access_403_without_workspace_session_header(workspace_unit_engine, owner_user_id: int) -> None:
+    with Session(workspace_unit_engine) as session:
+        wid = _seed_ready_workspace(session, owner_user_id)
+
+    app = _make_app(workspace_unit_engine)
+    app.dependency_overrides[get_current_user] = lambda: _auth_user(owner_user_id)
+
+    with TestClient(app) as client:
+        res = client.get(f"/workspaces/{wid}/access")
+
+    assert res.status_code == 403
+    assert "session token" in res.json()["detail"].lower()
 
 
 def test_attach_not_found_404(workspace_unit_engine, owner_user_id: int) -> None:

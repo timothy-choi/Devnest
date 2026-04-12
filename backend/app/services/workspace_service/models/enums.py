@@ -51,3 +51,30 @@ class WorkspaceRuntimeHealthStatus(str, Enum):
     HEALTHY = "HEALTHY"
     DEGRADED = "DEGRADED"
     UNHEALTHY = "UNHEALTHY"
+
+
+class FailureStage(str, Enum):
+    """Coarse failure classification for worker / reconcile outcomes (V1; extend as needed)."""
+
+    STORAGE = "STORAGE"
+    NETWORK = "NETWORK"
+    CONTAINER = "CONTAINER"
+    PROXY = "PROXY"
+    PLACEMENT = "PLACEMENT"
+    CAPACITY = "CAPACITY"
+    AUTH = "AUTH"
+    UNKNOWN = "UNKNOWN"
+
+
+class WorkspaceSessionStatus(str, Enum):
+    """Lifecycle for :class:`~app.services.workspace_service.models.workspace_session.WorkspaceSession`."""
+
+    ACTIVE = "ACTIVE"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+
+
+class WorkspaceSessionRole(str, Enum):
+    """V1: only ``OWNER`` is issued; collaborators / org roles are deferred."""
+
+    OWNER = "OWNER"

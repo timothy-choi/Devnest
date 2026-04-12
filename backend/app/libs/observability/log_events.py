@@ -68,6 +68,12 @@ class LogEvent:
     WORKSPACE_JOB_STARTED = "workspace.job.started"
     WORKSPACE_JOB_SUCCEEDED = "workspace.job.succeeded"
     WORKSPACE_JOB_FAILED = "workspace.job.failed"
+    WORKSPACE_JOB_RETRY_SCHEDULED = "workspace.job.retry_scheduled"
+    WORKSPACE_JOB_RETRY_EXHAUSTED = "workspace.job.retry_exhausted"
+    WORKSPACE_JOB_FAILED_TERMINAL = "workspace.job.failed_terminal"
+
+    RECONCILE_RETRY_SCHEDULED = "reconcile.job.retry_scheduled"
+    RECONCILE_FAILED_TERMINAL = "reconcile.job.failed_terminal"
 
     ORCHESTRATOR_BRINGUP_STARTED = "orchestrator.bringup.started"
     ORCHESTRATOR_BRINGUP_SUCCEEDED = "orchestrator.bringup.succeeded"
@@ -100,6 +106,13 @@ class LogEvent:
 
     SECURITY_INTERNAL_AUTH_FAILED = "security.internal.auth_failed"
     SECURITY_INTERNAL_NOT_CONFIGURED = "security.internal.not_configured"
+
+    WORKSPACE_SESSION_CREATED = "workspace.session.created"
+    WORKSPACE_SESSION_REFRESHED = "workspace.session.refreshed"
+    WORKSPACE_SESSION_EXPIRED = "workspace.session.expired"
+    WORKSPACE_SESSION_REVOKED_BULK = "workspace.session.revoked_bulk"
+    WORKSPACE_ACCESS_DENIED = "workspace.access.denied"
+    WORKSPACE_ACCESS_GRANTED = "workspace.access.granted"
 
 
 def log_event(

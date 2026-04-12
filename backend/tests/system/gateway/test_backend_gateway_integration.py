@@ -104,17 +104,21 @@ def test_access_and_attach_return_public_host_and_gateway_url(
 
     expected_host = f"{wid}.app.devnest.local"
 
-    r_acc = client.get(f"/workspaces/{wid}/access", headers=helpers.auth_header(token))
-    assert r_acc.status_code == status.HTTP_200_OK, r_acc.text
-    acc = r_acc.json()
-    assert acc["public_host"] == expected_host
-    assert acc["gateway_url"] == f"http://{expected_host}/"
-
     r_att = client.post(f"/workspaces/attach/{wid}", headers=helpers.auth_header(token))
     assert r_att.status_code == status.HTTP_200_OK, r_att.text
     att = r_att.json()
     assert att["public_host"] == expected_host
     assert att["gateway_url"] == f"http://{expected_host}/"
+    ws_tok = att["session_token"]
+
+    r_acc = client.get(
+        f"/workspaces/{wid}/access",
+        headers=helpers.auth_and_workspace_session(token, ws_tok),
+    )
+    assert r_acc.status_code == status.HTTP_200_OK, r_acc.text
+    acc = r_acc.json()
+    assert acc["public_host"] == expected_host
+    assert acc["gateway_url"] == f"http://{expected_host}/"
 
 
 def test_workspace_job_events_persist_after_running_with_gateway(
@@ -161,6 +165,12 @@ def test_bringup_failure_does_not_register_gateway_route(
         email=f"gw_fail_{uuid.uuid4().hex[:8]}@example.com",
     )
     wid, jid = helpers.create_workspace(client, token)
+
+    job_row = db_session.get(WorkspaceJob, jid)
+    assert job_row is not None
+    job_row.max_attempts = 1
+    db_session.add(job_row)
+    db_session.commit()
 
     orch = create_autospec(OrchestratorService, instance=True)
     orch.bring_up_workspace_runtime.side_effect = WorkspaceBringUpError(

@@ -40,6 +40,10 @@ from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
     record_workspace_event,
 )
+from app.services.workspace_service.services.workspace_session_service import (
+    create_workspace_session,
+    resolve_workspace_session_for_access,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,13 +84,16 @@ class WorkspaceAccessResult:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceAttachResult:
-    """Attach when RUNNING + runtime placed; increments ``active_sessions_count`` (V1 stand-in for sessions)."""
+    """Attach when RUNNING + runtime placed; creates a :class:`~app.services.workspace_service.models.workspace_session.WorkspaceSession` row."""
 
     workspace_id: int
     accepted: bool
     status: str
     runtime_ready: bool
     active_sessions_count: int
+    workspace_session_id: int
+    session_token: str
+    session_expires_at: datetime
     endpoint_ref: str | None
     public_host: str | None
     internal_endpoint: str | None
@@ -121,6 +128,8 @@ def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int
     ws = session.get(Workspace, workspace_id)
     if ws is None or ws.owner_user_id != owner_user_id:
         raise WorkspaceNotFoundError("Workspace not found")
+    # V1 attach/access are owner-only. ``is_private`` gates listing elsewhere; collaborators / shared
+    # workspaces are deferred (TODO).
     return ws
 
 
@@ -211,11 +220,13 @@ def get_workspace_access(
     *,
     workspace_id: int,
     owner_user_id: int,
+    workspace_session_token: str | None,
+    correlation_id: str | None = None,
 ) -> WorkspaceAccessResult:
     """
-    Return normalized access fields when the workspace runtime is ready.
+    Return gateway/runtime coordinates when RUNNING, runtime is ready, and the workspace session token is valid.
 
-    Does not enqueue jobs and does not mutate rows. Read-only after auth check.
+    Updates ``last_seen_at`` on the session row (commit by caller's session scope).
     """
     ws = _get_owned_workspace(session, workspace_id, owner_user_id)
     _ensure_workspace_running_for_access(ws)
@@ -225,6 +236,18 @@ def get_workspace_access(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
+    resolve_workspace_session_for_access(
+        session,
+        workspace_id=workspace_id,
+        user_id=owner_user_id,
+        token_plain=workspace_session_token or "",
+        correlation_id=correlation_id,
+    )
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     issues = _access_issues_for_runtime(rt)
     return WorkspaceAccessResult(
         workspace_id=workspace_id,
@@ -245,13 +268,14 @@ def request_attach_workspace(
     workspace_id: int,
     owner_user_id: int,
     requested_by_user_id: int,
+    client_metadata: dict | None = None,
+    correlation_id: str | None = None,
 ) -> WorkspaceAttachResult:
     """
-    Grant access when RUNNING + runtime placed: same checks as :func:`get_workspace_access`, then bump
-    ``active_sessions_count`` as a V1 session surrogate (no token table yet).
+    Grant a workspace session when RUNNING + runtime placed (same preconditions as :func:`get_workspace_access`).
 
     Does **not** start or provision the workspace; callers use ``POST /workspaces/start/{id}`` first.
-    ``requested_by_user_id`` reserved for future audit / per-user sessions.
+    Returns a one-time opaque ``session_token`` for ``X-DevNest-Workspace-Session`` on GET access.
     """
     _ = requested_by_user_id
     ws = _get_owned_workspace(session, workspace_id, owner_user_id)
@@ -263,22 +287,30 @@ def request_attach_workspace(
         )
     assert rt is not None
     issues = _access_issues_for_runtime(rt)
-    now = datetime.now(timezone.utc)
-    ws.active_sessions_count = int(ws.active_sessions_count or 0) + 1
-    ws.updated_at = now
-    session.add(ws)
+    plain_token, row = create_workspace_session(
+        session,
+        workspace_id=workspace_id,
+        user_id=owner_user_id,
+        client_metadata=client_metadata,
+        correlation_id=correlation_id,
+    )
     try:
         session.commit()
     except Exception:
         session.rollback()
         raise
     session.refresh(ws)
+    session.refresh(row)
+    assert row.workspace_session_id is not None
     return WorkspaceAttachResult(
         workspace_id=workspace_id,
         accepted=True,
         status=ws.status,
         runtime_ready=True,
         active_sessions_count=ws.active_sessions_count,
+        workspace_session_id=row.workspace_session_id,
+        session_token=plain_token,
+        session_expires_at=row.expires_at,
         endpoint_ref=ws.endpoint_ref,
         public_host=_resolve_public_host_for_gateway_display(ws, rt),
         internal_endpoint=rt.internal_endpoint,

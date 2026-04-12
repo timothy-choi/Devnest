@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlmodel import Session
+from sqlalchemy import func
+from sqlmodel import Session, select
 
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.errors import (
+    WorkspaceAccessDeniedError,
     WorkspaceBusyError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
 )
-from app.services.workspace_service.models import Workspace, WorkspaceConfig, WorkspaceRuntime
+from app.services.workspace_service.models import (
+    Workspace,
+    WorkspaceConfig,
+    WorkspaceJob,
+    WorkspaceRuntime,
+    WorkspaceSession,
+)
 from app.services.workspace_service.models.enums import (
     WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
@@ -78,6 +86,27 @@ def _seed_running_with_runtime(
     return ws.workspace_id
 
 
+def test_attach_does_not_create_workspace_job(workspace_unit_engine, owner_user_id: int) -> None:
+    with Session(workspace_unit_engine) as session:
+        wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+        n_jobs = int(
+            session.exec(select(func.count()).where(WorkspaceJob.workspace_id == wid)).one(),
+        )
+    assert n_jobs == 0
+    with Session(workspace_unit_engine) as session:
+        workspace_intent_service.request_attach_workspace(
+            session,
+            workspace_id=wid,
+            owner_user_id=owner_user_id,
+            requested_by_user_id=owner_user_id,
+        )
+    with Session(workspace_unit_engine) as session:
+        n_after = int(
+            session.exec(select(func.count()).where(WorkspaceJob.workspace_id == wid)).one(),
+        )
+    assert n_after == 0
+
+
 def test_request_attach_happy_path(workspace_unit_engine, owner_user_id: int) -> None:
     with Session(workspace_unit_engine) as session:
         wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
@@ -99,6 +128,12 @@ def test_request_attach_happy_path(workspace_unit_engine, owner_user_id: int) ->
     assert out.gateway_url is None
     assert out.issues == ()
     assert out.active_sessions_count == 1
+    assert out.workspace_session_id > 0
+    assert out.session_token.startswith("dnws_")
+    exp = out.session_expires_at
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    assert exp > datetime.now(timezone.utc)
 
     with Session(workspace_unit_engine) as session:
         ws = session.get(Workspace, wid)
@@ -108,12 +143,21 @@ def test_request_attach_happy_path(workspace_unit_engine, owner_user_id: int) ->
 
 def test_get_workspace_access_happy_path(workspace_unit_engine, owner_user_id: int) -> None:
     with Session(workspace_unit_engine) as session:
-        wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=3)
+        wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+    with Session(workspace_unit_engine) as session:
+        att = workspace_intent_service.request_attach_workspace(
+            session,
+            workspace_id=wid,
+            owner_user_id=owner_user_id,
+            requested_by_user_id=owner_user_id,
+        )
+        tok = att.session_token
     with Session(workspace_unit_engine) as session:
         out = workspace_intent_service.get_workspace_access(
             session,
             workspace_id=wid,
             owner_user_id=owner_user_id,
+            workspace_session_token=tok,
         )
 
     assert out.success is True
@@ -129,22 +173,37 @@ def test_get_workspace_access_happy_path(workspace_unit_engine, owner_user_id: i
     with Session(workspace_unit_engine) as session:
         ws = session.get(Workspace, wid)
         assert ws is not None
-        assert ws.active_sessions_count == 3
+        assert ws.active_sessions_count == 1
 
 
 def test_get_workspace_access_does_not_increment_sessions(workspace_unit_engine, owner_user_id: int) -> None:
     with Session(workspace_unit_engine) as session:
-        wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=5)
+        wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+    with Session(workspace_unit_engine) as session:
+        att = workspace_intent_service.request_attach_workspace(
+            session,
+            workspace_id=wid,
+            owner_user_id=owner_user_id,
+            requested_by_user_id=owner_user_id,
+        )
+        tok = att.session_token
     with Session(workspace_unit_engine) as session:
         workspace_intent_service.get_workspace_access(
             session,
             workspace_id=wid,
             owner_user_id=owner_user_id,
+            workspace_session_token=tok,
+        )
+        workspace_intent_service.get_workspace_access(
+            session,
+            workspace_id=wid,
+            owner_user_id=owner_user_id,
+            workspace_session_token=tok,
         )
     with Session(workspace_unit_engine) as session:
         ws = session.get(Workspace, wid)
         assert ws is not None
-        assert ws.active_sessions_count == 5
+        assert ws.active_sessions_count == 1
 
 
 def test_attach_twice_increments_sessions(workspace_unit_engine, owner_user_id: int) -> None:
@@ -165,6 +224,65 @@ def test_attach_twice_increments_sessions(workspace_unit_engine, owner_user_id: 
         )
     assert a.active_sessions_count == 1
     assert b.active_sessions_count == 2
+    assert a.session_token != b.session_token
+
+
+def test_get_workspace_access_requires_token(workspace_unit_engine, owner_user_id: int) -> None:
+    with Session(workspace_unit_engine) as session:
+        wid = _seed_running_with_runtime(session, owner_user_id)
+    with Session(workspace_unit_engine) as session:
+        with pytest.raises(WorkspaceAccessDeniedError, match="session token required"):
+            workspace_intent_service.get_workspace_access(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                workspace_session_token=None,
+            )
+
+
+def test_get_workspace_access_rejects_bad_token(workspace_unit_engine, owner_user_id: int) -> None:
+    with Session(workspace_unit_engine) as session:
+        wid = _seed_running_with_runtime(session, owner_user_id)
+    with Session(workspace_unit_engine) as session:
+        with pytest.raises(WorkspaceAccessDeniedError, match="Invalid workspace session token"):
+            workspace_intent_service.get_workspace_access(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                workspace_session_token="dnws_not_a_real_token",
+            )
+
+
+def test_get_workspace_access_rejects_expired_session(workspace_unit_engine, owner_user_id: int) -> None:
+    with Session(workspace_unit_engine) as session:
+        wid = _seed_running_with_runtime(session, owner_user_id)
+    with Session(workspace_unit_engine) as session:
+        att = workspace_intent_service.request_attach_workspace(
+            session,
+            workspace_id=wid,
+            owner_user_id=owner_user_id,
+            requested_by_user_id=owner_user_id,
+        )
+        sid = att.workspace_session_id
+        tok = att.session_token
+    with Session(workspace_unit_engine) as session:
+        row = session.get(WorkspaceSession, sid)
+        assert row is not None
+        row.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        session.add(row)
+        session.commit()
+    with Session(workspace_unit_engine) as session:
+        with pytest.raises(WorkspaceAccessDeniedError, match="expired"):
+            workspace_intent_service.get_workspace_access(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                workspace_session_token=tok,
+            )
+    with Session(workspace_unit_engine) as session:
+        ws = session.get(Workspace, wid)
+        assert ws is not None
+        assert ws.active_sessions_count == 0
 
 
 @pytest.mark.parametrize(
@@ -213,6 +331,7 @@ def test_access_rejected_when_not_running(workspace_unit_engine, owner_user_id: 
                 session,
                 workspace_id=wid,
                 owner_user_id=owner_user_id,
+                workspace_session_token=None,
             )
 
 
@@ -253,6 +372,7 @@ def test_attach_access_rejected_when_busy(
                 session,
                 workspace_id=wid,
                 owner_user_id=owner_user_id,
+                workspace_session_token=None,
             )
 
 
@@ -290,6 +410,7 @@ def test_attach_access_running_without_runtime_row(workspace_unit_engine, owner_
                 session,
                 workspace_id=wid,
                 owner_user_id=owner_user_id,
+                workspace_session_token=None,
             )
 
 
@@ -302,6 +423,7 @@ def test_attach_access_running_with_empty_container_id(workspace_unit_engine, ow
                 session,
                 workspace_id=wid,
                 owner_user_id=owner_user_id,
+                workspace_session_token=None,
             )
 
 
@@ -323,6 +445,7 @@ def test_access_workspace_not_found(workspace_unit_engine, owner_user_id: int) -
                 session,
                 workspace_id=999_999,
                 owner_user_id=owner_user_id,
+                workspace_session_token=None,
             )
 
 
@@ -355,6 +478,7 @@ def test_attach_access_wrong_owner(workspace_unit_engine, owner_user_id: int) ->
                 session,
                 workspace_id=wid,
                 owner_user_id=other_id,
+                workspace_session_token=None,
             )
 
 
@@ -366,22 +490,24 @@ def test_access_includes_health_issue_when_not_healthy(workspace_unit_engine, ow
             health_status=WorkspaceRuntimeHealthStatus.UNKNOWN.value,
         )
     with Session(workspace_unit_engine) as session:
-        out = workspace_intent_service.get_workspace_access(
-            session,
-            workspace_id=wid,
-            owner_user_id=owner_user_id,
-        )
-    assert out.success is True
-    assert out.runtime_ready is True
-    assert len(out.issues) == 1
-    assert out.issues[0].startswith("access:runtime:health:")
-
-    with Session(workspace_unit_engine) as session:
         attach_out = workspace_intent_service.request_attach_workspace(
             session,
             workspace_id=wid,
             owner_user_id=owner_user_id,
             requested_by_user_id=owner_user_id,
         )
+        tok = attach_out.session_token
     assert attach_out.accepted is True
     assert len(attach_out.issues) == 1
+
+    with Session(workspace_unit_engine) as session:
+        out = workspace_intent_service.get_workspace_access(
+            session,
+            workspace_id=wid,
+            owner_user_id=owner_user_id,
+            workspace_session_token=tok,
+        )
+    assert out.success is True
+    assert out.runtime_ready is True
+    assert len(out.issues) == 1
+    assert out.issues[0].startswith("access:runtime:health:")

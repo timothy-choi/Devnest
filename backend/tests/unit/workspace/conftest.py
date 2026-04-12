@@ -14,6 +14,7 @@ from app.services.workspace_service.models import (  # noqa: F401 — register m
     WorkspaceEvent,
     WorkspaceJob,
     WorkspaceRuntime,
+    WorkspaceSession,
 )
 
 
