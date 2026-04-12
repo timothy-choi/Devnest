@@ -14,7 +14,7 @@ from sqlmodel import Session
 from app.libs.db.database import get_db
 from app.services.notification_service.api.dependencies import require_internal_api_key
 from app.services.placement_service.errors import ExecutionNodeNotFoundError
-from app.services.providers.errors import Ec2ProviderError
+from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
 
 from ...errors import Ec2ProvisionConfigurationError, NodeLifecycleError
 from ...lifecycle import (
@@ -132,6 +132,8 @@ def post_register_existing_ec2(
         )
         session.commit()
         session.refresh(node)
+    except Ec2InvalidInstanceIdError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except Ec2ProviderError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
     return ExecutionNodeSummaryResponse.from_row(node)

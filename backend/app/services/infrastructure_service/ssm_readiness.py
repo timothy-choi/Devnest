@@ -8,6 +8,8 @@ from typing import Any
 from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 
+from app.services.providers.aws_throttle import client_call_with_throttle_retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,15 +20,20 @@ def is_instance_ssm_online(ssm_client: BaseClient, instance_id: str) -> bool:
     Requires worker IAM ``ssm:DescribeInstanceInformation``. The instance role still needs
     **AmazonSSMManagedInstanceCore** (or equivalent) for the agent to register.
 
-    TODO: exponential backoff / rate limits when polling many instances.
+    Retries ``ThrottlingException`` with bounded backoff. TODO: shared rate budget when polling
+    many instances from a single sync tick.
     """
     iid = (instance_id or "").strip()
     if not iid:
         return False
     try:
-        resp = ssm_client.describe_instance_information(
-            Filters=[{"Key": "InstanceIds", "Values": [iid]}],
-            MaxResults=5,
+        resp = client_call_with_throttle_retry(
+            "ssm.DescribeInstanceInformation",
+            lambda: ssm_client.describe_instance_information(
+                Filters=[{"Key": "InstanceIds", "Values": [iid]}],
+                MaxResults=5,
+            ),
+            max_throttle_retries=4,
         )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")

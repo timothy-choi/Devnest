@@ -29,13 +29,15 @@ from app.services.placement_service.models import (
     ExecutionNodeStatus,
 )
 
-from .errors import Ec2InstanceNotFoundError, Ec2ProviderError
+from .aws_throttle import client_call_with_throttle_retry
+from .errors import Ec2InstanceNotFoundError, Ec2InvalidInstanceIdError, Ec2ProviderError
 
 logger = logging.getLogger(__name__)
 
 _INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,32}$", re.IGNORECASE)
 
-_AWS_AUTH_CODES = frozenset(
+# Shared with :mod:`app.services.infrastructure_service.lifecycle` for consistent error mapping.
+EC2_CLIENT_AUTH_ERROR_CODES = frozenset(
     {
         "AuthFailure",
         "UnauthorizedOperation",
@@ -84,7 +86,7 @@ def build_ec2_client(*, region: str | None = None) -> BaseClient:
 def _require_instance_id(instance_id: str) -> str:
     iid = (instance_id or "").strip()
     if not iid or not _INSTANCE_ID_RE.match(iid):
-        raise Ec2ProviderError(f"invalid EC2 instance id: {instance_id!r}")
+        raise Ec2InvalidInstanceIdError(f"invalid EC2 instance id: {instance_id!r}")
     return iid
 
 
@@ -119,12 +121,15 @@ def describe_ec2_instance(
     client = ec2_client or build_ec2_client()
     region = client.meta.region_name or (get_settings().aws_region or "").strip() or "unknown"
     try:
-        resp = client.describe_instances(InstanceIds=[iid])
+        resp = client_call_with_throttle_retry(
+            "ec2.DescribeInstances",
+            lambda: client.describe_instances(InstanceIds=[iid]),
+        )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
         if code == "InvalidInstanceID.NotFound":
             raise Ec2InstanceNotFoundError(f"EC2 instance not found: {iid}") from e
-        if code in _AWS_AUTH_CODES:
+        if code in EC2_CLIENT_AUTH_ERROR_CODES:
             raise Ec2ProviderError(
                 f"AWS denied EC2 describe_instances ({code}); check credentials, region, and IAM: {e}",
             ) from e
@@ -177,7 +182,7 @@ def compute_status_schedulable_after_ec2_sync(
 
     st = (existing_row.status or "").strip().upper()
     if st == ExecutionNodeStatus.PROVISIONING.value:
-        if desc.state in ("terminated", "shutting-down"):
+        if desc.state in ("terminated", "shutting-down", "stopped", "stopping"):
             return ExecutionNodeStatus.ERROR.value, False
         return ExecutionNodeStatus.PROVISIONING.value, False
     if st == ExecutionNodeStatus.DRAINING.value:
@@ -201,7 +206,10 @@ def ec2_instance_type_capacity(client: BaseClient, instance_type: str) -> tuple[
     if not it or it == "unknown":
         return 4.0, 8192
     try:
-        resp = client.describe_instance_types(InstanceTypes=[it])
+        resp = client_call_with_throttle_retry(
+            "ec2.DescribeInstanceTypes",
+            lambda: client.describe_instance_types(InstanceTypes=[it]),
+        )
     except ClientError as e:
         logger.warning(
             "ec2_describe_instance_types_fallback",
@@ -262,7 +270,7 @@ def list_ec2_instances(
                     )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
-        if code in _AWS_AUTH_CODES:
+        if code in EC2_CLIENT_AUTH_ERROR_CODES:
             raise Ec2ProviderError(
                 f"AWS denied EC2 describe_instances ({code}); check credentials, region, and IAM: {e}",
             ) from e
@@ -365,7 +373,16 @@ def register_ec2_instance(
         )
         session.add(row)
     else:
+        prior_status = (row.status or "").strip().upper()
         status, schedulable = compute_status_schedulable_after_ec2_sync(existing_row=row, desc=desc)
+        if (
+            status == ExecutionNodeStatus.ERROR.value
+            and prior_status == ExecutionNodeStatus.PROVISIONING.value
+        ):
+            row.last_error_code = "Ec2NotRunningDuringProvisioning"
+            row.last_error_message = (
+                f"EC2 left provisioning path: instance state is {desc.state!r} (expected running for readiness)"
+            )[:4096]
         row.node_key = key
         row.name = desc.name_tag or row.name or key
         row.provider_type = ExecutionNodeProviderType.EC2.value
@@ -379,6 +396,9 @@ def register_ec2_instance(
         row.ssh_user = user
         row.status = status
         row.schedulable = schedulable
+        if status == ExecutionNodeStatus.READY.value:
+            row.last_error_code = None
+            row.last_error_message = None
         row.total_cpu = vcpu
         row.total_memory_mb = mem_mb
         row.allocatable_cpu = vcpu

@@ -4,6 +4,15 @@ EC2 provisioning and execution-node lifecycle (control plane).
 Creates instances via ``run_instances``, tracks ``ExecutionNode`` rows through ``PROVISIONING`` →
 ``READY`` (after SSM eligibility for ``ssm_docker``), and supports drain / deregister / terminate.
 
+**Worker IAM (least-privilege sketch — tighten Resource/Condition in production):**
+
+- **EC2:** ``ec2:RunInstances``, ``ec2:CreateTags`` (on instances created by the principal), ``ec2:DescribeInstances``,
+  ``ec2:DescribeInstanceTypes``, ``ec2:TerminateInstances`` — scope ``Resource`` to tagged instances (e.g.
+  ``aws:ResourceTag/devnest:managed=true``) where your org supports it; ``RunInstances`` often needs broader
+  ``subnet``, ``security-group``, ``image``, ``iam:PassRole`` on the instance profile.
+- **SSM (readiness only):** ``ssm:DescribeInstanceInformation`` for :func:`~app.services.infrastructure_service.ssm_readiness.is_instance_ssm_online`.
+- **Secrets:** Prefer instance role / IRSA / OIDC over long-lived keys; never commit ``AWS_SECRET_ACCESS_KEY``.
+
 TODO: async provisioning jobs, richer bootstrap (cloud-init), multi-instance batches, ASG integration.
 """
 
@@ -15,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from botocore.client import BaseClient
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, WaiterError
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
@@ -27,7 +36,9 @@ from app.services.placement_service.models import (
     ExecutionNodeProviderType,
     ExecutionNodeStatus,
 )
+from app.services.providers.aws_throttle import client_call_with_throttle_retry
 from app.services.providers.ec2_provider import (
+    EC2_CLIENT_AUTH_ERROR_CODES,
     build_ec2_client,
     describe_ec2_instance,
     ec2_instance_type_capacity,
@@ -94,7 +105,27 @@ def provision_ec2_node(
     client = ec2_client or build_ec2_client(region=req.region)
     region = client.meta.region_name or (req.region or settings.aws_region or "").strip() or "unknown"
 
-    resp = client.run_instances(**_run_instances_params(req, settings))
+    try:
+        resp = client_call_with_throttle_retry(
+            "ec2.RunInstances",
+            lambda: client.run_instances(**_run_instances_params(req, settings)),
+        )
+    except ClientError as e:
+        code = (e.response.get("Error") or {}).get("Code", "")
+        logger.error(
+            "ec2_run_instances_failed",
+            extra={
+                "error_code": code,
+                "instance_type": req.instance_type,
+                "region": region,
+            },
+        )
+        if code in EC2_CLIENT_AUTH_ERROR_CODES:
+            raise Ec2ProviderError(
+                f"AWS denied ec2 RunInstances ({code}); check worker IAM and limits: {e}",
+            ) from e
+        raise Ec2ProvisionConfigurationError(f"ec2 RunInstances failed ({code}): {e}") from e
+
     instances = resp.get("Instances") or []
     if not instances:
         raise Ec2ProvisionConfigurationError("run_instances returned no Instances")
@@ -108,7 +139,22 @@ def provision_ec2_node(
                 InstanceIds=[iid],
                 WaiterConfig={"Delay": 5, "MaxAttempts": 60},
             )
+        except WaiterError as e:
+            logger.error(
+                "ec2_provision_wait_running_failed_orphan_risk",
+                extra={
+                    "instance_id": iid,
+                    "region": region,
+                    "error": str(e),
+                    "detail": "EC2 instance may exist without a DevNest execution_node row; terminate in console if abandoned.",
+                },
+            )
+            raise Ec2ProvisionConfigurationError(f"wait instance_running failed for {iid}: {e}") from e
         except ClientError as e:
+            logger.error(
+                "ec2_provision_wait_running_failed_orphan_risk",
+                extra={"instance_id": iid, "region": region, "error": str(e)},
+            )
             raise Ec2ProvisionConfigurationError(f"wait instance_running failed for {iid}: {e}") from e
 
     node_key = explicit_key or f"ec2-{iid}"
@@ -116,13 +162,20 @@ def provision_ec2_node(
         _require_free_node_key(session, node_key)
 
     prefix = (settings.devnest_ec2_tag_prefix or "devnest").strip() or "devnest"
-    post_tags = [{"Key": f"{prefix}:node_key", "Value": node_key[:255]}]
+    post_tags = [{"Key": f"{prefix}:node_key"[:127], "Value": node_key[:256]}]
     if not (req.name_tag or "").strip():
-        post_tags.append({"Key": "Name", "Value": node_key[:255]})
+        post_tags.append({"Key": "Name", "Value": node_key[:256]})
     try:
-        client.create_tags(Resources=[iid], Tags=post_tags)
+        client_call_with_throttle_retry(
+            "ec2.CreateTags",
+            lambda: client.create_tags(Resources=[iid], Tags=post_tags),
+        )
     except ClientError as e:
-        logger.warning("ec2_create_tags_failed", extra={"instance_id": iid, "error": str(e)})
+        code = (e.response.get("Error") or {}).get("Code", "")
+        logger.warning(
+            "ec2_create_tags_failed",
+            extra={"instance_id": iid, "error_code": code, "error": str(e)},
+        )
 
     default_em = settings.devnest_ec2_default_execution_mode.strip().lower()
     raw_em = (req.execution_mode or default_em).strip().lower()
@@ -182,16 +235,17 @@ def _run_instances_params(req: Ec2ProvisionRequest, settings: Any) -> dict[str, 
     explicit_key = (req.node_key or "").strip()
     name = (req.name_tag or "").strip() or (explicit_key if explicit_key else "devnest-node")
     tags: list[dict[str, str]] = [
-        {"Key": f"{prefix}:managed", "Value": "true"},
-        {"Key": "Name", "Value": name[:255]},
+        {"Key": f"{prefix}:managed"[:127], "Value": "true"},
+        {"Key": "Name", "Value": name[:256]},
     ]
     if explicit_key:
-        tags.append({"Key": f"{prefix}:node_key", "Value": explicit_key[:255]})
+        tags.append({"Key": f"{prefix}:node_key"[:127], "Value": explicit_key[:256]})
+    # EC2 tag limits: key max 127 chars, value max 256 (UTF-8).
     for tk, tv in (req.extra_tags or {}).items():
         k = str(tk).strip()
         v = str(tv).strip()
         if k and v:
-            tags.append({"Key": k[:255], "Value": v[:255]})
+            tags.append({"Key": k[:127], "Value": v[:256]})
 
     params: dict[str, Any] = {
         "ImageId": req.ami_id.strip(),
@@ -239,12 +293,29 @@ def mark_node_draining(
 ) -> ExecutionNode:
     """Exclude a node from placement (``DRAINING``, ``schedulable=False``)."""
     row = get_node(session, node_id=node_id, node_key=node_key)
+    if row.status == ExecutionNodeStatus.TERMINATED.value:
+        logger.info(
+            "node_drain_skipped_terminated",
+            extra={"node_key": row.node_key, "node_id": row.id},
+        )
+        return row
+    if row.status == ExecutionNodeStatus.DRAINING.value and not row.schedulable:
+        return row
     row.status = ExecutionNodeStatus.DRAINING.value
     row.schedulable = False
     row.updated_at = _now()
     row.metadata_json = _merge_metadata(row, {"lifecycle": {"draining_marked_at": _now().isoformat()}})
     session.add(row)
     session.flush()
+    logger.info(
+        "execution_node_draining",
+        extra={
+            "node_key": row.node_key,
+            "node_id": row.id,
+            "provider_type": row.provider_type,
+            "provider_instance_id": (row.provider_instance_id or "").strip() or None,
+        },
+    )
     return row
 
 
@@ -260,6 +331,8 @@ def deregister_node(
     Does **not** stop AWS instances; use :func:`terminate_ec2_node` first when appropriate.
     """
     row = get_node(session, node_id=node_id, node_key=node_key)
+    if row.status == ExecutionNodeStatus.TERMINATED.value and not row.schedulable:
+        return row
     row.status = ExecutionNodeStatus.TERMINATED.value
     row.schedulable = False
     row.updated_at = _now()
@@ -269,6 +342,15 @@ def deregister_node(
     )
     session.add(row)
     session.flush()
+    logger.info(
+        "execution_node_deregistered",
+        extra={
+            "node_key": row.node_key,
+            "node_id": row.id,
+            "provider_type": row.provider_type,
+            "provider_instance_id": (row.provider_instance_id or "").strip() or None,
+        },
+    )
     return row
 
 
@@ -287,20 +369,39 @@ def terminate_ec2_node(
     """
     row = get_node(session, node_id=node_id, node_key=node_key)
     _assert_ec2_node(row, op="terminate_ec2_node")
+    if row.status == ExecutionNodeStatus.TERMINATED.value:
+        logger.info(
+            "ec2_terminate_noop_already_terminated",
+            extra={"node_key": row.node_key, "instance_id": (row.provider_instance_id or "").strip()},
+        )
+        return row
     iid = (row.provider_instance_id or "").strip()
     if not iid:
         raise NodeLifecycleError(f"node {row.node_key!r} has no provider_instance_id")
 
-    row.status = ExecutionNodeStatus.TERMINATING.value
-    row.schedulable = False
-    row.updated_at = _now()
-    row.metadata_json = _merge_metadata(row, {"lifecycle": {"terminate_requested_at": _now().isoformat()}})
-    session.add(row)
-    session.flush()
+    if row.status != ExecutionNodeStatus.TERMINATING.value:
+        row.status = ExecutionNodeStatus.TERMINATING.value
+        row.schedulable = False
+        row.updated_at = _now()
+        row.metadata_json = _merge_metadata(row, {"lifecycle": {"terminate_requested_at": _now().isoformat()}})
+        session.add(row)
+        session.flush()
+        logger.info(
+            "ec2_terminate_requested",
+            extra={"node_key": row.node_key, "instance_id": iid},
+        )
+    else:
+        logger.info(
+            "ec2_terminate_retry",
+            extra={"node_key": row.node_key, "instance_id": iid, "detail": "already TERMINATING; re-invoking AWS"},
+        )
 
     client = ec2_client or build_ec2_client(region=(row.region or "").strip() or None)
     try:
-        client.terminate_instances(InstanceIds=[iid])
+        client_call_with_throttle_retry(
+            "ec2.TerminateInstances",
+            lambda: client.terminate_instances(InstanceIds=[iid]),
+        )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
         row.status = ExecutionNodeStatus.ERROR.value
@@ -316,6 +417,11 @@ def terminate_ec2_node(
             client.get_waiter("instance_terminated").wait(
                 InstanceIds=[iid],
                 WaiterConfig={"Delay": 5, "MaxAttempts": 60},
+            )
+        except WaiterError as e:
+            logger.warning(
+                "ec2_wait_instance_terminated_timeout",
+                extra={"instance_id": iid, "error": str(e)},
             )
         except ClientError as e:
             logger.warning("ec2_wait_instance_terminated_failed", extra={"instance_id": iid, "error": str(e)})
@@ -340,6 +446,15 @@ def terminate_ec2_node(
     )
     session.add(row)
     session.flush()
+    logger.info(
+        "ec2_terminate_reconciled",
+        extra={
+            "node_key": row.node_key,
+            "instance_id": iid,
+            "status": row.status,
+            "ec2_state": state,
+        },
+    )
     return row
 
 
@@ -372,6 +487,16 @@ def sync_node_state(
         execution_mode=row.execution_mode,
     )
     session.refresh(row)
+
+    if row.status == ExecutionNodeStatus.ERROR.value:
+        logger.warning(
+            "ec2_sync_node_in_error",
+            extra={
+                "node_key": row.node_key,
+                "instance_id": iid,
+                "last_error_code": row.last_error_code,
+            },
+        )
 
     if not promote_provisioning_when_ready:
         return row

@@ -10,11 +10,12 @@ from .ec2_provider import (
     register_ec2_instance,
     sync_ec2_instances,
 )
-from .errors import Ec2InstanceNotFoundError, Ec2ProviderError, ProviderError
+from .errors import Ec2InstanceNotFoundError, Ec2InvalidInstanceIdError, Ec2ProviderError, ProviderError
 
 __all__ = [
     "Ec2InstanceDescription",
     "Ec2InstanceNotFoundError",
+    "Ec2InvalidInstanceIdError",
     "Ec2ProviderError",
     "ProviderError",
     "build_ec2_client",

@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
 from botocore.stub import ANY, Stubber
 from sqlmodel import Session, select
 
-from app.services.infrastructure_service.lifecycle import provision_ec2_node, sync_node_state
+from app.services.infrastructure_service.lifecycle import (
+    mark_node_draining,
+    provision_ec2_node,
+    sync_node_state,
+    terminate_ec2_node,
+)
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
 from app.services.placement_service.errors import NoSchedulableNodeError
 from app.services.placement_service.models import (
@@ -88,6 +93,97 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
     get_settings.cache_clear()
 
 
+def test_provision_run_instances_throttle_retry_then_success(
+    infrastructure_unit_engine,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.services.providers.aws_throttle.time.sleep",
+        lambda *_a, **_k: None,
+    )
+    iid = "i-0a1b2c3d4e5f6789"
+    region = "us-east-1"
+    client = boto3.client("ec2", region_name=region)
+    stubber = Stubber(client)
+    common = {
+        "ImageId": "ami-12345678",
+        "MinCount": 1,
+        "MaxCount": 1,
+        "InstanceType": "t3.micro",
+        "SubnetId": "subnet-aaaabbbb",
+        "SecurityGroupIds": ["sg-test123"],
+        "TagSpecifications": ANY,
+    }
+    stubber.add_client_error(
+        "run_instances",
+        "ThrottlingException",
+        expected_params=common,
+    )
+    stubber.add_response("run_instances", {"Instances": [{"InstanceId": iid}]}, common)
+    stubber.add_response("create_tags", {}, {"Resources": [iid], "Tags": ANY})
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    req = Ec2ProvisionRequest(
+        ami_id="ami-12345678",
+        instance_type="t3.micro",
+        subnet_id="subnet-aaaabbbb",
+        security_group_ids=["sg-test123"],
+        region=region,
+        node_key="throttle-node",
+    )
+    try:
+        with Session(infrastructure_unit_engine) as session:
+            node = provision_ec2_node(session, req, ec2_client=client, wait_until_running=False)
+            session.commit()
+            assert node.provider_instance_id == iid
+    finally:
+        stubber.deactivate()
+
+
+def test_mark_node_draining_idempotent(infrastructure_unit_engine) -> None:
+    row = ExecutionNode(
+        node_key="drain-twice",
+        name="drain-twice",
+        provider_type=ExecutionNodeProviderType.LOCAL.value,
+        execution_mode=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
+        status=ExecutionNodeStatus.READY.value,
+        schedulable=True,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        metadata_json={},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+        first = mark_node_draining(session, node_key="drain-twice")
+        session.flush()
+        meta1 = dict(first.metadata_json or {})
+        st1 = first.status
+        second = mark_node_draining(session, node_key="drain-twice")
+        meta2 = dict(second.metadata_json or {})
+        st2 = second.status
+        session.commit()
+    assert st1 == ExecutionNodeStatus.DRAINING.value
+    assert st2 == ExecutionNodeStatus.DRAINING.value
+    assert meta1.get("lifecycle", {}).get("draining_marked_at") == meta2.get("lifecycle", {}).get(
+        "draining_marked_at",
+    )
+
+
 def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit_engine) -> None:
     iid = "i-0123456789abcdef0"
     row = ExecutionNode(
@@ -139,6 +235,104 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
     assert out.status == ExecutionNodeStatus.READY.value
     assert out.schedulable is True
     assert out.private_ip == "10.0.0.10"
+
+
+def test_mark_node_draining_skips_terminated(infrastructure_unit_engine) -> None:
+    row = ExecutionNode(
+        node_key="drain-term",
+        name="drain-term",
+        provider_type=ExecutionNodeProviderType.LOCAL.value,
+        execution_mode=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
+        status=ExecutionNodeStatus.TERMINATED.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        metadata_json={},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+        out = mark_node_draining(session, node_key="drain-term")
+        st = out.status
+        session.commit()
+    assert st == ExecutionNodeStatus.TERMINATED.value
+
+
+def test_terminate_ec2_retry_when_already_terminating_calls_aws_once(
+    infrastructure_unit_engine,
+) -> None:
+    iid = "i-0a1b2c3d4e5f6789"
+    row = ExecutionNode(
+        node_key="term-retry",
+        name="term-retry",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.TERMINATING.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        metadata_json={"lifecycle": {"terminate_requested_at": "2020-01-01T00:00:00+00:00"}},
+    )
+    mock_ec2 = MagicMock()
+    mock_ec2.terminate_instances.return_value = {}
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        with patch(
+            "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+            return_value=SimpleNamespace(state="terminated"),
+        ):
+            terminate_ec2_node(
+                session,
+                node_key="term-retry",
+                ec2_client=mock_ec2,
+                wait_until_terminated=False,
+            )
+        session.commit()
+    mock_ec2.terminate_instances.assert_called_once()
+
+
+def test_terminate_ec2_already_terminated_skips_aws_call(infrastructure_unit_engine) -> None:
+    iid = "i-0a1b2c3d4e5f6789"
+    row = ExecutionNode(
+        node_key="term-noop",
+        name="term-noop",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.TERMINATED.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        metadata_json={},
+    )
+    mock_ec2 = MagicMock()
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        out = terminate_ec2_node(
+            session,
+            node_key="term-noop",
+            ec2_client=mock_ec2,
+            wait_until_terminated=False,
+        )
+        final_status = out.status
+        session.commit()
+    mock_ec2.terminate_instances.assert_not_called()
+    assert final_status == ExecutionNodeStatus.TERMINATED.value
 
 
 def test_placement_ec2_pool_skips_provisioning_node(infrastructure_unit_engine, monkeypatch) -> None:
