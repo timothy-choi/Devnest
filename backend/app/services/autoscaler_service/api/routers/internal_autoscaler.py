@@ -20,6 +20,7 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
+from app.services.policy_service.service import evaluate_node_provisioning
 
 from ...models import ScaleDownEvaluation, ScaleUpEvaluation
 from ...service import (
@@ -79,6 +80,7 @@ def get_autoscaler_evaluate(session: Session = Depends(get_db)) -> AutoscalerEva
 )
 def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> ProvisionOneResponse:
     log_event(_logger, LogEvent.AUDIT_INTERNAL_AUTOSCALER_PROVISION_ONE)
+    evaluate_node_provisioning(session)
     ev = evaluate_scale_up(session, insufficient_capacity=True)
     if not ev.should_provision:
         return ProvisionOneResponse(

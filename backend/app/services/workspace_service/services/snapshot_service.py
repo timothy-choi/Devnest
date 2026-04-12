@@ -38,6 +38,8 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
+from app.services.policy_service.service import evaluate_snapshot_creation
+from app.services.quota_service.service import check_snapshot_quota
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,20 @@ def create_snapshot(
         )
     if _pending_snapshot_jobs(session, workspace_id):
         raise SnapshotConflictError("A snapshot or restore job is already in progress for this workspace")
+
+    # Quota + policy checks before creating the snapshot job
+    check_snapshot_quota(
+        session,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        correlation_id=correlation_id,
+    )
+    evaluate_snapshot_creation(
+        session,
+        owner_user_id=owner_user_id,
+        workspace_id=workspace_id,
+        correlation_id=correlation_id,
+    )
 
     cfg_v = _latest_config_version(session, workspace_id)
     cid = (correlation_id or generate_correlation_id()).strip() or generate_correlation_id()
