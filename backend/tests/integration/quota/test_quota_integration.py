@@ -125,6 +125,31 @@ class TestQuotaAdminApi:
         resp = client.get("/internal/quotas?scope_type=global", headers={"X-Internal-API-Key": INTERNAL_KEY})
         assert all(q["scope_type"] == "global" for q in resp.json()["items"])
 
+    def test_global_quota_with_scope_id_returns_400(self, client: TestClient) -> None:
+        resp = client.post(
+            "/internal/quotas",
+            json={"scope_type": "global", "scope_id": 42, "max_workspaces": 5},
+            headers={"X-Internal-API-Key": INTERNAL_KEY},
+        )
+        assert resp.status_code == 400
+        assert "null" in resp.json()["detail"].lower()
+
+    def test_user_quota_without_scope_id_returns_400(self, client: TestClient) -> None:
+        resp = client.post(
+            "/internal/quotas",
+            json={"scope_type": "user", "max_workspaces": 5},
+            headers={"X-Internal-API-Key": INTERNAL_KEY},
+        )
+        assert resp.status_code == 400
+
+    def test_workspace_quota_without_scope_id_returns_400(self, client: TestClient) -> None:
+        resp = client.post(
+            "/internal/quotas",
+            json={"scope_type": "workspace", "max_snapshots": 3},
+            headers={"X-Internal-API-Key": INTERNAL_KEY},
+        )
+        assert resp.status_code == 400
+
 
 # ---------------------------------------------------------------------------
 # Workspace count enforcement

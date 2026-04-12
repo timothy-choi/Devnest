@@ -11,9 +11,9 @@ Each ``evaluate_*`` function:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
-from sqlalchemy import and_, false, or_
+from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
 from app.libs.observability.correlation import get_correlation_id
@@ -75,11 +75,11 @@ def _deny_and_raise(
     owner_user_id: int | None = None,
     workspace_id: int | None = None,
     correlation_id: str | None = None,
-) -> None:
+) -> NoReturn:
     """Record a POLICY_DENIED audit row, commit it, then raise PolicyViolationError.
 
     The commit ensures the denial is durable even when the caller rolls back.
-    Audit failures are swallowed so they never mask the PolicyViolationError.
+    Audit failures are logged and swallowed — they must never mask the PolicyViolationError.
     """
     cid = correlation_id or get_correlation_id()
     try:
@@ -102,7 +102,12 @@ def _deny_and_raise(
         )
         session.commit()
     except Exception:
-        logger.warning("policy_deny_audit_commit_failed", exc_info=True)
+        logger.warning(
+            "policy_deny_audit_commit_failed policy=%s action=%s — denial still enforced",
+            policy.name,
+            action,
+            exc_info=True,
+        )
         try:
             session.rollback()
         except Exception:

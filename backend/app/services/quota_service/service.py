@@ -17,6 +17,7 @@ TODO: wire max_cpu / max_memory_mb checks when placement reservations are enforc
 from __future__ import annotations
 
 import logging
+from typing import NoReturn
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -122,8 +123,11 @@ def _exceed_and_raise(
     owner_user_id: int | None = None,
     workspace_id: int | None = None,
     correlation_id: str | None = None,
-) -> None:
-    """Record a QUOTA_EXCEEDED audit row, commit it durably, then raise QuotaExceededError."""
+) -> NoReturn:
+    """Record a QUOTA_EXCEEDED audit row, commit it durably, then raise QuotaExceededError.
+
+    Audit failures are logged and swallowed — they must never mask the QuotaExceededError.
+    """
     cid = correlation_id or get_correlation_id()
     try:
         record_audit(
@@ -140,7 +144,12 @@ def _exceed_and_raise(
         )
         session.commit()
     except Exception:
-        logger.warning("quota_exceed_audit_commit_failed", exc_info=True)
+        logger.warning(
+            "quota_exceed_audit_commit_failed field=%s scope=%s — quota still enforced",
+            quota_field,
+            scope,
+            exc_info=True,
+        )
         try:
             session.rollback()
         except Exception:
@@ -219,6 +228,7 @@ def check_running_workspace_quota(
             current=current,
             scope=f"user:{owner_user_id}",
             owner_user_id=owner_user_id,
+            workspace_id=workspace_id,
             correlation_id=correlation_id,
         )
 

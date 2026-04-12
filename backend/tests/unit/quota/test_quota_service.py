@@ -193,6 +193,27 @@ class TestCheckRunningWorkspaceQuota:
         with pytest.raises(QuotaExceededError):
             check_running_workspace_quota(quota_session, owner_user_id=uid)
 
+    def test_exceeded_audit_row_includes_workspace_id(self, quota_session: Session) -> None:
+        """quota.exceeded audit row should carry the workspace_id of the workspace being started."""
+        from app.services.audit_service.models import AuditLog
+        from sqlmodel import select as sel
+
+        uid = _seed_user(quota_session)
+        # One workspace already running (will count toward the limit)
+        _seed_workspace(quota_session, uid, status=WorkspaceStatus.RUNNING.value)
+        # The workspace we are about to start (excluded from the count, but passed for audit context)
+        target_wid = _seed_workspace(quota_session, uid, status=WorkspaceStatus.STOPPED.value)
+        _add_quota(quota_session, scope_type=ScopeType.USER, scope_id=uid, max_running_workspaces=1)
+
+        with pytest.raises(QuotaExceededError):
+            check_running_workspace_quota(quota_session, owner_user_id=uid, workspace_id=target_wid)
+
+        rows = quota_session.exec(
+            sel(AuditLog).where(AuditLog.action == "quota.exceeded")
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].workspace_id == target_wid
+
 
 # ---------------------------------------------------------------------------
 # check_snapshot_quota

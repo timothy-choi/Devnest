@@ -78,9 +78,20 @@ def create_policy(
 ) -> PolicyResponse:
     try:
         _ = PolicyType(body.policy_type)
-        _ = ScopeType(body.scope_type)
+        scope = ScopeType(body.scope_type)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if scope == ScopeType.GLOBAL and body.scope_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Global policies must have scope_id=null",
+        )
+    if scope in (ScopeType.USER, ScopeType.WORKSPACE) and body.scope_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{scope.value.capitalize()} policies require a non-null scope_id",
+        )
 
     now = datetime.now(timezone.utc)
     p = Policy(

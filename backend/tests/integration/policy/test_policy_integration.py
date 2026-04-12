@@ -149,6 +149,23 @@ class TestPolicyAdminApi:
         assert resp.status_code == 200
         assert all(p["scope_type"] == "global" for p in resp.json()["items"])
 
+    def test_global_policy_with_scope_id_returns_400(self, client: TestClient) -> None:
+        resp = client.post(
+            "/internal/policies",
+            json={"name": "bad_global", "policy_type": "system", "scope_type": "global", "scope_id": 99, "rules": {}},
+            headers={"X-Internal-API-Key": INTERNAL_KEY},
+        )
+        assert resp.status_code == 400
+        assert "scope_id=null" in resp.json()["detail"].lower() or "null" in resp.json()["detail"].lower()
+
+    def test_user_policy_without_scope_id_returns_400(self, client: TestClient) -> None:
+        resp = client.post(
+            "/internal/policies",
+            json={"name": "bad_user", "policy_type": "user", "scope_type": "user", "rules": {}},
+            headers={"X-Internal-API-Key": INTERNAL_KEY},
+        )
+        assert resp.status_code == 400
+
 
 # ---------------------------------------------------------------------------
 # Workspace creation enforcement
@@ -204,6 +221,63 @@ class TestWorkspaceCreationPolicyEnforcement:
         token = _register_and_login(client, "audit_pol@test.dev")
         _seed_policy(db_session, rules={"allow_workspace_creation": False})
         _create_workspace(client, token)
+
+        rows = db_session.exec(
+            sel(AuditLog).where(AuditLog.action == "policy.denied")
+        ).all()
+        assert len(rows) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Workspace start enforcement
+# ---------------------------------------------------------------------------
+
+class TestWorkspaceStartPolicyEnforcement:
+    """Policy checks on workspace start run inside _persist_intent for START/RESTART jobs."""
+
+    def _create_stopped_workspace(self, client: TestClient, db_session: Session, token: str) -> int:
+        resp = _create_workspace(client, token)
+        assert resp.status_code == 202, resp.json()
+        ws_id = resp.json()["workspace_id"]
+        from app.services.workspace_service.models import Workspace
+        ws = db_session.get(Workspace, ws_id)
+        assert ws is not None
+        ws.status = "STOPPED"
+        db_session.add(ws)
+        db_session.commit()
+        return ws_id
+
+    def test_deny_start_returns_403(self, client: TestClient, db_session: Session) -> None:
+        token = _register_and_login(client, "deny_start@test.dev")
+        ws_id = self._create_stopped_workspace(client, db_session, token)
+        _seed_policy(db_session, rules={"allow_workspace_start": False})
+
+        resp = client.post(
+            f"/workspaces/start/{ws_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
+        body = resp.json()
+        assert "policy" in body
+
+    def test_no_start_policy_allows_start(self, client: TestClient, db_session: Session) -> None:
+        token = _register_and_login(client, "allow_start@test.dev")
+        ws_id = self._create_stopped_workspace(client, db_session, token)
+
+        resp = client.post(
+            f"/workspaces/start/{ws_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 202
+
+    def test_start_denial_writes_audit_row(self, client: TestClient, db_session: Session) -> None:
+        from app.services.audit_service.models import AuditLog
+        from sqlmodel import select as sel
+
+        token = _register_and_login(client, "start_audit@test.dev")
+        ws_id = self._create_stopped_workspace(client, db_session, token)
+        _seed_policy(db_session, rules={"allow_workspace_start": False})
+        client.post(f"/workspaces/start/{ws_id}", headers={"Authorization": f"Bearer {token}"})
 
         rows = db_session.exec(
             sel(AuditLog).where(AuditLog.action == "policy.denied")

@@ -36,12 +36,12 @@ CREATE TABLE IF NOT EXISTS quota (
     scope_id                INTEGER,
     max_workspaces          INTEGER      CHECK (max_workspaces >= 0),
     max_running_workspaces  INTEGER      CHECK (max_running_workspaces >= 0),
-    max_cpu                 FLOAT,
+    max_cpu                 FLOAT        CHECK (max_cpu >= 0),
     max_memory_mb           INTEGER      CHECK (max_memory_mb >= 0),
     max_storage_mb          INTEGER      CHECK (max_storage_mb >= 0),
     max_sessions            INTEGER      CHECK (max_sessions >= 0),
     max_snapshots           INTEGER      CHECK (max_snapshots >= 0),
-    max_runtime_hours       FLOAT,
+    max_runtime_hours       FLOAT        CHECK (max_runtime_hours >= 0),
     created_at              TIMESTAMPTZ  NOT NULL,
     updated_at              TIMESTAMPTZ  NOT NULL
 );
