@@ -20,6 +20,15 @@ from .workspace_project_dir import (
 )
 
 
+def _execution_connect_host(node: ExecutionNode) -> str:
+    """Resolve SSH/Docker host from node row (explicit ssh_host preferred; EC2 often uses private_ip)."""
+    for candidate in (node.ssh_host, node.hostname, node.private_ip):
+        s = (candidate or "").strip()
+        if s:
+            return s
+    return ""
+
+
 def resolve_node_execution_bundle(
     session: Session,
     execution_node_key: str | None,
@@ -29,8 +38,10 @@ def resolve_node_execution_bundle(
 
     - **Missing / empty key:** legacy single-host dev — ``docker.from_env()``, local
       :class:`~app.libs.topology.system.command_runner.CommandRunner`, local project dirs, local TCP
-      probes.
-    - **Key with DB row:** honor ``execution_mode`` (``local_docker`` | ``ssh_docker``).
+      probes. No ``ExecutionNode`` row is read.
+    - **Key with DB row:** honor normalized ``execution_mode`` (``local_docker`` | ``ssh_docker``).
+      ``LOCAL_DOCKER`` always uses the worker's local engine (``docker.from_env()``); ``ssh_*`` /
+      ``hostname`` / ``private_ip`` on the row are ignored for that mode.
     - **Key without row:** :class:`NodeExecutionBindingError` (do not silently misplace workloads).
     """
     key = (execution_node_key or "").strip()
@@ -43,7 +54,8 @@ def resolve_node_execution_bundle(
             f"no execution_node row for node_key={key!r}; fix bootstrap/placement or WorkspaceRuntime",
         )
 
-    mode = (row.execution_mode or ExecutionNodeExecutionMode.LOCAL_DOCKER.value).strip().lower()
+    raw_mode = row.execution_mode or ExecutionNodeExecutionMode.LOCAL_DOCKER.value
+    mode = str(raw_mode).strip().lower()
     if mode == ExecutionNodeExecutionMode.SSH_DOCKER.value:
         return _bundle_ssh_docker(row)
     if mode not in (
@@ -51,7 +63,7 @@ def resolve_node_execution_bundle(
         "",
     ):
         raise NodeExecutionBindingError(
-            f"unsupported execution_mode {row.execution_mode!r} for node_key={key!r}",
+            f"unsupported execution_mode {raw_mode!r} for node_key={key!r}",
         )
     return _bundle_local_docker()
 
@@ -74,10 +86,10 @@ def _bundle_local_docker() -> NodeExecutionBundle:
 
 
 def _bundle_ssh_docker(node: ExecutionNode) -> NodeExecutionBundle:
-    host = (node.ssh_host or "").strip() or (node.hostname or "").strip()
+    host = _execution_connect_host(node)
     if not host:
         raise NodeExecutionBindingError(
-            f"ssh_docker node {node.node_key!r} requires ssh_host or hostname",
+            f"ssh_docker node {node.node_key!r} requires a non-empty ssh_host, hostname, or private_ip",
         )
     user = (node.ssh_user or "").strip() or "root"
     port = int(node.ssh_port or 22)

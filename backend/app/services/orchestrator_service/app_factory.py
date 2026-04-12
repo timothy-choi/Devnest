@@ -40,6 +40,10 @@ def build_default_orchestrator_for_session(
     ``DEVNEST_NODE_ID`` / ``DEVNEST_TOPOLOGY_ID`` (legacy single-process dev). Docker and topology
     commands still use the local host unless a matching ``ExecutionNode`` row selects ``ssh_docker``.
 
+    For ``ssh_docker``, ``workspace_projects_base`` (settings / default temp dir) must be an
+    **absolute path on the remote Docker host**; the node execution layer creates workspace dirs
+    there via SSH.
+
     Raises:
         AppOrchestratorBindingError: if Docker / SSH binding fails.
     """

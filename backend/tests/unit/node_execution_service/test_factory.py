@@ -125,7 +125,7 @@ def test_ssh_docker_requires_host(ne_engine) -> None:
             ),
         )
         session.commit()
-        with pytest.raises(NodeExecutionBindingError, match="requires ssh_host"):
+        with pytest.raises(NodeExecutionBindingError, match="ssh_host, hostname, or private_ip"):
             resolve_node_execution_bundle(session, "remote1")
 
 
@@ -164,3 +164,63 @@ def test_ssh_docker_uses_ssh_url(mock_docker_client_cls, ne_engine) -> None:
     assert "10.0.0.5" in call_kw["base_url"]
     mock_client.ping.assert_called_once()
     assert bundle.service_reachability_runner is not None
+
+
+@patch("app.services.node_execution_service.factory.docker.DockerClient")
+def test_ssh_docker_prefers_ssh_host_over_private_ip(mock_docker_client_cls, ne_engine) -> None:
+    mock_client = MagicMock()
+    mock_docker_client_cls.return_value = mock_client
+    with patch.dict(sys.modules, {"paramiko": ModuleType("paramiko")}):
+        with Session(ne_engine) as session:
+            session.add(
+                ExecutionNode(
+                    node_key="r-prefer",
+                    name="r-prefer",
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    status=ExecutionNodeStatus.READY.value,
+                    schedulable=True,
+                    execution_mode=ExecutionNodeExecutionMode.SSH_DOCKER.value,
+                    ssh_host="10.0.0.1",
+                    private_ip="10.0.0.2",
+                    total_cpu=4.0,
+                    total_memory_mb=8192,
+                    allocatable_cpu=4.0,
+                    allocatable_memory_mb=8192,
+                ),
+            )
+            session.commit()
+            with patch("app.services.node_execution_service.factory.docker.from_env", MagicMock()):
+                resolve_node_execution_bundle(session, "r-prefer")
+    base_url = mock_docker_client_cls.call_args.kwargs["base_url"]
+    assert "10.0.0.1" in base_url
+    assert "10.0.0.2" not in base_url
+
+
+@patch("app.services.node_execution_service.factory.docker.DockerClient")
+def test_ssh_docker_falls_back_to_private_ip(mock_docker_client_cls, ne_engine) -> None:
+    mock_client = MagicMock()
+    mock_docker_client_cls.return_value = mock_client
+    with patch.dict(sys.modules, {"paramiko": ModuleType("paramiko")}):
+        with Session(ne_engine) as session:
+            session.add(
+                ExecutionNode(
+                    node_key="r-priv",
+                    name="r-priv",
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    status=ExecutionNodeStatus.READY.value,
+                    schedulable=True,
+                    execution_mode=ExecutionNodeExecutionMode.SSH_DOCKER.value,
+                    ssh_host=None,
+                    hostname=None,
+                    private_ip="172.31.12.34",
+                    total_cpu=4.0,
+                    total_memory_mb=8192,
+                    allocatable_cpu=4.0,
+                    allocatable_memory_mb=8192,
+                ),
+            )
+            session.commit()
+            with patch("app.services.node_execution_service.factory.docker.from_env", MagicMock()):
+                resolve_node_execution_bundle(session, "r-priv")
+    base_url = mock_docker_client_cls.call_args.kwargs["base_url"]
+    assert "172.31.12.34" in base_url

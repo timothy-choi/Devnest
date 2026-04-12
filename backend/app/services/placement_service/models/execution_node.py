@@ -28,10 +28,11 @@ class ExecutionNode(SQLModel, table=True):
 
     **Execution:** ``execution_mode`` selects how :mod:`app.services.node_execution_service` builds
     a Docker client and Linux command runner. ``LOCAL_DOCKER`` uses the worker process environment
-    (``docker.from_env()``). ``SSH_DOCKER`` uses Docker's ``ssh://`` transport to the daemon on
-    ``ssh_host`` (requires SSH keys; ``paramiko`` for docker-py). Topology bridge/veth commands run
-    on the same host as the daemon via the SSH-backed runner. ``ssh_*`` fields are ignored for
-    ``LOCAL_DOCKER``.
+    (``docker.from_env()``).     ``SSH_DOCKER`` uses Docker's ``ssh://`` transport to the daemon. The SSH target is resolved in
+    order: ``ssh_host``, then ``hostname``, then ``private_ip`` (useful once EC2 sets private IP).
+    Requires SSH keys in the worker environment; ``paramiko`` for docker-py. Topology bridge/veth
+    commands run on the same host as the daemon via the SSH-backed runner. ``ssh_*`` and IP fields
+    are ignored for ``LOCAL_DOCKER``.
 
     TODO: Node agent heartbeats, persistent CPU/RAM reservations, EC2 lifecycle sync, SSM transport.
     """
@@ -59,7 +60,11 @@ class ExecutionNode(SQLModel, table=True):
     )
     provider_instance_id: str | None = Field(default=None, max_length=255)
     hostname: str | None = Field(default=None, max_length=255)
-    private_ip: str | None = Field(default=None, max_length=64)
+    private_ip: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Optional; used as ssh_docker connect target when ssh_host and hostname are unset.",
+    )
 
     execution_mode: str = Field(
         default=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,

@@ -28,6 +28,10 @@ class NodeExecutionBackend(Protocol):
     - **topology_command_runner** — Linux ``ip``/``nsenter``/bridge commands on the **same** host as the daemon.
     - **service_reachability_runner** — optional; when set, IDE TCP probes run from that host
       (needed when the worker cannot reach workspace internal IPs).
+
+    Mode ``local_docker`` in the registry still supplies this bundle with a **local** client and
+    runner; remote transports (SSH today; SSM/agent later) are selected only when the node's
+    ``execution_mode`` requests them.
     """
 
     docker_client: docker.DockerClient
