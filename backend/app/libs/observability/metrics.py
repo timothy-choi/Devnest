@@ -12,7 +12,6 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType
 from app.services.placement_service.models.enums import ExecutionNodeStatus
-from app.services.placement_service.models.enums import ExecutionNodeStatus
 from app.services.workspace_service.models import Workspace, WorkspaceJob
 from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceStatus
 
@@ -57,6 +56,12 @@ RECONCILE_OPS_TOTAL = Counter(
     "devnest_reconcile_operations",
     "Reconcile-runtime jobs reaching terminal status",
     ["result"],
+)
+
+INTERNAL_AUTH_FAILURES_TOTAL = Counter(
+    "devnest_internal_auth_failures",
+    "Rejected internal API requests (missing/invalid X-Internal-API-Key)",
+    ["scope"],
 )
 
 JOBS_QUEUED_TOTAL = Counter(
@@ -122,6 +127,10 @@ def record_gateway_operation(*, operation: str, success: bool) -> None:
 
 def record_reconcile_terminal(*, succeeded: bool) -> None:
     RECONCILE_OPS_TOTAL.labels(result="succeeded" if succeeded else "failed").inc()
+
+
+def record_internal_auth_failure(*, scope: str) -> None:
+    INTERNAL_AUTH_FAILURES_TOTAL.labels(scope=scope or "unknown").inc()
 
 
 def refresh_gauges_from_db(session: Session) -> None:

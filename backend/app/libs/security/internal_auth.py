@@ -5,12 +5,19 @@ Each internal router uses an :class:`InternalApiScope`. Per-scope env vars overr
 **not** accepted for that scope (credential separation). When unset, the legacy key applies.
 
 Future: replace header static keys with mTLS or workload identity without changing route grouping.
+
+Surfaces **not** covered here (separate trust boundaries):
+
+- **Gateway route-admin** (``DevnestGatewayClient``): HTTP to ``DEVNEST_GATEWAY_URL``; protect with
+  network policy / future route-admin auth (see devnest-gateway ``route_admin``).
+- **Worker job execution**: DB-backed dequeue in-process; not the same as ``POST /internal/workspace-jobs/process``.
 """
 
 from __future__ import annotations
 
 import secrets
 from enum import Enum
+from typing import Final
 
 from app.libs.common.config import Settings
 
@@ -32,6 +39,11 @@ _SCOPE_TO_SETTINGS_FIELD: dict[InternalApiScope, str] = {
     InternalApiScope.INFRASTRUCTURE: "internal_api_key_infrastructure",
     InternalApiScope.NOTIFICATIONS: "internal_api_key_notifications",
 }
+
+# Settings attribute names for legacy + scoped secrets (startup validation, docs).
+INTERNAL_API_SECRET_FIELD_NAMES: Final[tuple[str, ...]] = (
+    "internal_api_key",
+) + tuple(_SCOPE_TO_SETTINGS_FIELD.values())
 
 
 def internal_api_expected_secrets(settings: Settings, scope: InternalApiScope) -> tuple[str, ...]:

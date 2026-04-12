@@ -1,7 +1,8 @@
 import os
 from functools import lru_cache
+from typing import Self
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,6 +39,9 @@ class Settings(BaseSettings):
     internal_api_key_autoscaler: str = ""
     internal_api_key_infrastructure: str = ""
     internal_api_key_notifications: str = ""
+    # When > 0, every non-empty internal API secret (legacy + scoped) must be at least this many characters.
+    # Default 0 disables (local/CI). Production: set via DEVNEST_INTERNAL_API_KEY_MIN_LENGTH (e.g. 24).
+    devnest_internal_api_key_min_length: int = 0
 
     # Workspace orchestrator (Docker): image for workspace containers; empty falls back to env then nginx:alpine.
     workspace_container_image: str = ""
@@ -169,6 +173,29 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 2
         return max(2, min(n, 100))
+
+    @field_validator("devnest_internal_api_key_min_length", mode="before")
+    @classmethod
+    def _coerce_internal_api_key_min_length(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(n, 512))
+
+    @model_validator(mode="after")
+    def _validate_internal_api_secret_lengths(self) -> Self:
+        min_len = int(self.devnest_internal_api_key_min_length or 0)
+        if min_len <= 0:
+            return self
+        from app.libs.security.internal_auth import INTERNAL_API_SECRET_FIELD_NAMES
+
+        for fname in INTERNAL_API_SECRET_FIELD_NAMES:
+            raw = str(getattr(self, fname, "") or "").strip()
+            if raw and len(raw) < min_len:
+                msg = f"{fname} length {len(raw)} < devnest_internal_api_key_min_length ({min_len})"
+                raise ValueError(msg)
+        return self
 
 
 @lru_cache

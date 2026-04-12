@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.libs.common.config import Settings, get_settings
+from app.libs.observability.log_events import LogEvent
 from app.libs.security.internal_auth import (
     InternalApiScope,
     internal_api_expected_secrets,
@@ -45,6 +47,84 @@ def test_unconfigured_scope_has_no_secrets() -> None:
     s = _s(internal_api_key="")
     assert internal_api_expected_secrets(s, InternalApiScope.WORKSPACE_JOBS) == ()
     assert internal_api_key_is_valid("x", s, InternalApiScope.WORKSPACE_JOBS) is False
+
+
+def test_settings_rejects_short_internal_key_when_min_length_enforced() -> None:
+    with pytest.raises(ValidationError, match="internal_api_key length"):
+        Settings(
+            database_url="postgresql://localhost/unit",
+            internal_api_key="short",
+            devnest_internal_api_key_min_length=16,
+        )
+
+
+def test_settings_allows_empty_internal_keys_when_min_length_enforced() -> None:
+    s = Settings(
+        database_url="postgresql://localhost/unit",
+        internal_api_key="",
+        devnest_internal_api_key_min_length=32,
+    )
+    assert s.internal_api_key == ""
+
+
+def test_internal_not_configured_logs_before_503(caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/unit")
+    monkeypatch.setenv("INTERNAL_API_KEY", "")
+    monkeypatch.setenv("INTERNAL_API_KEY_NOTIFICATIONS", "")
+    get_settings.cache_clear()
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.libs.security.dependencies import require_internal_api_key
+    from app.libs.security.internal_auth import InternalApiScope
+
+    app = FastAPI()
+
+    @app.get("/n", dependencies=[Depends(require_internal_api_key(InternalApiScope.NOTIFICATIONS))])
+    def n() -> dict[str, str]:
+        return {"ok": "n"}
+
+    with caplog.at_level("WARNING"):
+        with TestClient(app) as c:
+            r = c.get("/n", headers={"X-Internal-API-Key": "any"})
+    assert r.status_code == 503
+    assert any(getattr(rec, "msg", None) == LogEvent.SECURITY_INTERNAL_NOT_CONFIGURED for rec in caplog.records)
+    get_settings.cache_clear()
+
+
+def test_internal_auth_failure_increments_metric(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/unit")
+    monkeypatch.setenv("INTERNAL_API_KEY", "integration-test-internal-key")
+    get_settings.cache_clear()
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+    from prometheus_client import REGISTRY
+
+    from app.libs.security.dependencies import require_internal_api_key
+    from app.libs.security.internal_auth import InternalApiScope
+
+    app = FastAPI()
+
+    @app.get("/x", dependencies=[Depends(require_internal_api_key(InternalApiScope.NOTIFICATIONS))])
+    def x() -> dict[str, str]:
+        return {"ok": "x"}
+
+    metric_name = "devnest_internal_auth_failures_total"
+
+    def _notifications_failures() -> float:
+        total = 0.0
+        for metric in REGISTRY.collect():
+            for s in metric.samples:
+                if s.name == metric_name and s.labels.get("scope") == "notifications":
+                    total += s.value
+        return total
+
+    before = _notifications_failures()
+    with TestClient(app) as c:
+        r = c.get("/x", headers={"X-Internal-API-Key": "wrong-key"})
+    assert r.status_code == 401
+    assert _notifications_failures() >= before + 1.0
+    get_settings.cache_clear()
 
 
 def test_dependency_factory_registers_distinct_scopes(monkeypatch: pytest.MonkeyPatch) -> None:

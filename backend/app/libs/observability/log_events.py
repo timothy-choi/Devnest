@@ -99,6 +99,7 @@ class LogEvent:
     AUDIT_INTERNAL_NOTIFICATIONS_RETRY_DELIVERY = "audit.internal.notifications.retry_delivery"
 
     SECURITY_INTERNAL_AUTH_FAILED = "security.internal.auth_failed"
+    SECURITY_INTERNAL_NOT_CONFIGURED = "security.internal.not_configured"
 
 
 def log_event(
