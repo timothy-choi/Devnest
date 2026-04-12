@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from sqlmodel import Session
 
 from app.services.placement_service.constants import (
@@ -14,6 +16,8 @@ from app.services.placement_service.node_placement import list_schedulable_nodes
 
 from .models import WorkspaceComputeRequest, WorkspaceScheduleResult
 from .policy import can_fit_workspace, rank_candidate_nodes
+
+logger = logging.getLogger(__name__)
 
 
 def schedule_workspace(
@@ -49,6 +53,15 @@ def schedule_workspace(
             message=str(e),
         )
     except NoSchedulableNodeError as e:
+        logger.warning(
+            "schedule_workspace_insufficient_capacity",
+            extra={
+                "workspace_id": workspace_id,
+                "requested_cpu": requested_cpu,
+                "requested_memory_mb": requested_memory_mb,
+                "detail": str(e)[:2000],
+            },
+        )
         return WorkspaceScheduleResult(
             execution_node=None,
             insufficient_capacity=True,

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from app.services.placement_service.models import ExecutionNode
+from app.services.placement_service.models import ExecutionNode, ExecutionNodeStatus
 
 from .models import WorkspaceComputeRequest
 
@@ -34,14 +34,19 @@ def can_fit_workspace(node: ExecutionNode, req: WorkspaceComputeRequest) -> bool
     return True
 
 
+def _is_v1_scheduling_candidate(node: ExecutionNode) -> bool:
+    """Matches placement gate: READY and schedulable (defense in depth for explain / future callers)."""
+    return bool(node.schedulable) and (node.status or "").strip() == ExecutionNodeStatus.READY.value
+
+
 def rank_candidate_nodes(
     nodes: Sequence[ExecutionNode],
     req: WorkspaceComputeRequest,
 ) -> list[ExecutionNode]:
     """
-    Filter to nodes that fit ``req``, then sort by :func:`scheduling_sort_key`.
+    Filter to READY+schedulable nodes that fit ``req``, then sort by :func:`scheduling_sort_key`.
 
     TODO: affinity / anti-affinity, topology-aware ranking, utilization from real usage signals.
     """
-    fitting = [n for n in nodes if can_fit_workspace(n, req)]
+    fitting = [n for n in nodes if _is_v1_scheduling_candidate(n) and can_fit_workspace(n, req)]
     return sorted(fitting, key=scheduling_sort_key)

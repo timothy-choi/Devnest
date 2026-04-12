@@ -55,6 +55,41 @@ def count_ec2_provisioning_nodes(session: Session) -> int:
     return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
+def _min_ready_ec2_before_reclaim() -> int:
+    """Effective floor for last-node safety (never below 2, even if settings are mocked or stale)."""
+    return max(2, int(get_settings().devnest_autoscaler_min_ec2_nodes_before_reclaim))
+
+
+def _workload_counts_by_node_keys(session: Session, node_keys: list[str]) -> dict[str, int]:
+    """
+    Count non-deleted workspaces pinned to each ``node_key`` via ``WorkspaceRuntime.node_id``.
+
+    Single grouped query for all keys (avoids N+1 in scale-down evaluation).
+    """
+    keys = sorted({(k or "").strip() for k in node_keys if k and str(k).strip()})
+    if not keys:
+        return {}
+    stmt = (
+        select(WorkspaceRuntime.node_id, func.count())
+        .select_from(WorkspaceRuntime)
+        .join(Workspace, WorkspaceRuntime.workspace_id == Workspace.workspace_id)
+        .where(
+            WorkspaceRuntime.node_id.in_(keys),
+            Workspace.status != WorkspaceStatus.DELETED.value,
+        )
+        .group_by(WorkspaceRuntime.node_id)
+    )
+    out: dict[str, int] = {k: 0 for k in keys}
+    for row in session.exec(stmt).all():
+        nid, cnt = row[0], row[1]
+        if nid is None:
+            continue
+        sk = str(nid).strip()
+        if sk in out:
+            out[sk] = int(cnt)
+    return out
+
+
 def count_ec2_ready_schedulable(session: Session) -> int:
     stmt = (
         select(func.count())
@@ -80,17 +115,7 @@ def workload_count_on_node(session: Session, node_key: str) -> int:
     key = (node_key or "").strip()
     if not key:
         return 0
-    stmt = (
-        select(func.count())
-        .select_from(WorkspaceRuntime)
-        .join(Workspace, WorkspaceRuntime.workspace_id == Workspace.workspace_id)
-        .where(
-            WorkspaceRuntime.node_id == key,
-            Workspace.status != WorkspaceStatus.DELETED.value,
-        )
-    )
-    raw = session.exec(stmt).one()
-    return int(raw[0] if isinstance(raw, tuple) else raw)
+    return int(_workload_counts_by_node_keys(session, [key]).get(key, 0))
 
 
 def evaluate_scale_up(
@@ -184,11 +209,21 @@ def maybe_provision_on_no_schedulable_capacity(session: Session) -> ExecutionNod
         )
         return None
     try:
-        return provision_capacity_if_needed(session, ev)
+        node = provision_capacity_if_needed(session, ev)
+        if node is not None:
+            logger.info(
+                "autoscaler_provisioned_after_no_schedulable_capacity",
+                extra={
+                    "node_key": node.node_key,
+                    "instance_id": (node.provider_instance_id or "").strip() or None,
+                    "provisioning_in_flight_before": ev.provisioning_in_flight,
+                },
+            )
+        return node
     except Exception as e:
         logger.warning(
             "autoscaler_provision_failed",
-            extra={"error": str(e)},
+            extra={"error": str(e), "provisioning_in_flight_before": ev.provisioning_in_flight},
         )
         return None
 
@@ -200,12 +235,13 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
     Never selects the last READY+schedulable EC2 node. Local nodes are never considered.
     """
     n_ready = count_ec2_ready_schedulable(session)
-    if n_ready < int(get_settings().devnest_autoscaler_min_ec2_nodes_before_reclaim):
+    min_ready_required = _min_ready_ec2_before_reclaim()
+    if n_ready < min_ready_required:
         return ScaleDownEvaluation(
             node_key=None,
             reason=(
-                f"READY+schedulable EC2 count {n_ready} below min "
-                f"{get_settings().devnest_autoscaler_min_ec2_nodes_before_reclaim}"
+                f"READY+schedulable EC2 count {n_ready} below minimum {min_ready_required} "
+                f"(devnest_autoscaler_min_ec2_nodes_before_reclaim; last-node safety)"
             ),
             idle_ec2_ready_nodes=n_ready,
         )
@@ -221,7 +257,9 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
         .order_by(ExecutionNode.node_key.asc())
     )
     rows = list(session.exec(stmt).all())
-    idle = [r for r in rows if workload_count_on_node(session, r.node_key) == 0]
+    keys = [r.node_key for r in rows]
+    counts = _workload_counts_by_node_keys(session, keys)
+    idle = [r for r in rows if counts.get((r.node_key or "").strip(), 0) == 0]
     if not idle:
         return ScaleDownEvaluation(
             node_key=None,
@@ -231,7 +269,10 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
     pick = idle[0]
     return ScaleDownEvaluation(
         node_key=pick.node_key,
-        reason="idle EC2 node with lowest node_key; fleet has >=2 READY EC2 nodes",
+        reason=(
+            f"idle EC2 node with lowest node_key among zero-workload nodes; "
+            f"{n_ready} READY+schedulable EC2 node(s) (minimum before reclaim={min_ready_required})"
+        ),
         idle_ec2_ready_nodes=n_ready,
     )
 

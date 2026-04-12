@@ -133,6 +133,7 @@ class Settings(BaseSettings):
     devnest_autoscaler_provision_on_no_capacity: bool = False
     devnest_autoscaler_max_concurrent_provisioning: int = 3
     # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist (last-node safety).
+    # Values below 2 are coerced to 2 so scale-down cannot target the sole READY EC2 node via misconfiguration.
     devnest_autoscaler_min_ec2_nodes_before_reclaim: int = 2
 
     @field_validator("devnest_autoscaler_enabled", "devnest_autoscaler_provision_on_no_capacity", mode="before")
@@ -160,7 +161,7 @@ class Settings(BaseSettings):
             n = int(v)
         except (TypeError, ValueError):
             return 2
-        return max(1, min(n, 100))
+        return max(2, min(n, 100))
 
 
 @lru_cache

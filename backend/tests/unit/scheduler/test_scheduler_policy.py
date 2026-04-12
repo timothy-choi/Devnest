@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 from app.services.scheduler_service.models import WorkspaceComputeRequest
-from app.services.scheduler_service.policy import can_fit_workspace, rank_candidate_nodes, scheduling_sort_key
+from app.services.scheduler_service.policy import (
+    can_fit_workspace,
+    rank_candidate_nodes,
+    scheduling_sort_key,
+)
 
 
 def _node(
@@ -31,6 +35,17 @@ def test_can_fit_workspace_requires_cpu_and_memory() -> None:
     assert can_fit_workspace(_node(key="a", alloc_cpu=2.0, alloc_mem=1024), req) is True
     assert can_fit_workspace(_node(key="b", alloc_cpu=0.5, alloc_mem=1024), req) is False
     assert can_fit_workspace(_node(key="c", alloc_cpu=2.0, alloc_mem=256), req) is False
+
+
+def test_rank_candidate_nodes_excludes_not_ready_or_not_schedulable() -> None:
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    bad_status = _node(key="bad-status", alloc_cpu=8.0, alloc_mem=8192)
+    bad_status.status = ExecutionNodeStatus.DRAINING.value
+    bad_sched = _node(key="bad-sched", alloc_cpu=8.0, alloc_mem=8192)
+    bad_sched.schedulable = False
+    ok = _node(key="ok", alloc_cpu=4.0, alloc_mem=4096)
+    out = rank_candidate_nodes([bad_status, bad_sched, ok], req)
+    assert [n.node_key for n in out] == ["ok"]
 
 
 def test_rank_candidate_nodes_best_fit_then_lexicographic() -> None:
