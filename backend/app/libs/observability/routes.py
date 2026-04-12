@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import text
+from sqlmodel import Session
 
 from app.libs.db.database import get_engine
 

@@ -68,3 +68,15 @@ def test_log_event_includes_devnest_event_and_correlation() -> None:
     with correlation_scope("log-corr-1"):
         log_event(log, LogEvent.WORKSPACE_JOB_STARTED, workspace_id=7, workspace_job_id=42)
     # Smoke: no exception; formatter may not show extra in caplog without custom handler
+
+
+def test_log_event_message_kw_renamed_to_detail_no_keyerror() -> None:
+    """``message`` is reserved on LogRecord; log_event must not pass it through ``extra``."""
+    log = logging.getLogger("observability_test_message_alias")
+    log_event(
+        log,
+        LogEvent.RECONCILE_FAILED,
+        level=logging.WARNING,
+        message="failure text",
+        workspace_id=1,
+    )

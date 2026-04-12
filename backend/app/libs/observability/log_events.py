@@ -13,6 +13,52 @@ from typing import Any
 
 from .correlation import get_correlation_id
 
+# ``logging.LogRecord`` reserves these attribute names; they must not appear in ``extra``.
+_LOGRECORD_RESERVED_KEYS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "created",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "message",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "asctime",
+        "taskName",
+    },
+)
+
+
+def _sanitize_extra(fields: dict[str, Any]) -> dict[str, Any]:
+    """Map reserved keys so ``Logger.log(..., extra=...)`` does not raise KeyError."""
+    out: dict[str, Any] = {}
+    for k, v in fields.items():
+        if v is None:
+            continue
+        nk = k
+        if k == "message":
+            nk = "detail"
+        elif k == "asctime":
+            nk = "log_asctime"
+        elif k in _LOGRECORD_RESERVED_KEYS:
+            nk = f"devnest_{k}"
+        out[nk] = v
+    return out
+
 
 class LogEvent:
     """Stable event names (log record message = event name)."""
@@ -53,7 +99,7 @@ def log_event(
     **fields: Any,
 ) -> None:
     """Emit structured log; ``correlation_id`` overrides contextvar (needed for sync FastAPI routes)."""
-    out: dict[str, Any] = {k: v for k, v in fields.items() if v is not None}
+    out = _sanitize_extra(dict(fields))
     cid = (correlation_id or get_correlation_id() or "").strip() or None
     if cid:
         out["correlation_id"] = cid[:64]
