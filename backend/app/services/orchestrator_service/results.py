@@ -93,3 +93,13 @@ class WorkspaceUpdateResult:
     internal_endpoint: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
+
+
+@dataclass
+class WorkspaceSnapshotOperationResult:
+    """Result of orchestrator filesystem export/import for workspace snapshots (V1 tar.gz)."""
+
+    workspace_id: str
+    success: bool
+    size_bytes: Optional[int] = None
+    issues: Optional[List[str]] = None

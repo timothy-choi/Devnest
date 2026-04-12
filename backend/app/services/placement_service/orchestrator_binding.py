@@ -68,6 +68,8 @@ def resolve_orchestrator_placement(
             WorkspaceJobType.RECONCILE_RUNTIME.value,
             WorkspaceJobType.RESTART.value,
             WorkspaceJobType.UPDATE.value,
+            WorkspaceJobType.SNAPSHOT_CREATE.value,
+            WorkspaceJobType.SNAPSHOT_RESTORE.value,
         )
     )
     if reuse_from_runtime:

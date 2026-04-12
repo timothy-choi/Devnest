@@ -30,6 +30,11 @@ class WorkspaceStreamEventType:
     RECONCILE_NOOP = "controlplane.reconcile_noop"
     RECONCILE_FAILED = "controlplane.reconcile_failed"
 
+    SNAPSHOT_CREATED = "workspace.snapshot.created"
+    SNAPSHOT_FAILED = "workspace.snapshot.failed"
+    SNAPSHOT_RESTORED = "workspace.snapshot.restored"
+    SNAPSHOT_DELETED = "workspace.snapshot.deleted"
+
 
 SSE_POLL_INTERVAL_SEC = 1.0
 # Max events per SSE poll; large backlogs are drained across multiple polls via ``after_id``.
