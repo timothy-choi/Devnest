@@ -12,6 +12,7 @@ from app.services.placement_service.constants import (
 )
 from app.services.placement_service.errors import InvalidPlacementParametersError, NoSchedulableNodeError
 from app.services.placement_service.models import ExecutionNode
+from app.libs.observability.log_events import LogEvent, log_event
 from app.services.placement_service.node_placement import list_schedulable_nodes, reserve_node_for_workspace
 
 from .models import WorkspaceComputeRequest, WorkspaceScheduleResult
@@ -53,14 +54,14 @@ def schedule_workspace(
             message=str(e),
         )
     except NoSchedulableNodeError as e:
-        logger.warning(
-            "schedule_workspace_insufficient_capacity",
-            extra={
-                "workspace_id": workspace_id,
-                "requested_cpu": requested_cpu,
-                "requested_memory_mb": requested_memory_mb,
-                "detail": str(e)[:2000],
-            },
+        log_event(
+            logger,
+            LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
+            level=logging.WARNING,
+            workspace_id=workspace_id,
+            requested_cpu=requested_cpu,
+            requested_memory_mb=requested_memory_mb,
+            detail=str(e)[:2000],
         )
         return WorkspaceScheduleResult(
             execution_node=None,

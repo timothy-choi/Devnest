@@ -8,6 +8,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.libs.observability.log_events import LogEvent, log_event
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.orchestrator_service.errors import (
@@ -141,6 +142,15 @@ def execute_reconcile_runtime_job(
     wid_str = str(wid)
     cfg_v = int(job.requested_config_version)
     requested_by = str(job.requested_by_user_id)
+
+    log_event(
+        logger,
+        LogEvent.RECONCILE_STARTED,
+        correlation_id=job.correlation_id,
+        workspace_id=wid,
+        workspace_job_id=job.workspace_job_id,
+        workspace_status=ws.status,
+    )
 
     record_workspace_event(
         session,
@@ -284,6 +294,15 @@ def _fail_reconcile(session: Session, ws: Workspace, job: WorkspaceJob, message:
     """
     wid = ws.workspace_id
     assert wid is not None
+    log_event(
+        logger,
+        LogEvent.RECONCILE_FAILED,
+        level=logging.WARNING,
+        correlation_id=job.correlation_id,
+        workspace_id=wid,
+        workspace_job_id=job.workspace_job_id,
+        message=message[:500],
+    )
     record_workspace_event(
         session,
         workspace_id=wid,
@@ -433,6 +452,13 @@ def _reconcile_running(
     wmod._touch_workspace(session, ws)
 
     if runtime_changed:
+        log_event(
+            logger,
+            LogEvent.RECONCILE_FIXED_RUNTIME,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=job.workspace_job_id,
+        )
         record_workspace_event(
             session,
             workspace_id=wid,
@@ -461,6 +487,13 @@ def _reconcile_running(
                 _fail_reconcile(session, ws, job, f"reconcile:gateway_register_failed:{e}")
                 return
             fixed_route = True
+            log_event(
+                logger,
+                LogEvent.RECONCILE_FIXED_ROUTE,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_job_id=job.workspace_job_id,
+            )
             record_workspace_event(
                 session,
                 workspace_id=wid,

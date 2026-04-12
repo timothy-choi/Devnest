@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from sqlalchemy import func
 from sqlmodel import Session, select
+
+from app.libs.observability.correlation import generate_correlation_id
+from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.observability.metrics import record_job_queued
+
+logger = logging.getLogger(__name__)
 
 from app.services.workspace_service.api.schemas import (
     CreateWorkspaceRequest,
@@ -120,6 +127,12 @@ def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int
 def _require_not_busy(ws: Workspace) -> None:
     if ws.status in _BUSY_STATUSES:
         raise WorkspaceBusyError(f"Workspace is busy (status={ws.status})")
+
+
+def _effective_correlation_id(passed: str | None) -> str:
+    if passed and str(passed).strip():
+        return str(passed).strip()[:64]
+    return generate_correlation_id()
 
 
 def _intent_config_version(session: Session, workspace_id: int) -> int:
@@ -282,12 +295,14 @@ def _persist_intent(
     job_type: str,
     requested_by_user_id: int,
     requested_config_version: int,
+    correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
     now = datetime.now(timezone.utc)
     ws.status = new_status
     ws.updated_at = now
     session.add(ws)
 
+    cid = _effective_correlation_id(correlation_id)
     job = WorkspaceJob(
         workspace_id=ws.workspace_id,
         job_type=job_type,
@@ -295,9 +310,22 @@ def _persist_intent(
         requested_by_user_id=requested_by_user_id,
         requested_config_version=requested_config_version,
         attempt=0,
+        correlation_id=cid,
     )
     session.add(job)
     session.flush()
+
+    record_job_queued(job_type=job_type)
+    assert job.workspace_job_id is not None
+    assert ws.workspace_id is not None
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_JOB_QUEUED,
+        correlation_id=cid,
+        workspace_id=ws.workspace_id,
+        workspace_job_id=job.workspace_job_id,
+        job_type=job_type,
+    )
 
     record_workspace_event(
         session,
@@ -340,6 +368,7 @@ def request_start_workspace(
     workspace_id: int,
     owner_user_id: int,
     requested_by_user_id: int,
+    correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
     ws = _get_owned_workspace(session, workspace_id, owner_user_id)
     _require_not_busy(ws)
@@ -355,6 +384,7 @@ def request_start_workspace(
         job_type=WorkspaceJobType.START.value,
         requested_by_user_id=requested_by_user_id,
         requested_config_version=cfg_v,
+        correlation_id=correlation_id,
     )
 
 
@@ -364,6 +394,7 @@ def request_stop_workspace(
     workspace_id: int,
     owner_user_id: int,
     requested_by_user_id: int,
+    correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
     ws = _get_owned_workspace(session, workspace_id, owner_user_id)
     _require_not_busy(ws)
@@ -379,6 +410,7 @@ def request_stop_workspace(
         job_type=WorkspaceJobType.STOP.value,
         requested_by_user_id=requested_by_user_id,
         requested_config_version=cfg_v,
+        correlation_id=correlation_id,
     )
 
 
@@ -388,6 +420,7 @@ def request_restart_workspace(
     workspace_id: int,
     owner_user_id: int,
     requested_by_user_id: int,
+    correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
     ws = _get_owned_workspace(session, workspace_id, owner_user_id)
     _require_not_busy(ws)
@@ -403,6 +436,7 @@ def request_restart_workspace(
         job_type=WorkspaceJobType.RESTART.value,
         requested_by_user_id=requested_by_user_id,
         requested_config_version=cfg_v,
+        correlation_id=correlation_id,
     )
 
 
@@ -412,6 +446,7 @@ def request_delete_workspace(
     workspace_id: int,
     owner_user_id: int,
     requested_by_user_id: int,
+    correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
     ws = _get_owned_workspace(session, workspace_id, owner_user_id)
     _require_not_busy(ws)
@@ -431,6 +466,7 @@ def request_delete_workspace(
         job_type=WorkspaceJobType.DELETE.value,
         requested_by_user_id=requested_by_user_id,
         requested_config_version=cfg_v,
+        correlation_id=correlation_id,
     )
 
 
@@ -441,6 +477,7 @@ def request_update_workspace(
     owner_user_id: int,
     requested_by_user_id: int,
     runtime: WorkspaceRuntimeSpecSchema,
+    correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
     """
     Stage the next config version (``latest + 1``) and enqueue an UPDATE job.
@@ -477,6 +514,7 @@ def request_update_workspace(
     session.add(cfg)
     session.flush()
 
+    cid = _effective_correlation_id(correlation_id)
     job = WorkspaceJob(
         workspace_id=workspace_id,
         job_type=WorkspaceJobType.UPDATE.value,
@@ -484,9 +522,21 @@ def request_update_workspace(
         requested_by_user_id=requested_by_user_id,
         requested_config_version=next_version,
         attempt=0,
+        correlation_id=cid,
     )
     session.add(job)
     session.flush()
+
+    record_job_queued(job_type=WorkspaceJobType.UPDATE.value)
+    assert job.workspace_job_id is not None
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_JOB_QUEUED,
+        correlation_id=cid,
+        workspace_id=workspace_id,
+        workspace_job_id=job.workspace_job_id,
+        job_type=WorkspaceJobType.UPDATE.value,
+    )
 
     record_workspace_event(
         session,
@@ -526,6 +576,7 @@ def enqueue_reconcile_runtime_job(
     session: Session,
     *,
     workspace_id: int,
+    correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
     """
     Queue a RECONCILE_RUNTIME job without changing ``Workspace.status``.
@@ -549,6 +600,7 @@ def enqueue_reconcile_runtime_job(
     assert ws.workspace_id is not None
     owner_id = int(ws.owner_user_id)
 
+    cid = _effective_correlation_id(correlation_id)
     job = WorkspaceJob(
         workspace_id=ws.workspace_id,
         job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
@@ -556,9 +608,21 @@ def enqueue_reconcile_runtime_job(
         requested_by_user_id=owner_id,
         requested_config_version=cfg_v,
         attempt=0,
+        correlation_id=cid,
     )
     session.add(job)
     session.flush()
+
+    record_job_queued(job_type=WorkspaceJobType.RECONCILE_RUNTIME.value)
+    assert job.workspace_job_id is not None
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_JOB_QUEUED,
+        correlation_id=cid,
+        workspace_id=ws.workspace_id,
+        workspace_job_id=job.workspace_job_id,
+        job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
+    )
 
     record_workspace_event(
         session,
@@ -599,6 +663,7 @@ def create_workspace(
     *,
     owner_user_id: int,
     body: CreateWorkspaceRequest,
+    correlation_id: str | None = None,
 ) -> CreateWorkspaceResult:
     now = datetime.now(timezone.utc)
     config_json = body.runtime.to_config_dict()
@@ -619,6 +684,7 @@ def create_workspace(
     session.add(cfg)
     session.flush()
 
+    cid = _effective_correlation_id(correlation_id)
     job = WorkspaceJob(
         workspace_id=ws.workspace_id,
         job_type=WorkspaceJobType.CREATE.value,
@@ -626,9 +692,30 @@ def create_workspace(
         requested_by_user_id=owner_user_id,
         requested_config_version=1,
         attempt=0,
+        correlation_id=cid,
     )
     session.add(job)
     session.flush()
+
+    record_job_queued(job_type=WorkspaceJobType.CREATE.value)
+    assert job.workspace_job_id is not None
+    assert ws.workspace_id is not None
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_INTENT_CREATED,
+        correlation_id=cid,
+        workspace_id=ws.workspace_id,
+        workspace_job_id=job.workspace_job_id,
+        job_type=WorkspaceJobType.CREATE.value,
+    )
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_JOB_QUEUED,
+        correlation_id=cid,
+        workspace_id=ws.workspace_id,
+        workspace_job_id=job.workspace_job_id,
+        job_type=WorkspaceJobType.CREATE.value,
+    )
 
     record_workspace_event(
         session,

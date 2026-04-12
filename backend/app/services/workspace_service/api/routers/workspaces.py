@@ -39,6 +39,10 @@ from app.services.workspace_service.services.workspace_event_service import (
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
 
+def _correlation_id_from_request(request: Request) -> str | None:
+    return getattr(request.state, "correlation_id", None)
+
+
 def _raise_workspace_http(exc: WorkspaceServiceError) -> None:
     if isinstance(exc, WorkspaceNotFoundError):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from exc
@@ -98,6 +102,7 @@ def _attach_response(out: workspace_intent_service.WorkspaceAttachResult) -> Wor
     summary="Create workspace (accepted)",
 )
 def post_workspace(
+    request: Request,
     body: CreateWorkspaceRequest,
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
@@ -107,6 +112,7 @@ def post_workspace(
         session,
         owner_user_id=current.user_auth_id,
         body=body,
+        correlation_id=_correlation_id_from_request(request),
     )
     return CreateWorkspaceAcceptedResponse(
         workspace_id=out.workspace_id,
@@ -145,6 +151,7 @@ def get_workspaces(
     summary="Request workspace start (accepted)",
 )
 def post_workspace_start(
+    request: Request,
     workspace_id: int,
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
@@ -157,6 +164,7 @@ def post_workspace_start(
             workspace_id=workspace_id,
             owner_user_id=uid,
             requested_by_user_id=uid,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
@@ -170,6 +178,7 @@ def post_workspace_start(
     summary="Request workspace stop (accepted)",
 )
 def post_workspace_stop(
+    request: Request,
     workspace_id: int,
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
@@ -182,6 +191,7 @@ def post_workspace_stop(
             workspace_id=workspace_id,
             owner_user_id=uid,
             requested_by_user_id=uid,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
@@ -195,6 +205,7 @@ def post_workspace_stop(
     summary="Request workspace restart (accepted)",
 )
 def post_workspace_restart(
+    request: Request,
     workspace_id: int,
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
@@ -207,6 +218,7 @@ def post_workspace_restart(
             workspace_id=workspace_id,
             owner_user_id=uid,
             requested_by_user_id=uid,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
@@ -220,6 +232,7 @@ def post_workspace_restart(
     summary="Request workspace delete (accepted)",
 )
 def delete_workspace(
+    request: Request,
     workspace_id: int,
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
@@ -232,6 +245,7 @@ def delete_workspace(
             workspace_id=workspace_id,
             owner_user_id=uid,
             requested_by_user_id=uid,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
@@ -245,6 +259,7 @@ def delete_workspace(
     summary="Request workspace config update (accepted)",
 )
 def patch_workspace_update(
+    request: Request,
     workspace_id: int,
     body: PatchWorkspaceUpdateRequest,
     session: Session = Depends(get_db),
@@ -259,6 +274,7 @@ def patch_workspace_update(
             owner_user_id=uid,
             requested_by_user_id=uid,
             runtime=body.runtime,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)

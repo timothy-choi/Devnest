@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.libs.db.database import init_db
+from app.libs.observability.middleware import CorrelationIdMiddleware
+from app.libs.observability.routes import router as observability_router
 from app.services.auth_service.api.routers.auth import router as auth_router
 from app.services.notification_service.api.routers import internal_notifications_router, notifications_router
 from app.services.user_service.api.routers import users_router
@@ -24,6 +26,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="DevNest API", lifespan=lifespan)
+app.add_middleware(CorrelationIdMiddleware)
+app.include_router(observability_router)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(workspaces_router)
