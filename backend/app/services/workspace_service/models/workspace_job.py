@@ -43,3 +43,15 @@ class WorkspaceJob(SQLModel, table=True):
         index=True,
         description="Request/job correlation id for logs and gateway propagation (V1 observability).",
     )
+    max_attempts: int = Field(
+        default=2,
+        ge=1,
+        description="Worker execution tries (each claim increments attempt); default 2 aligns with design doc.",
+    )
+    failure_stage: str | None = Field(default=None, max_length=32, index=True)
+    failure_code: str | None = Field(default=None, max_length=64)
+    next_attempt_after: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True, index=True),
+        description="When set, dequeue skips this row until this time (retry backoff).",
+    )

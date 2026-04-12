@@ -312,6 +312,12 @@ def test_create_workspace_bringup_failure_emits_failed_job_event(
     )
     wid, jid = _create_workspace(client, token)
 
+    job_row = db_session.get(WorkspaceJob, jid)
+    assert job_row is not None
+    job_row.max_attempts = 1
+    db_session.add(job_row)
+    db_session.commit()
+
     orch = create_autospec(OrchestratorService, instance=True)
     orch.bring_up_workspace_runtime.side_effect = WorkspaceBringUpError("system-events-injected-bringup-failure")
     monkeypatch.setattr(

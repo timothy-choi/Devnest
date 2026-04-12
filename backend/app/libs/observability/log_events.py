@@ -68,6 +68,12 @@ class LogEvent:
     WORKSPACE_JOB_STARTED = "workspace.job.started"
     WORKSPACE_JOB_SUCCEEDED = "workspace.job.succeeded"
     WORKSPACE_JOB_FAILED = "workspace.job.failed"
+    WORKSPACE_JOB_RETRY_SCHEDULED = "workspace.job.retry_scheduled"
+    WORKSPACE_JOB_RETRY_EXHAUSTED = "workspace.job.retry_exhausted"
+    WORKSPACE_JOB_FAILED_TERMINAL = "workspace.job.failed_terminal"
+
+    RECONCILE_RETRY_SCHEDULED = "reconcile.job.retry_scheduled"
+    RECONCILE_FAILED_TERMINAL = "reconcile.job.failed_terminal"
 
     ORCHESTRATOR_BRINGUP_STARTED = "orchestrator.bringup.started"
     ORCHESTRATOR_BRINGUP_SUCCEEDED = "orchestrator.bringup.succeeded"

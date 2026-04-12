@@ -28,8 +28,14 @@ from app.services.workspace_service.services.workspace_event_service import (
     record_workspace_event,
 )
 from app.workers.workspace_job_worker import worker as wmod
+from app.workers.workspace_job_worker.failure_handling import (
+    classify_reconcile_failure,
+    try_schedule_workspace_job_retry,
+)
 
 logger = logging.getLogger(__name__)
+
+# TODO: distributed reconcile lease / leader election when multiple workers enqueue RECONCILE_RUNTIME.
 
 _BUSY_RECONCILE = frozenset(
     {
@@ -321,14 +327,33 @@ def _reconcile_error_cleanup(session: Session, ws: Workspace, job: WorkspaceJob)
 
 
 def _fail_reconcile(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
-    """Mark reconcile job failed.
+    """Mark reconcile job failed, or re-queue transient failures (bounded by ``WorkspaceJob.max_attempts``).
 
     ``STOPPED`` / ``ERROR`` / ``DELETED``: job failed only (workspace status unchanged).
 
     ``RUNNING`` (and any other non-terminal): workspace moves to ``ERROR`` via worker finalizer.
+
+    Stream events for terminal failure are emitted in :func:`wmod._emit_job_outcome_event` (JOB_FAILED +
+    RECONCILE_FAILED_TERMINAL for reconcile rows).
     """
     wid = ws.workspace_id
     assert wid is not None
+    stage, retryable = classify_reconcile_failure(message)
+    scheduled = bool(
+        retryable
+        and try_schedule_workspace_job_retry(
+            session,
+            job,
+            message=message,
+            stage=stage,
+            failure_code=stage.value,
+            truncate_message=wmod._truncate,
+            now=wmod._now(),
+        ),
+    )
+    if scheduled:
+        wmod._touch_workspace(session, ws)
+        return
     log_event(
         logger,
         LogEvent.RECONCILE_FAILED,
@@ -337,24 +362,24 @@ def _fail_reconcile(session: Session, ws: Workspace, job: WorkspaceJob, message:
         workspace_id=wid,
         workspace_job_id=job.workspace_job_id,
         message=message[:500],
-    )
-    record_workspace_event(
-        session,
-        workspace_id=wid,
-        event_type=WorkspaceStreamEventType.RECONCILE_FAILED,
-        status=ws.status,
-        message=message,
-        payload={"job_id": job.workspace_job_id},
+        failure_stage=stage.value,
+        retryable=False,
     )
     if ws.status in (
         WorkspaceStatus.STOPPED.value,
         WorkspaceStatus.ERROR.value,
         WorkspaceStatus.DELETED.value,
     ):
-        wmod._mark_job_failed(session, job, message)
+        wmod._mark_job_failed(
+            session,
+            job,
+            message,
+            failure_stage=stage.value,
+            failure_code=stage.value,
+        )
         wmod._touch_workspace(session, ws)
         return
-    wmod._finalize_job_failed_workspace_error(session, ws, job, message=message)
+    wmod._finalize_job_failed_workspace_error(session, ws, job, message=message, failure_stage=stage)
 
 
 def _reconcile_stopped(

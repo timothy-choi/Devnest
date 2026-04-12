@@ -39,7 +39,12 @@ def _seed_owner(session: Session) -> int:
     return user.user_auth_id
 
 
-def _seed_create_job(session: Session, owner_id: int) -> tuple[int, int]:
+def _seed_create_job(
+    session: Session,
+    owner_id: int,
+    *,
+    max_attempts: int | None = None,
+) -> tuple[int, int]:
     now = datetime.now(timezone.utc)
     ws = Workspace(
         name="placement-ws",
@@ -66,6 +71,8 @@ def _seed_create_job(session: Session, owner_id: int) -> tuple[int, int]:
         requested_config_version=2,
         attempt=0,
     )
+    if max_attempts is not None:
+        job.max_attempts = max_attempts
     session.add(job)
     session.commit()
     session.refresh(job)
@@ -76,7 +83,7 @@ def _seed_create_job(session: Session, owner_id: int) -> tuple[int, int]:
 def test_create_job_fails_when_placement_raises(db_session: Session) -> None:
     """Reserve failure happens before Docker; job should end FAILED with placement code."""
     owner = _seed_owner(db_session)
-    _wid, jid = _seed_create_job(db_session, owner)
+    _wid, jid = _seed_create_job(db_session, owner, max_attempts=1)
 
     with patch(
         "app.services.scheduler_service.service.reserve_node_for_workspace",

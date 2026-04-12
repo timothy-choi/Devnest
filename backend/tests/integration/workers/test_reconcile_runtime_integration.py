@@ -183,6 +183,7 @@ def test_reconcile_running_unhealthy_marks_workspace_error(
         requested_by_user_id=owner,
         requested_config_version=CFG_V,
         attempt=0,
+        max_attempts=1,
     )
     db_session.add(job)
     db_session.commit()
@@ -203,7 +204,12 @@ def test_reconcile_running_unhealthy_marks_workspace_error(
     assert ws.status == WorkspaceStatus.ERROR.value
 
     ev = db_session.exec(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wid)).all()
-    assert any(e.event_type == WorkspaceStreamEventType.RECONCILE_FAILED for e in ev)
+    terminal = {
+        WorkspaceStreamEventType.RECONCILE_FAILED,
+        WorkspaceStreamEventType.RECONCILE_FAILED_TERMINAL,
+        WorkspaceStreamEventType.JOB_FAILED,
+    }
+    assert any(e.event_type in terminal for e in ev)
 
 
 def test_reconcile_stopped_stops_lingering_container(

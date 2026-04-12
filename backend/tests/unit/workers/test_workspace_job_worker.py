@@ -89,6 +89,7 @@ def _seed_job(
     status: str = WorkspaceJobStatus.QUEUED.value,
     requested_config_version: int = REQUESTED_CONFIG_VERSION,
     created_at: datetime | None = None,
+    max_attempts: int = 1,
 ) -> WorkspaceJob:
     job = WorkspaceJob(
         workspace_id=workspace_id,
@@ -97,6 +98,7 @@ def _seed_job(
         requested_by_user_id=owner_user_id,
         requested_config_version=requested_config_version,
         attempt=0,
+        max_attempts=max_attempts,
     )
     if created_at is not None:
         job.created_at = created_at
@@ -1017,6 +1019,7 @@ class TestMissingWorkspace:
                 requested_by_user_id=owner_user_id,
                 requested_config_version=1,
                 attempt=0,
+                max_attempts=1,
             )
             session.add(job)
             session.flush()
@@ -1121,3 +1124,110 @@ class TestOrchestratorBindingFailure:
             assert job2.error_msg and "Docker engine" in job2.error_msg
             assert ws2.status == WorkspaceStatus.ERROR.value
             assert ws2.last_error_code == "ORCHESTRATOR_BINDING_FAILED"
+
+
+class TestWorkspaceJobRetry:
+    def test_bring_up_failure_with_max_attempts_2_requeues_then_terminal(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.libs.common.config import get_settings
+
+        monkeypatch.setenv("WORKSPACE_JOB_RETRY_BACKOFF_SECONDS", "0")
+        get_settings.cache_clear()
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            orch.bring_up_workspace_runtime.return_value = _bringup_fail(str(wid))
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+                max_attempts=2,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            j1 = session.get(WorkspaceJob, job_id)
+            ws1 = session.get(Workspace, wid)
+            assert j1 is not None and ws1 is not None
+            assert j1.status == WorkspaceJobStatus.QUEUED.value
+            assert j1.next_attempt_after is not None
+            assert j1.failure_stage == "CONTAINER"
+            assert j1.attempt == 1
+            assert ws1.status == WorkspaceStatus.STARTING.value
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            j2 = session.get(WorkspaceJob, job_id)
+            ws2 = session.get(Workspace, wid)
+            assert j2 is not None and ws2 is not None
+            assert j2.status == WorkspaceJobStatus.FAILED.value
+            assert j2.attempt == 2
+            assert j2.max_attempts == 2
+            assert ws2.status == WorkspaceStatus.ERROR.value
+
+        get_settings.cache_clear()
+
+    def test_bring_up_failure_second_attempt_succeeds(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.libs.common.config import get_settings
+
+        monkeypatch.setenv("WORKSPACE_JOB_RETRY_BACKOFF_SECONDS", "0")
+        get_settings.cache_clear()
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            wid_str = str(wid)
+            orch.bring_up_workspace_runtime.side_effect = [
+                _bringup_fail(wid_str),
+                _bringup_ok(wid_str),
+            ]
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.START.value,
+                max_attempts=2,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            j = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            assert j is not None and ws is not None
+            assert j.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws.status == WorkspaceStatus.RUNNING.value
+
+        get_settings.cache_clear()

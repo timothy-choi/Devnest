@@ -1,6 +1,7 @@
 """Workspace control-plane SQLModel tables."""
 
 from .enums import (
+    FailureStage,
     WorkspaceJobStatus,
     WorkspaceJobType,
     WorkspaceRuntimeHealthStatus,
@@ -16,6 +17,7 @@ from .workspace_runtime import WorkspaceRuntime
 from .workspace_session import WorkspaceSession
 
 __all__ = [
+    "FailureStage",
     "Workspace",
     "WorkspaceConfig",
     "WorkspaceEvent",

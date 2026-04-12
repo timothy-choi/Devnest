@@ -124,6 +124,7 @@ def _seed_queued_job(
     job_type: str,
     requested_config_version: int = REQUESTED_CONFIG_VERSION,
     created_at: datetime | None = None,
+    max_attempts: int | None = None,
 ) -> int:
     job = WorkspaceJob(
         workspace_id=workspace_id,
@@ -133,6 +134,8 @@ def _seed_queued_job(
         requested_config_version=requested_config_version,
         attempt=0,
     )
+    if max_attempts is not None:
+        job.max_attempts = max_attempts
     if created_at is not None:
         job.created_at = created_at
     session.add(job)
@@ -431,6 +434,7 @@ def test_orchestrator_exception_marks_job_and_workspace_failed(
         workspace_id=wid,
         owner_id=owner_id,
         job_type=WorkspaceJobType.CREATE.value,
+        max_attempts=1,
     )
 
     orch = _orch()

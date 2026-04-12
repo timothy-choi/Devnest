@@ -166,6 +166,12 @@ def test_bringup_failure_does_not_register_gateway_route(
     )
     wid, jid = helpers.create_workspace(client, token)
 
+    job_row = db_session.get(WorkspaceJob, jid)
+    assert job_row is not None
+    job_row.max_attempts = 1
+    db_session.add(job_row)
+    db_session.commit()
+
     orch = create_autospec(OrchestratorService, instance=True)
     orch.bring_up_workspace_runtime.side_effect = WorkspaceBringUpError(
         "gateway-system-injected-bringup-failure",

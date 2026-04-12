@@ -67,6 +67,7 @@ from app.services.workspace_service.models import (
     WorkspaceRuntime,
 )
 from app.services.workspace_service.models.enums import (
+    FailureStage,
     WorkspaceJobStatus,
     WorkspaceJobType,
     WorkspaceRuntimeHealthStatus,
@@ -84,6 +85,15 @@ from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability import metrics as devnest_metrics
 
 from .errors import UnsupportedWorkspaceJobTypeError
+from .failure_handling import (
+    classify_placement_error,
+    effective_max_attempts,
+    lifecycle_result_failure_retryable,
+    orchestrator_binding_retryable,
+    orchestrator_exception_retryable,
+    queued_job_eligible_where,
+    try_schedule_workspace_job_retry,
+)
 from .results import WorkspaceJobWorkerTickResult
 
 _ORCHESTRATOR_EXCEPTIONS: tuple[type[Exception], ...] = (
@@ -119,12 +129,25 @@ def _fail_job_from_placement(
     session: Session,
     ws: Workspace,
     job: WorkspaceJob,
-    message: str,
+    exc: BaseException,
     *,
     placement_reason: str = "placement",
 ) -> None:
+    message = str(exc)
+    stage, _ = classify_placement_error(exc)
+    if try_schedule_workspace_job_retry(
+        session,
+        job,
+        message=message,
+        stage=stage,
+        failure_code=placement_reason,
+        truncate_message=_truncate,
+        now=_now(),
+    ):
+        _touch_workspace(session, ws)
+        return
     devnest_metrics.record_placement_failure(reason=placement_reason)
-    _mark_job_failed(session, job, message)
+    _mark_job_failed(session, job, message, failure_stage=stage.value, failure_code=placement_reason)
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_PLACEMENT, message)
     _touch_workspace(session, ws)
@@ -132,10 +155,23 @@ def _fail_job_from_placement(
     _clear_runtime_capacity_reservation(session, ws.workspace_id)
 
 
-def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
+def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, exc: BaseException) -> None:
     """Node execution / Docker / SSH binding failed before orchestrator could run the job."""
+    message = str(exc)
+    stage, _ = orchestrator_binding_retryable()
+    if try_schedule_workspace_job_retry(
+        session,
+        job,
+        message=message,
+        stage=stage,
+        failure_code="orchestrator_binding",
+        truncate_message=_truncate,
+        now=_now(),
+    ):
+        _touch_workspace(session, ws)
+        return
     devnest_metrics.record_placement_failure(reason="orchestrator_binding")
-    _mark_job_failed(session, job, message)
+    _mark_job_failed(session, job, message, failure_stage=stage.value, failure_code="orchestrator_binding")
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_ORCHESTRATOR_BINDING, message)
     _touch_workspace(session, ws)
@@ -155,9 +191,10 @@ def _worker_sessionmaker(bind: Engine):
 
 
 def _stmt_oldest_queued_job_for_update():
+    now = _now()
     return (
         select(WorkspaceJob)
-        .where(WorkspaceJob.status == WorkspaceJobStatus.QUEUED.value)
+        .where(queued_job_eligible_where(WorkspaceJob, now))
         .order_by(WorkspaceJob.created_at.asc())
         .limit(1)
         .with_for_update(skip_locked=True)
@@ -165,11 +202,12 @@ def _stmt_oldest_queued_job_for_update():
 
 
 def _stmt_queued_job_by_id_for_update(workspace_job_id: int):
+    now = _now()
     return (
         select(WorkspaceJob)
         .where(
             WorkspaceJob.workspace_job_id == workspace_job_id,
-            WorkspaceJob.status == WorkspaceJobStatus.QUEUED.value,
+            queued_job_eligible_where(WorkspaceJob, now),
         )
         .with_for_update(skip_locked=True)
     )
@@ -367,6 +405,9 @@ def _mark_job_succeeded(session: Session, job: WorkspaceJob) -> None:
     job.status = WorkspaceJobStatus.SUCCEEDED.value
     job.finished_at = _now()
     job.error_msg = None
+    job.failure_stage = None
+    job.failure_code = None
+    job.next_attempt_after = None
     session.add(job)
     devnest_metrics.record_job_terminal(
         job_type=job.job_type or "unknown",
@@ -376,10 +417,20 @@ def _mark_job_succeeded(session: Session, job: WorkspaceJob) -> None:
         devnest_metrics.record_reconcile_terminal(succeeded=True)
 
 
-def _mark_job_failed(session: Session, job: WorkspaceJob, message: str | None) -> None:
+def _mark_job_failed(
+    session: Session,
+    job: WorkspaceJob,
+    message: str | None,
+    *,
+    failure_stage: str | None = None,
+    failure_code: str | None = None,
+) -> None:
     job.status = WorkspaceJobStatus.FAILED.value
     job.finished_at = _now()
     job.error_msg = _truncate(message, 8192)
+    job.failure_stage = failure_stage
+    job.failure_code = failure_code or failure_stage
+    job.next_attempt_after = None
     session.add(job)
     devnest_metrics.record_job_terminal(
         job_type=job.job_type or "unknown",
@@ -459,14 +510,40 @@ def _finalize_job_failed_workspace_error(
     job: WorkspaceJob,
     *,
     message: str,
+    failure_stage: FailureStage | None = None,
 ) -> None:
     """Mark job failed, move workspace to ``ERROR`` with operational error code (orchestration outcome)."""
-    _mark_job_failed(session, job, message)
+    fs = failure_stage.value if failure_stage else None
+    _mark_job_failed(session, job, message, failure_stage=fs, failure_code=fs)
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_JOB, message)
     _touch_workspace(session, ws)
     if ws.workspace_id is not None:
         _clear_runtime_capacity_reservation(session, ws.workspace_id)
+
+
+def _resolve_orchestrator_result_failure(
+    session: Session,
+    ws: Workspace,
+    job: WorkspaceJob,
+    *,
+    message: str,
+    stage: FailureStage,
+    retryable: bool,
+) -> None:
+    """Bounded retry for orchestrator *result* failures (success=False), else terminal workspace ERROR."""
+    if retryable and try_schedule_workspace_job_retry(
+        session,
+        job,
+        message=message,
+        stage=stage,
+        failure_code=stage.value,
+        truncate_message=_truncate,
+        now=_now(),
+    ):
+        _touch_workspace(session, ws)
+        return
+    _finalize_job_failed_workspace_error(session, ws, job, message=message, failure_stage=stage)
 
 
 def _finalize_runtime_running_success(
@@ -544,7 +621,14 @@ def _finalize_bringup_result(
         return
 
     msg = _format_issues(result.issues) or "Bring-up completed without success"
-    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
+    _resolve_orchestrator_result_failure(
+        session,
+        ws,
+        job,
+        message=msg,
+        stage=FailureStage.CONTAINER,
+        retryable=lifecycle_result_failure_retryable(job.job_type),
+    )
 
 
 def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, result: WorkspaceStopResult) -> None:
@@ -567,7 +651,14 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
         return
 
     msg = _format_issues(result.issues) or "Stop completed without success"
-    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
+    _resolve_orchestrator_result_failure(
+        session,
+        ws,
+        job,
+        message=msg,
+        stage=FailureStage.CONTAINER,
+        retryable=False,
+    )
 
 
 def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, result: WorkspaceDeleteResult) -> None:
@@ -589,7 +680,14 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
         return
 
     msg = _format_issues(result.issues) or "Delete completed without success"
-    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
+    _resolve_orchestrator_result_failure(
+        session,
+        ws,
+        job,
+        message=msg,
+        stage=FailureStage.CONTAINER,
+        retryable=False,
+    )
 
 
 def _finalize_restart_result(
@@ -618,7 +716,14 @@ def _finalize_restart_result(
         return
 
     msg = _format_issues(result.issues) or "Restart completed without success"
-    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
+    _resolve_orchestrator_result_failure(
+        session,
+        ws,
+        job,
+        message=msg,
+        stage=FailureStage.CONTAINER,
+        retryable=lifecycle_result_failure_retryable(job.job_type),
+    )
 
 
 def _finalize_update_result(
@@ -676,7 +781,14 @@ def _finalize_update_result(
         )
         return
 
-    _finalize_job_failed_workspace_error(session, ws, job, message=msg)
+    _resolve_orchestrator_result_failure(
+        session,
+        ws,
+        job,
+        message=msg,
+        stage=FailureStage.CONTAINER,
+        retryable=lifecycle_result_failure_retryable(job.job_type),
+    )
 
 
 def _execute_job_body(
@@ -739,17 +851,69 @@ def _execute_job_body(
 
 
 def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: WorkspaceJob) -> None:
-    """Append ``JOB_SUCCEEDED`` / ``JOB_FAILED`` stream event after final job status is known."""
-    # Persist job/workspace mutations before refresh so we do not reload stale pre-success rows from DB.
+    """Emit SSE/log events for terminal job outcomes, retry backoff, or success."""
     session.flush()
     session.refresh(job)
     session.refresh(ws)
     jid = job.workspace_job_id
+    max_a = effective_max_attempts(job)
     base_payload: dict[str, object] = {
         "job_id": jid,
         "job_type": job.job_type,
         "workspace_status": ws.status,
+        "attempt": job.attempt,
+        "max_attempts": max_a,
     }
+    if (
+        job.status == WorkspaceJobStatus.QUEUED.value
+        and job.next_attempt_after is not None
+        and (job.error_msg or "").strip()
+    ):
+        retry_payload = {
+            **base_payload,
+            "failure_stage": job.failure_stage,
+            "failure_code": job.failure_code,
+            "error_msg": job.error_msg,
+            "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
+            "retryable": True,
+        }
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_JOB_RETRY_SCHEDULED,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=jid,
+            job_type=job.job_type,
+            failure_stage=job.failure_stage,
+            attempt=job.attempt,
+            max_attempts=max_a,
+        )
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.JOB_RETRY_SCHEDULED,
+            status=ws.status,
+            message="Workspace job retry scheduled after transient failure",
+            payload=retry_payload,
+        )
+        if job.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value:
+            log_event(
+                logger,
+                LogEvent.RECONCILE_RETRY_SCHEDULED,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_job_id=jid,
+                failure_stage=job.failure_stage,
+            )
+            record_workspace_event(
+                session,
+                workspace_id=wid,
+                event_type=WorkspaceStreamEventType.RECONCILE_RETRY_SCHEDULED,
+                status=ws.status,
+                message="Reconcile job retry scheduled",
+                payload=retry_payload,
+            )
+        return
     if job.status == WorkspaceJobStatus.SUCCEEDED.value:
         log_event(
             logger,
@@ -768,6 +932,17 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
             payload=base_payload,
         )
     elif job.status == WorkspaceJobStatus.FAILED.value:
+        exhausted = int(job.attempt or 0) >= max_a
+        terminal_payload = {
+            **base_payload,
+            "error_msg": job.error_msg,
+            "failure_stage": job.failure_stage,
+            "failure_code": job.failure_code,
+            "terminal": True,
+            "retry_exhausted": exhausted,
+            "last_error_code": ws.last_error_code,
+            "last_error_message": ws.last_error_message,
+        }
         log_event(
             logger,
             LogEvent.WORKSPACE_JOB_FAILED,
@@ -776,20 +951,60 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
             workspace_job_id=jid,
             job_type=job.job_type,
             error_msg=(job.error_msg or "")[:500] if job.error_msg else None,
+            failure_stage=job.failure_stage,
         )
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_JOB_FAILED_TERMINAL,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=jid,
+            job_type=job.job_type,
+            failure_stage=job.failure_stage,
+            retry_exhausted=exhausted,
+        )
+        if exhausted:
+            log_event(
+                logger,
+                LogEvent.WORKSPACE_JOB_RETRY_EXHAUSTED,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_job_id=jid,
+                job_type=job.job_type,
+            )
+            record_workspace_event(
+                session,
+                workspace_id=wid,
+                event_type=WorkspaceStreamEventType.JOB_RETRY_EXHAUSTED,
+                status=ws.status,
+                message="Workspace job retries exhausted",
+                payload=terminal_payload,
+            )
         record_workspace_event(
             session,
             workspace_id=wid,
             event_type=WorkspaceStreamEventType.JOB_FAILED,
             status=ws.status,
             message="Workspace job failed",
-            payload={
-                **base_payload,
-                "error_msg": job.error_msg,
-                "last_error_code": ws.last_error_code,
-                "last_error_message": ws.last_error_message,
-            },
+            payload=terminal_payload,
         )
+        if job.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value:
+            log_event(
+                logger,
+                LogEvent.RECONCILE_FAILED_TERMINAL,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_job_id=jid,
+                failure_stage=job.failure_stage,
+            )
+            record_workspace_event(
+                session,
+                workspace_id=wid,
+                event_type=WorkspaceStreamEventType.RECONCILE_FAILED_TERMINAL,
+                status=ws.status,
+                message="Reconcile job failed (terminal)",
+                payload=terminal_payload,
+            )
 
 
 def _process_claimed_running_job(session: Session, orchestrator: OrchestratorService, job: WorkspaceJob) -> None:
@@ -807,7 +1022,13 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
             "workspace_job_missing_workspace",
             extra={"workspace_id": wid, "workspace_job_id": jid, "job_type": jt},
         )
-        _mark_job_failed(session, job, "Workspace row not found for job")
+        _mark_job_failed(
+            session,
+            job,
+            "Workspace row not found for job",
+            failure_stage=FailureStage.UNKNOWN.value,
+            failure_code="missing_workspace",
+        )
         return
 
     log_event(
@@ -844,19 +1065,40 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
                 "error": str(e),
             },
         )
-        _mark_job_failed(session, job, str(e))
-        ws.status = WorkspaceStatus.ERROR.value
-        _workspace_set_error(ws, _ERROR_CODE_ORCH, str(e))
-        _touch_workspace(session, ws)
-        _clear_runtime_capacity_reservation(session, wid)
+        msg = str(e)
+        stage = FailureStage.CONTAINER
+        retry = orchestrator_exception_retryable(jt)
+        if isinstance(e, (WorkspaceStopError, WorkspaceDeleteError)):
+            retry = False
+        scheduled = bool(
+            retry
+            and try_schedule_workspace_job_retry(
+                session,
+                job,
+                message=msg,
+                stage=stage,
+                failure_code=_ERROR_CODE_ORCH,
+                truncate_message=_truncate,
+                now=_now(),
+            ),
+        )
+        if scheduled:
+            _touch_workspace(session, ws)
+        else:
+            _mark_job_failed(session, job, msg, failure_stage=stage.value, failure_code=_ERROR_CODE_ORCH)
+            ws.status = WorkspaceStatus.ERROR.value
+            _workspace_set_error(ws, _ERROR_CODE_ORCH, msg)
+            _touch_workspace(session, ws)
+            _clear_runtime_capacity_reservation(session, wid)
     except UnsupportedWorkspaceJobTypeError as e:
         logger.error(
             "workspace_job_unsupported_type",
             extra={"workspace_id": wid, "workspace_job_id": jid, "job_type": jt, "error": str(e)},
         )
-        _mark_job_failed(session, job, str(e))
+        msg = str(e)
+        _mark_job_failed(session, job, msg, failure_stage=FailureStage.UNKNOWN.value, failure_code=_ERROR_CODE_JOB)
         ws.status = WorkspaceStatus.ERROR.value
-        _workspace_set_error(ws, _ERROR_CODE_JOB, str(e))
+        _workspace_set_error(ws, _ERROR_CODE_JOB, msg)
         _touch_workspace(session, ws)
         _clear_runtime_capacity_reservation(session, wid)
 
@@ -877,7 +1119,13 @@ def _process_next_queued_job_return_id(
     with correlation_scope(job.correlation_id):
         ws = session.get(Workspace, wid)
         if ws is None:
-            _mark_job_failed(session, job, "Workspace row not found for job")
+            _mark_job_failed(
+                session,
+                job,
+                "Workspace row not found for job",
+                failure_stage=FailureStage.UNKNOWN.value,
+                failure_code="missing_workspace",
+            )
             return jid
         try:
             orchestrator = get_orchestrator(session, ws, job)
@@ -906,7 +1154,8 @@ def _process_next_queued_job_return_id(
                 },
             )
             pr = "no_schedulable_node" if isinstance(e, NoSchedulableNodeError) else "placement"
-            _fail_job_from_placement(session, ws, job, str(e), placement_reason=pr)
+            _fail_job_from_placement(session, ws, job, e, placement_reason=pr)
+            _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
             return jid
         except AppOrchestratorBindingError as e:
             logger.warning(
@@ -918,7 +1167,8 @@ def _process_next_queued_job_return_id(
                     "error": str(e),
                 },
             )
-            _fail_job_from_orchestrator_binding(session, ws, job, str(e))
+            _fail_job_from_orchestrator_binding(session, ws, job, e)
+            _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
             return jid
         _process_claimed_running_job(session, orchestrator, job)
     return jid
@@ -933,7 +1183,7 @@ def load_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:
     """
     stmt = (
         select(WorkspaceJob)
-        .where(WorkspaceJob.status == WorkspaceJobStatus.QUEUED.value)
+        .where(queued_job_eligible_where(WorkspaceJob, _now()))
         .order_by(WorkspaceJob.created_at.asc())
         .limit(1)
     )
@@ -1009,7 +1259,13 @@ def run_queued_workspace_job_by_id(
             wid = job.workspace_id
             ws = work.get(Workspace, wid)
             if ws is None:
-                _mark_job_failed(work, job, "Workspace row not found for job")
+                _mark_job_failed(
+                    work,
+                    job,
+                    "Workspace row not found for job",
+                    failure_stage=FailureStage.UNKNOWN.value,
+                    failure_code="missing_workspace",
+                )
                 work.commit()
                 return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
             try:
@@ -1039,7 +1295,8 @@ def run_queued_workspace_job_by_id(
                     },
                 )
                 pr = "no_schedulable_node" if isinstance(e, NoSchedulableNodeError) else "placement"
-                _fail_job_from_placement(work, ws, job, str(e), placement_reason=pr)
+                _fail_job_from_placement(work, ws, job, e, placement_reason=pr)
+                _emit_job_outcome_event(work, wid=wid, ws=ws, job=job)
                 work.commit()
                 return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
             except AppOrchestratorBindingError as e:
@@ -1052,7 +1309,8 @@ def run_queued_workspace_job_by_id(
                         "error": str(e),
                     },
                 )
-                _fail_job_from_orchestrator_binding(work, ws, job, str(e))
+                _fail_job_from_orchestrator_binding(work, ws, job, e)
+                _emit_job_outcome_event(work, wid=wid, ws=ws, job=job)
                 work.commit()
                 return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
             _process_claimed_running_job(work, orch, job)
