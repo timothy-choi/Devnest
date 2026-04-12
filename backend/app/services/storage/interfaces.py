@@ -17,3 +17,6 @@ class SnapshotStorageProvider(Protocol):
 
     def delete_archive(self, *, workspace_id: int, snapshot_id: int) -> None:
         """Remove the archive if present; no-op when missing."""
+
+    def has_nonempty_archive(self, *, workspace_id: int, snapshot_id: int) -> bool:
+        """True when a readable archive exists with size > 0 (restore preflight)."""

@@ -137,3 +137,37 @@ def test_create_snapshot_conflict_when_pending_job(snap_session: Session, monkey
                 owner_user_id=owner,
                 name="b",
             )
+
+
+def test_restore_snapshot_rejects_missing_archive(snap_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setenv("DEVNEST_SNAPSHOT_STORAGE_ROOT", tmp)
+        from app.libs.common.config import get_settings
+
+        get_settings.cache_clear()
+
+        owner = _seed_user(snap_session)
+        wid = _seed_workspace(snap_session, owner, status=WorkspaceStatus.STOPPED.value)
+        snap = WorkspaceSnapshot(
+            workspace_id=wid,
+            name="orphan-meta",
+            storage_uri="pending",
+            status=WorkspaceSnapshotStatus.AVAILABLE.value,
+            created_by_user_id=owner,
+        )
+        snap_session.add(snap)
+        snap_session.flush()
+        assert snap.workspace_snapshot_id is not None
+        from app.services.storage.factory import get_snapshot_storage_provider
+
+        storage = get_snapshot_storage_provider()
+        snap.storage_uri = storage.storage_uri(workspace_id=wid, snapshot_id=snap.workspace_snapshot_id)
+        snap_session.add(snap)
+        snap_session.commit()
+
+        with pytest.raises(WorkspaceInvalidStateError, match="missing or empty"):
+            snapshot_service.restore_snapshot(
+                snap_session,
+                snapshot_id=snap.workspace_snapshot_id,
+                owner_user_id=owner,
+            )

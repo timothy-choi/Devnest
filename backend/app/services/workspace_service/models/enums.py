@@ -39,7 +39,14 @@ class WorkspaceJobType(str, Enum):
 
 
 class WorkspaceSnapshotStatus(str, Enum):
-    """Persisted snapshot lifecycle (metadata row; archive materialized asynchronously)."""
+    """Persisted snapshot lifecycle (metadata row; archive materialized asynchronously).
+
+    - **CREATING:** row inserted; ``SNAPSHOT_CREATE`` job not yet succeeded.
+    - **AVAILABLE:** archive is ready; restore allowed (subject to workspace STOPPED + storage checks).
+    - **FAILED:** create job failed; row kept for visibility; delete to reclaim; no restore.
+    - **RESTORING:** restore job accepted; cleared back to **AVAILABLE** when the job finishes
+      (success or failure) so operators can retry.
+    """
 
     CREATING = "CREATING"
     AVAILABLE = "AVAILABLE"

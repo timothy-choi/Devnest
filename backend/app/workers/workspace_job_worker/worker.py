@@ -28,7 +28,6 @@ hook (``devnest_autoscaler_*`` settings) may start one provision before the job 
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable
 from datetime import datetime, timezone
 
@@ -803,7 +802,11 @@ def _execute_snapshot_create_job(
     ws: Workspace,
     job: WorkspaceJob,
 ) -> None:
-    """Materialize snapshot archive via orchestrator export; snapshot row is pre-created by API."""
+    """Materialize snapshot archive via orchestrator export; snapshot row is pre-created by API.
+
+    On export failure, best-effort removal of a partial archive avoids orphaned blobs under the
+    storage root.
+    """
     wid = ws.workspace_id
     assert wid is not None
     wid_str = str(wid)
@@ -874,6 +877,14 @@ def _execute_snapshot_create_job(
     msg = "; ".join(res.issues or ["snapshot:create:failed"])
     snap.status = WorkspaceSnapshotStatus.FAILED.value
     session.add(snap)
+    try:
+        storage.delete_archive(workspace_id=wid, snapshot_id=sid)
+    except Exception:
+        logger.warning(
+            "snapshot_create_cleanup_archive_failed",
+            extra={"workspace_id": wid, "workspace_snapshot_id": sid},
+            exc_info=True,
+        )
     _mark_job_failed(
         session,
         job,
@@ -906,7 +917,11 @@ def _execute_snapshot_restore_job(
     ws: Workspace,
     job: WorkspaceJob,
 ) -> None:
-    """Extract snapshot archive into workspace project dir (workspace must be STOPPED)."""
+    """Extract snapshot archive into workspace project dir (workspace must be STOPPED).
+
+    TODO: For stronger safety, extract to a temp directory then atomic rename/swap (avoids torn
+    trees if import fails mid-way); V1 uses in-place extract after path validation in orchestrator.
+    """
     wid = ws.workspace_id
     assert wid is not None
     wid_str = str(wid)
@@ -936,8 +951,8 @@ def _execute_snapshot_restore_job(
 
     storage = get_snapshot_storage_provider()
     archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
-    if not os.path.isfile(archive_path):
-        msg = f"snapshot:restore:archive_missing:{archive_path}"
+    if not storage.has_nonempty_archive(workspace_id=wid, snapshot_id=sid):
+        msg = f"snapshot:restore:archive_missing_or_empty:{archive_path}"
         snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
         session.add(snap)
         _mark_job_failed(

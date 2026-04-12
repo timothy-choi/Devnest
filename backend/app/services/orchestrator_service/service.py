@@ -983,6 +983,11 @@ class DefaultOrchestratorService(OrchestratorService):
                         continue
                     tf.add(path, arcname=arcname, recursive=False)
         except OSError as e:
+            try:
+                if dest.is_file():
+                    dest.unlink()
+            except OSError:
+                pass
             return WorkspaceSnapshotOperationResult(
                 workspace_id=wid,
                 success=False,

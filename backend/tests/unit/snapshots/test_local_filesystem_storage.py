@@ -26,3 +26,13 @@ def test_delete_archive_removes_file() -> None:
         p.write_text("x", encoding="utf-8")
         s.delete_archive(workspace_id=1, snapshot_id=1)
         assert not p.is_file()
+
+
+def test_has_nonempty_archive() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        s = LocalFilesystemSnapshotStorage(tmp)
+        assert s.has_nonempty_archive(workspace_id=1, snapshot_id=1) is False
+        Path(s.archive_path(workspace_id=1, snapshot_id=1)).write_bytes(b"x")
+        assert s.has_nonempty_archive(workspace_id=1, snapshot_id=1) is True
+        Path(s.archive_path(workspace_id=1, snapshot_id=1)).write_bytes(b"")
+        assert s.has_nonempty_archive(workspace_id=1, snapshot_id=1) is False

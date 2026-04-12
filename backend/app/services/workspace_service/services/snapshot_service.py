@@ -270,9 +270,19 @@ def restore_snapshot(
     owner_user_id: int,
     correlation_id: str | None = None,
 ) -> RestoreSnapshotResult:
+    """Queue ``SNAPSHOT_RESTORE`` (workspace must be STOPPED).
+
+    Restores **bind-mounted project files** via the orchestrator import path only. Control-plane
+    config rows and runtime records are unchanged; a follow-up start/update/reconcile may be needed.
+
+    Preflight: archive must exist on the configured storage provider with non-zero size so we do
+    not enqueue a job that would always fail (multi-node: execution host must reach the same blob).
+    """
     snap = _get_snapshot_for_owner(session, snapshot_id=snapshot_id, owner_user_id=owner_user_id)
     wid = snap.workspace_id
     assert wid is not None
+    sid = snap.workspace_snapshot_id
+    assert sid is not None
     ws = session.get(Workspace, wid)
     assert ws is not None
 
@@ -282,6 +292,20 @@ def restore_snapshot(
         raise WorkspaceInvalidStateError("Workspace must be STOPPED before restore")
     if _pending_snapshot_jobs(session, wid):
         raise SnapshotConflictError("A snapshot or restore job is already in progress for this workspace")
+
+    storage = get_snapshot_storage_provider()
+    if not storage.has_nonempty_archive(workspace_id=wid, snapshot_id=sid):
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_SNAPSHOT_FAILED,
+            workspace_id=wid,
+            workspace_snapshot_id=sid,
+            phase="restore_preflight",
+            detail="archive_missing_or_empty",
+        )
+        raise WorkspaceInvalidStateError(
+            "Snapshot archive is missing or empty on storage; cannot restore (check storage root / drift)",
+        )
 
     cfg_v = _latest_config_version(session, wid)
     cid = (correlation_id or generate_correlation_id()).strip() or generate_correlation_id()

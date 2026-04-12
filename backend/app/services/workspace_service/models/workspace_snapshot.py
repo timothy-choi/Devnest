@@ -13,6 +13,13 @@ from .enums import WorkspaceSnapshotStatus
 
 
 class WorkspaceSnapshot(SQLModel, table=True):
+    """Versioned filesystem backup metadata for a workspace.
+
+    ``storage_uri`` is set to a deterministic provider URI after flush (replaces placeholder
+    ``pending``). V1 restores **project files only**; ``WorkspaceConfig`` / ``WorkspaceRuntime`` are
+    not rewound—operators may enqueue update/reconcile after restore.
+    """
+
     __tablename__ = "workspace_snapshot"
 
     workspace_snapshot_id: int | None = Field(default=None, primary_key=True)
