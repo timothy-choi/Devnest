@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlmodel import Session
 
 from app.libs.db.database import get_db
@@ -33,11 +33,17 @@ router = APIRouter(
     ),
 )
 def post_enqueue_reconcile_runtime(
+    request: Request,
     workspace_id: int,
     session: Session = Depends(get_db),
 ) -> WorkspaceIntentAcceptedResponse:
     try:
-        out = workspace_intent_service.enqueue_reconcile_runtime_job(session, workspace_id=workspace_id)
+        cid = getattr(request.state, "correlation_id", None)
+        out = workspace_intent_service.enqueue_reconcile_runtime_job(
+            session,
+            workspace_id=workspace_id,
+            correlation_id=cid,
+        )
     except WorkspaceNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
     except WorkspaceBusyError as e:

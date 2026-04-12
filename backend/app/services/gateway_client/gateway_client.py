@@ -8,6 +8,9 @@ from typing import Any
 import httpx
 
 from app.libs.common.config import Settings
+from app.libs.observability.correlation import get_correlation_id
+from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.observability.metrics import record_gateway_operation
 
 from .errors import GatewayClientHTTPError, GatewayClientTransportError
 from .schemas import GatewayRouteRegisterPayload
@@ -50,6 +53,10 @@ class DevnestGatewayClient:
             kw["transport"] = self._transport
         return kw
 
+    def _correlation_headers(self) -> dict[str, str]:
+        cid = get_correlation_id()
+        return {"X-Correlation-ID": cid} if cid else {}
+
     def register_route(
         self,
         workspace_id: str,
@@ -69,9 +76,10 @@ class DevnestGatewayClient:
         c = httpx.Client(**self._client_kwargs())
         try:
             try:
-                r = c.post("/routes", json=payload)
+                r = c.post("/routes", json=payload, headers=self._correlation_headers())
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:
+                record_gateway_operation(operation="register", success=False)
                 logger.warning(
                     "gateway_register_http_error",
                     extra={
@@ -84,14 +92,18 @@ class DevnestGatewayClient:
                     f"route-admin POST /routes failed: {e.response.status_code}",
                 ) from e
             except httpx.RequestError as e:
+                record_gateway_operation(operation="register", success=False)
                 logger.warning(
                     "gateway_register_transport_error",
                     extra={"workspace_id": wid, "error": str(e)},
                 )
                 raise GatewayClientTransportError(f"route-admin unreachable: {e}") from e
-            logger.info(
-                "gateway_route_registered",
-                extra={"workspace_id": wid, "public_host": host},
+            record_gateway_operation(operation="register", success=True)
+            log_event(
+                logger,
+                LogEvent.GATEWAY_ROUTE_REGISTERED,
+                workspace_id=wid,
+                public_host=host,
             )
         finally:
             c.close()
@@ -103,9 +115,10 @@ class DevnestGatewayClient:
         c = httpx.Client(**self._client_kwargs())
         try:
             try:
-                r = c.delete(f"/routes/{wid}")
+                r = c.delete(f"/routes/{wid}", headers=self._correlation_headers())
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:
+                record_gateway_operation(operation="deregister", success=False)
                 logger.warning(
                     "gateway_deregister_http_error",
                     extra={
@@ -118,12 +131,14 @@ class DevnestGatewayClient:
                     f"route-admin DELETE /routes/{wid} failed: {e.response.status_code}",
                 ) from e
             except httpx.RequestError as e:
+                record_gateway_operation(operation="deregister", success=False)
                 logger.warning(
                     "gateway_deregister_transport_error",
                     extra={"workspace_id": wid, "error": str(e)},
                 )
                 raise GatewayClientTransportError(f"route-admin unreachable: {e}") from e
-            logger.info("gateway_route_deregistered", extra={"workspace_id": wid})
+            record_gateway_operation(operation="deregister", success=True)
+            log_event(logger, LogEvent.GATEWAY_ROUTE_DEREGISTERED, workspace_id=wid)
         finally:
             c.close()
 

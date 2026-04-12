@@ -37,3 +37,9 @@ class WorkspaceJob(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    correlation_id: str | None = Field(
+        default=None,
+        max_length=64,
+        index=True,
+        description="Request/job correlation id for logs and gateway propagation (V1 observability).",
+    )

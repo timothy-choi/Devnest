@@ -15,6 +15,8 @@ from sqlalchemy import and_, func
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.observability.metrics import record_autoscaler_scale_down, record_autoscaler_scale_up
 from app.services.infrastructure_service.errors import Ec2ProvisionConfigurationError
 from app.services.infrastructure_service.lifecycle import (
     mark_node_draining,
@@ -180,6 +182,14 @@ def provision_capacity_if_needed(session: Session, evaluation: ScaleUpEvaluation
         return None
     node = provision_ec2_node(session, request=None, wait_until_running=True)
     session.flush()
+    record_autoscaler_scale_up()
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_SCALE_UP_TRIGGERED,
+        node_key=node.node_key,
+        instance_id=(node.provider_instance_id or "").strip() or None,
+        provisioning_in_flight_before=evaluation.provisioning_in_flight,
+    )
     logger.info(
         "autoscaler_provisioned_ec2_node",
         extra={
@@ -302,4 +312,12 @@ def reclaim_one_idle_ec2_node(
     if node is None:
         return None
     mark_node_draining(session, node_key=node.node_key)
-    return terminate_ec2_node(session, node_key=node.node_key, ec2_client=ec2_client)
+    out = terminate_ec2_node(session, node_key=node.node_key, ec2_client=ec2_client)
+    record_autoscaler_scale_down()
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_SCALE_DOWN_TRIGGERED,
+        node_key=node.node_key,
+        instance_id=(node.provider_instance_id or "").strip() or None,
+    )
+    return out

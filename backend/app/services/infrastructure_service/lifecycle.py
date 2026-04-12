@@ -28,6 +28,7 @@ from botocore.exceptions import ClientError, WaiterError
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.libs.observability.log_events import LogEvent, log_event
 from app.services.node_execution_service.ssm_send_command import build_ssm_client
 from app.services.placement_service import get_node
 from app.services.placement_service.models import (
@@ -223,9 +224,16 @@ def provision_ec2_node(
     session.add(row)
     session.flush()
 
+    log_event(
+        logger,
+        LogEvent.EC2_NODE_PROVISIONED,
+        node_key=node_key,
+        instance_id=iid,
+        provision_correlation_id=corr,
+    )
     logger.info(
         "ec2_node_provisioned",
-        extra={"node_key": node_key, "instance_id": iid, "correlation_id": corr},
+        extra={"node_key": node_key, "instance_id": iid, "provision_correlation_id": corr},
     )
     return row
 
@@ -446,6 +454,14 @@ def terminate_ec2_node(
     )
     session.add(row)
     session.flush()
+    log_event(
+        logger,
+        LogEvent.EC2_NODE_TERMINATED,
+        node_key=row.node_key,
+        instance_id=iid,
+        execution_node_status=row.status,
+        ec2_state=state,
+    )
     logger.info(
         "ec2_terminate_reconciled",
         extra={

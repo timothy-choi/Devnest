@@ -74,6 +74,9 @@ from app.services.workspace_service.services.workspace_event_service import (
 )
 
 from app.libs.common.config import get_settings
+from app.libs.observability.correlation import correlation_scope
+from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.observability import metrics as devnest_metrics
 
 from .errors import UnsupportedWorkspaceJobTypeError
 from .results import WorkspaceJobWorkerTickResult
@@ -92,7 +95,15 @@ _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
 
 
-def _fail_job_from_placement(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
+def _fail_job_from_placement(
+    session: Session,
+    ws: Workspace,
+    job: WorkspaceJob,
+    message: str,
+    *,
+    placement_reason: str = "placement",
+) -> None:
+    devnest_metrics.record_placement_failure(reason=placement_reason)
     _mark_job_failed(session, job, message)
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_PLACEMENT, message)
@@ -101,6 +112,7 @@ def _fail_job_from_placement(session: Session, ws: Workspace, job: WorkspaceJob,
 
 def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
     """Node execution / Docker / SSH binding failed before orchestrator could run the job."""
+    devnest_metrics.record_placement_failure(reason="orchestrator_binding")
     _mark_job_failed(session, job, message)
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_ORCHESTRATOR_BINDING, message)
@@ -319,6 +331,12 @@ def _mark_job_succeeded(session: Session, job: WorkspaceJob) -> None:
     job.finished_at = _now()
     job.error_msg = None
     session.add(job)
+    devnest_metrics.record_job_terminal(
+        job_type=job.job_type or "unknown",
+        status=WorkspaceJobStatus.SUCCEEDED.value,
+    )
+    if job.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value:
+        devnest_metrics.record_reconcile_terminal(succeeded=True)
 
 
 def _mark_job_failed(session: Session, job: WorkspaceJob, message: str | None) -> None:
@@ -326,6 +344,12 @@ def _mark_job_failed(session: Session, job: WorkspaceJob, message: str | None) -
     job.finished_at = _now()
     job.error_msg = _truncate(message, 8192)
     session.add(job)
+    devnest_metrics.record_job_terminal(
+        job_type=job.job_type or "unknown",
+        status=WorkspaceJobStatus.FAILED.value,
+    )
+    if job.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value:
+        devnest_metrics.record_reconcile_terminal(succeeded=False)
 
 
 def _workspace_clear_errors(ws: Workspace) -> None:
@@ -658,6 +682,14 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
         "workspace_status": ws.status,
     }
     if job.status == WorkspaceJobStatus.SUCCEEDED.value:
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_JOB_SUCCEEDED,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=jid,
+            job_type=job.job_type,
+        )
         record_workspace_event(
             session,
             workspace_id=wid,
@@ -667,6 +699,15 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
             payload=base_payload,
         )
     elif job.status == WorkspaceJobStatus.FAILED.value:
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_JOB_FAILED,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=jid,
+            job_type=job.job_type,
+            error_msg=(job.error_msg or "")[:500] if job.error_msg else None,
+        )
         record_workspace_event(
             session,
             workspace_id=wid,
@@ -700,14 +741,14 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
         _mark_job_failed(session, job, "Workspace row not found for job")
         return
 
-    logger.info(
-        "workspace_job_started",
-        extra={
-            "workspace_id": wid,
-            "workspace_job_id": jid,
-            "job_type": jt,
-            "attempt": int(job.attempt or 0),
-        },
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_JOB_STARTED,
+        correlation_id=job.correlation_id,
+        workspace_id=wid,
+        workspace_job_id=jid,
+        job_type=jt,
+        attempt=int(job.attempt or 0),
     )
     record_workspace_event(
         session,
@@ -748,16 +789,6 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
         _workspace_set_error(ws, _ERROR_CODE_JOB, str(e))
         _touch_workspace(session, ws)
 
-    logger.info(
-        "workspace_job_finished",
-        extra={
-            "workspace_id": wid,
-            "workspace_job_id": jid,
-            "job_type": jt,
-            "job_status": job.status,
-            "workspace_status": ws.status,
-        },
-    )
     _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
 
 
@@ -772,42 +803,53 @@ def _process_next_queued_job_return_id(
     jid = job.workspace_job_id
     assert jid is not None
     wid = job.workspace_id
-    ws = session.get(Workspace, wid)
-    if ws is None:
-        _mark_job_failed(session, job, "Workspace row not found for job")
-        return jid
-    try:
-        orchestrator = get_orchestrator(session, ws, job)
-    except PlacementError as e:
-        if isinstance(e, NoSchedulableNodeError):
-            try:
-                maybe_provision_on_no_schedulable_capacity(session)
-            except Exception:
-                logger.exception("autoscaler_provision_on_no_capacity_unexpected_error")
-        logger.warning(
-            "workspace_job_placement_failed",
-            extra={
-                "workspace_id": wid,
-                "workspace_job_id": jid,
-                "job_type": job.job_type,
-                "error": str(e),
-            },
-        )
-        _fail_job_from_placement(session, ws, job, str(e))
-        return jid
-    except AppOrchestratorBindingError as e:
-        logger.warning(
-            "workspace_job_orchestrator_binding_failed",
-            extra={
-                "workspace_id": wid,
-                "workspace_job_id": jid,
-                "job_type": job.job_type,
-                "error": str(e),
-            },
-        )
-        _fail_job_from_orchestrator_binding(session, ws, job, str(e))
-        return jid
-    _process_claimed_running_job(session, orchestrator, job)
+    with correlation_scope(job.correlation_id):
+        ws = session.get(Workspace, wid)
+        if ws is None:
+            _mark_job_failed(session, job, "Workspace row not found for job")
+            return jid
+        try:
+            orchestrator = get_orchestrator(session, ws, job)
+        except PlacementError as e:
+            if isinstance(e, NoSchedulableNodeError):
+                log_event(
+                    logger,
+                    LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
+                    correlation_id=job.correlation_id,
+                    workspace_id=wid,
+                    workspace_job_id=jid,
+                    job_type=job.job_type,
+                    detail=str(e)[:500],
+                )
+                try:
+                    maybe_provision_on_no_schedulable_capacity(session)
+                except Exception:
+                    logger.exception("autoscaler_provision_on_no_capacity_unexpected_error")
+            logger.warning(
+                "workspace_job_placement_failed",
+                extra={
+                    "workspace_id": wid,
+                    "workspace_job_id": jid,
+                    "job_type": job.job_type,
+                    "error": str(e),
+                },
+            )
+            pr = "no_schedulable_node" if isinstance(e, NoSchedulableNodeError) else "placement"
+            _fail_job_from_placement(session, ws, job, str(e), placement_reason=pr)
+            return jid
+        except AppOrchestratorBindingError as e:
+            logger.warning(
+                "workspace_job_orchestrator_binding_failed",
+                extra={
+                    "workspace_id": wid,
+                    "workspace_job_id": jid,
+                    "job_type": job.job_type,
+                    "error": str(e),
+                },
+            )
+            _fail_job_from_orchestrator_binding(session, ws, job, str(e))
+            return jid
+        _process_claimed_running_job(session, orchestrator, job)
     return jid
 
 
@@ -890,52 +932,61 @@ def run_queued_workspace_job_by_id(
         if job is None:
             work.rollback()
             return WorkspaceJobWorkerTickResult(processed_count=0, last_job_id=None)
-        wid = job.workspace_id
-        ws = work.get(Workspace, wid)
-        if ws is None:
-            _mark_job_failed(work, job, "Workspace row not found for job")
-            jid = job.workspace_job_id
-            assert jid is not None
-            work.commit()
-            return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
         jid = job.workspace_job_id
         assert jid is not None
-        try:
-            orch = get_orchestrator(work, ws, job)
-        except PlacementError as e:
-            if isinstance(e, NoSchedulableNodeError):
-                try:
-                    maybe_provision_on_no_schedulable_capacity(work)
-                except Exception:
-                    logger.exception("autoscaler_provision_on_no_capacity_unexpected_error")
-            logger.warning(
-                "workspace_job_placement_failed",
-                extra={
-                    "workspace_id": wid,
-                    "workspace_job_id": jid,
-                    "job_type": job.job_type,
-                    "error": str(e),
-                },
-            )
-            _fail_job_from_placement(work, ws, job, str(e))
+        with correlation_scope(job.correlation_id):
+            wid = job.workspace_id
+            ws = work.get(Workspace, wid)
+            if ws is None:
+                _mark_job_failed(work, job, "Workspace row not found for job")
+                work.commit()
+                return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
+            try:
+                orch = get_orchestrator(work, ws, job)
+            except PlacementError as e:
+                if isinstance(e, NoSchedulableNodeError):
+                    log_event(
+                        logger,
+                        LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
+                        correlation_id=job.correlation_id,
+                        workspace_id=wid,
+                        workspace_job_id=jid,
+                        job_type=job.job_type,
+                        detail=str(e)[:500],
+                    )
+                    try:
+                        maybe_provision_on_no_schedulable_capacity(work)
+                    except Exception:
+                        logger.exception("autoscaler_provision_on_no_capacity_unexpected_error")
+                logger.warning(
+                    "workspace_job_placement_failed",
+                    extra={
+                        "workspace_id": wid,
+                        "workspace_job_id": jid,
+                        "job_type": job.job_type,
+                        "error": str(e),
+                    },
+                )
+                pr = "no_schedulable_node" if isinstance(e, NoSchedulableNodeError) else "placement"
+                _fail_job_from_placement(work, ws, job, str(e), placement_reason=pr)
+                work.commit()
+                return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
+            except AppOrchestratorBindingError as e:
+                logger.warning(
+                    "workspace_job_orchestrator_binding_failed",
+                    extra={
+                        "workspace_id": wid,
+                        "workspace_job_id": jid,
+                        "job_type": job.job_type,
+                        "error": str(e),
+                    },
+                )
+                _fail_job_from_orchestrator_binding(work, ws, job, str(e))
+                work.commit()
+                return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
+            _process_claimed_running_job(work, orch, job)
             work.commit()
             return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
-        except AppOrchestratorBindingError as e:
-            logger.warning(
-                "workspace_job_orchestrator_binding_failed",
-                extra={
-                    "workspace_id": wid,
-                    "workspace_job_id": jid,
-                    "job_type": job.job_type,
-                    "error": str(e),
-                },
-            )
-            _fail_job_from_orchestrator_binding(work, ws, job, str(e))
-            work.commit()
-            return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
-        _process_claimed_running_job(work, orch, job)
-        work.commit()
-        return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
     except Exception:
         work.rollback()
         raise

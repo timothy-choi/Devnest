@@ -17,6 +17,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.probes.interfaces import ProbeRunner
 from app.libs.runtime.errors import RuntimeAdapterError
 from app.libs.runtime.interfaces import RuntimeAdapter
@@ -322,30 +323,48 @@ class DefaultOrchestratorService(OrchestratorService):
         Returns a :class:`WorkspaceBringUpResult` for the worker to persist on ``WorkspaceRuntime``.
         """
         ctx = self._bring_up_build_context(workspace_id, requested_config_version)
-        logger.info(
-            "orchestrator_bring_up_start",
-            extra={
-                "workspace_id": ctx.wid,
-                "requested_config_version": requested_config_version,
-                "topology_id": self._topology_id,
-                "node_id": self._node_id,
-            },
+        log_event(
+            logger,
+            LogEvent.ORCHESTRATOR_BRINGUP_STARTED,
+            workspace_id=ctx.wid,
+            requested_config_version=requested_config_version,
+            topology_id=self._topology_id,
+            node_id=self._node_id,
         )
-        running = self._bring_up_start_container(ctx)
-        logger.debug(
-            "orchestrator_bring_up_runtime_running",
-            extra={"workspace_id": ctx.wid, "container_id": running.container_id},
-        )
-        netns, attach_res = self._bring_up_attach_topology(ctx, running)
-        result = self._bring_up_run_probe(ctx, running, netns, attach_res)
-        logger.info(
-            "orchestrator_bring_up_complete",
-            extra={
-                "workspace_id": ctx.wid,
-                "success": result.success,
-                "probe_healthy": result.probe_healthy,
-            },
-        )
+        try:
+            running = self._bring_up_start_container(ctx)
+            logger.debug(
+                "orchestrator_bring_up_runtime_running",
+                extra={"workspace_id": ctx.wid, "container_id": running.container_id},
+            )
+            netns, attach_res = self._bring_up_attach_topology(ctx, running)
+            result = self._bring_up_run_probe(ctx, running, netns, attach_res)
+        except Exception as e:
+            log_event(
+                logger,
+                LogEvent.ORCHESTRATOR_BRINGUP_FAILED,
+                level=logging.WARNING,
+                workspace_id=ctx.wid,
+                error=str(e)[:500],
+            )
+            raise
+        if result.success:
+            log_event(
+                logger,
+                LogEvent.ORCHESTRATOR_BRINGUP_SUCCEEDED,
+                workspace_id=ctx.wid,
+                probe_healthy=result.probe_healthy,
+                container_id=result.container_id,
+            )
+        else:
+            log_event(
+                logger,
+                LogEvent.ORCHESTRATOR_BRINGUP_FAILED,
+                level=logging.WARNING,
+                workspace_id=ctx.wid,
+                probe_healthy=result.probe_healthy,
+                issues=(result.issues or [])[:5],
+            )
         return result
 
     def _stop_load_inspection(
