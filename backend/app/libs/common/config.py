@@ -127,6 +127,41 @@ class Settings(BaseSettings):
     # Prefix for ``{prefix}:managed`` and ``{prefix}:node_key`` tags on provisioned instances.
     devnest_ec2_tag_prefix: str = "devnest"
 
+    # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
+    devnest_autoscaler_enabled: bool = False
+    # When set with ``devnest_autoscaler_enabled``, worker triggers one EC2 provision on NoSchedulableNodeError.
+    devnest_autoscaler_provision_on_no_capacity: bool = False
+    devnest_autoscaler_max_concurrent_provisioning: int = 3
+    # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist (last-node safety).
+    devnest_autoscaler_min_ec2_nodes_before_reclaim: int = 2
+
+    @field_validator("devnest_autoscaler_enabled", "devnest_autoscaler_provision_on_no_capacity", mode="before")
+    @classmethod
+    def _parse_autoscaler_flags(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @field_validator("devnest_autoscaler_max_concurrent_provisioning", mode="before")
+    @classmethod
+    def _autoscaler_max_prov(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 3
+        return max(1, min(n, 50))
+
+    @field_validator("devnest_autoscaler_min_ec2_nodes_before_reclaim", mode="before")
+    @classmethod
+    def _autoscaler_min_ec2(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 2
+        return max(1, min(n, 100))
+
 
 @lru_cache
 def get_settings() -> Settings:

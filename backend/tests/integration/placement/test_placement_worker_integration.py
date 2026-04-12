@@ -79,7 +79,7 @@ def test_create_job_fails_when_placement_raises(db_session: Session) -> None:
     _wid, jid = _seed_create_job(db_session, owner)
 
     with patch(
-        "app.services.placement_service.orchestrator_binding.reserve_node_for_workspace",
+        "app.services.scheduler_service.service.reserve_node_for_workspace",
         side_effect=NoSchedulableNodeError("integration: no node"),
     ):
         run_pending_jobs(
