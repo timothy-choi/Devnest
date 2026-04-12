@@ -522,6 +522,78 @@ def request_update_workspace(
     )
 
 
+def enqueue_reconcile_runtime_job(
+    session: Session,
+    *,
+    workspace_id: int,
+) -> WorkspaceIntentResult:
+    """
+    Queue a RECONCILE_RUNTIME job without changing ``Workspace.status``.
+
+    Internal / operator use: compare desired (persisted status) to actual (orchestrator + gateway).
+    """
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise WorkspaceNotFoundError("Workspace not found")
+    _require_not_busy(ws)
+    if ws.status not in (
+        WorkspaceStatus.RUNNING.value,
+        WorkspaceStatus.STOPPED.value,
+        WorkspaceStatus.ERROR.value,
+        WorkspaceStatus.DELETED.value,
+    ):
+        raise WorkspaceInvalidStateError(
+            f"Reconcile is only allowed when running, stopped, error, or deleted (current={ws.status})",
+        )
+    cfg_v = _intent_config_version(session, workspace_id)
+    assert ws.workspace_id is not None
+    owner_id = int(ws.owner_user_id)
+
+    job = WorkspaceJob(
+        workspace_id=ws.workspace_id,
+        job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
+        status=WorkspaceJobStatus.QUEUED.value,
+        requested_by_user_id=owner_id,
+        requested_config_version=cfg_v,
+        attempt=0,
+    )
+    session.add(job)
+    session.flush()
+
+    record_workspace_event(
+        session,
+        workspace_id=ws.workspace_id,
+        event_type=WorkspaceStreamEventType.INTENT_QUEUED,
+        status=ws.status,
+        message="Reconcile job queued",
+        payload={
+            "job_id": job.workspace_job_id,
+            "job_type": WorkspaceJobType.RECONCILE_RUNTIME.value,
+            "requested_config_version": cfg_v,
+        },
+    )
+
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+    session.refresh(ws)
+    session.refresh(job)
+    assert job.workspace_job_id is not None
+
+    return WorkspaceIntentResult(
+        workspace_id=ws.workspace_id,
+        accepted=True,
+        status=ws.status,
+        job_id=job.workspace_job_id,
+        job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
+        requested_config_version=cfg_v,
+        issues=(),
+    )
+
+
 def create_workspace(
     session: Session,
     *,

@@ -19,6 +19,12 @@ class WorkspaceStreamEventType:
     JOB_RUNNING = "controlplane.job_running"
     JOB_SUCCEEDED = "controlplane.job_succeeded"
     JOB_FAILED = "controlplane.job_failed"
+    RECONCILE_STARTED = "controlplane.reconcile_started"
+    RECONCILE_FIXED_ROUTE = "controlplane.reconcile_fixed_route"
+    RECONCILE_FIXED_RUNTIME = "controlplane.reconcile_fixed_runtime"
+    RECONCILE_CLEANED_ORPHAN = "controlplane.reconcile_cleaned_orphan"
+    RECONCILE_NOOP = "controlplane.reconcile_noop"
+    RECONCILE_FAILED = "controlplane.reconcile_failed"
 
 
 SSE_POLL_INTERVAL_SEC = 1.0

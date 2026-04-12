@@ -122,6 +122,31 @@ class TestStopHappyPath:
         )
         mock_runtime.stop_container.assert_called_once_with(container_id=CONTAINER_ID)
 
+    def test_idempotent_detach_false_stop_ok_still_succeeds(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        """Mirrors topology idempotent no-op: ``detached=False`` without ``topology:detach_failed``."""
+        _inspect_running(mock_runtime)
+        mock_topology.detach_workspace.return_value = DetachWorkspaceResult(
+            detached=False,
+            status=TopologyAttachmentStatus.DETACHED,
+            workspace_id=int(WORKSPACE_ID),
+            workspace_ip=None,
+            released_ip=False,
+        )
+        _stop_ok(mock_runtime)
+
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        out = svc.stop_workspace_runtime(workspace_id=WORKSPACE_ID)
+
+        assert out.success is True
+        assert out.topology_detached is False
+        assert out.issues is None or out.issues == []
+
     def test_call_order_detach_before_stop(
         self,
         mock_runtime: MagicMock,

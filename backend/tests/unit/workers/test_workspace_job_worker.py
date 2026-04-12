@@ -685,6 +685,43 @@ class TestDispatchUpdate:
             assert rt.health_status == WorkspaceRuntimeHealthStatus.UNKNOWN.value
 
 
+class TestReconcileRuntimeJob:
+    def test_reconcile_runtime_running_calls_health_check(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.RUNNING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid)
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        orch.check_workspace_runtime_health.return_value = _bringup_ok(str(wid))
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=lambda _s: orch, limit=1)
+            session.commit()
+
+        orch.check_workspace_runtime_health.assert_called_once_with(workspace_id=str(wid))
+        orch.bring_up_workspace_runtime.assert_not_called()
+        with Session(workspace_job_worker_engine) as session:
+            job2 = session.get(WorkspaceJob, job_id)
+            ws2 = session.get(Workspace, wid)
+            assert job2 is not None and job2.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws2 is not None and ws2.status == WorkspaceStatus.RUNNING.value
+
+
 class TestUnsupportedJobType:
     def test_unknown_job_type_marks_job_failed_and_workspace_error(
         self,
