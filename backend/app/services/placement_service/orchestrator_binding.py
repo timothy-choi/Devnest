@@ -82,6 +82,7 @@ def resolve_orchestrator_placement(
         WorkspaceJobType.UPDATE.value,
     )
     if needs_new_placement:
+        # TODO: drive requested_cpu / requested_memory_mb from versioned WorkspaceConfig when exposed.
         sch = schedule_workspace(session, workspace_id=wid)
         if sch.invalid_request:
             raise InvalidPlacementParametersError(sch.message)

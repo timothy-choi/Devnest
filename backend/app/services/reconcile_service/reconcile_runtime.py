@@ -17,6 +17,10 @@ from app.services.orchestrator_service.errors import (
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
 from app.services.reconcile_service.decisions import gateway_route_needs_repair, route_row_for_workspace
+from app.services.placement_service.constants import (
+    DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+)
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceStatus
 from app.services.workspace_service.services.workspace_event_service import (
@@ -124,6 +128,35 @@ def _best_effort_remove_orphan_gateway_route(
     return True
 
 
+def _repair_runtime_capacity_ledger(session: Session, ws: Workspace) -> None:
+    """
+    Best-effort alignment of ``WorkspaceRuntime.reserved_*`` with workspace status (drift control).
+
+    - ``STOPPED``: reservations should be zero (capacity released for placement).
+    - ``RUNNING`` with ``node_id`` but missing ledger: backfill defaults (legacy rows).
+    """
+    wid = ws.workspace_id
+    assert wid is not None
+    rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    if rt is None:
+        return
+    changed = False
+    if ws.status == WorkspaceStatus.STOPPED.value:
+        if float(rt.reserved_cpu or 0) > 0 or int(rt.reserved_memory_mb or 0) > 0:
+            rt.reserved_cpu = 0.0
+            rt.reserved_memory_mb = 0
+            changed = True
+    elif ws.status == WorkspaceStatus.RUNNING.value:
+        nk = (rt.node_id or "").strip()
+        if nk and float(rt.reserved_cpu or 0) <= 0 and int(rt.reserved_memory_mb or 0) <= 0:
+            rt.reserved_cpu = float(DEFAULT_WORKSPACE_REQUEST_CPU)
+            rt.reserved_memory_mb = int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
+            changed = True
+    if changed:
+        rt.updated_at = wmod._now()
+        session.add(rt)
+
+
 def _runtime_snapshot(session: Session, workspace_id: int) -> tuple[str | None, str | None, str | None]:
     row = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id)).first()
     if row is None:
@@ -163,6 +196,8 @@ def execute_reconcile_runtime_job(
             "job_type": job.job_type,
         },
     )
+
+    _repair_runtime_capacity_ledger(session, ws)
 
     if ws.status in _BUSY_RECONCILE:
         _fail_reconcile(session, ws, job, f"reconcile:workspace_busy (status={ws.status})")

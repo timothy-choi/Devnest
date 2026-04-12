@@ -5,15 +5,23 @@ Scheduling policy is intentionally small; :mod:`app.services.placement_service` 
 """
 
 from .models import WorkspaceComputeRequest, WorkspaceScheduleResult
-from .policy import can_fit_workspace, rank_candidate_nodes, scheduling_sort_key
+from .policy import (
+    can_fit_workspace,
+    can_fit_workspace_effective,
+    rank_candidate_nodes,
+    scheduling_sort_key,
+    scheduling_sort_key_effective,
+)
 from .service import explain_placement_decision, schedule_workspace
 
 __all__ = [
     "WorkspaceComputeRequest",
     "WorkspaceScheduleResult",
     "can_fit_workspace",
+    "can_fit_workspace_effective",
     "explain_placement_decision",
     "rank_candidate_nodes",
     "schedule_workspace",
     "scheduling_sort_key",
+    "scheduling_sort_key_effective",
 ]

@@ -24,11 +24,13 @@ from app.services.infrastructure_service.lifecycle import (
     terminate_ec2_node,
 )
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
+from app.services.placement_service.capacity import max_effective_free_cpu_across_schedulable
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeProviderType,
     ExecutionNodeStatus,
 )
+from app.services.placement_service.node_placement import schedulable_placement_predicates
 from app.services.workspace_service.models import Workspace, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceStatus
 
@@ -144,6 +146,22 @@ def evaluate_scale_up(
             should_provision=False,
             reason="capacity not marked insufficient",
             provisioning_in_flight=in_flight,
+        )
+    if _provider_allows_ec2_autoscale():
+        try:
+            ec2_preds = [
+                *schedulable_placement_predicates(),
+                ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+            ]
+            max_free_ec2 = max_effective_free_cpu_across_schedulable(session, base_predicates=ec2_preds)
+        except Exception:
+            max_free_ec2 = None
+        logger.info(
+            "autoscaler_evaluate_insufficient_capacity_context",
+            extra={
+                "max_effective_free_cpu_ec2_ready_pool": max_free_ec2,
+                "provisioning_in_flight": in_flight,
+            },
         )
     if not _provider_allows_ec2_autoscale():
         return ScaleUpEvaluation(
