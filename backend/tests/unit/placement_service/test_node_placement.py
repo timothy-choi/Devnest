@@ -184,3 +184,37 @@ def test_select_skips_node_when_effective_capacity_exhausted(placement_engine: E
             requested_memory_mb=256,
         )
         assert picked.node_key == "only"
+
+
+def test_select_allows_placement_when_only_error_workloads_have_ledger(placement_engine: Engine) -> None:
+    """ERROR workspaces do not consume effective capacity; stale ledger must not block others."""
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    with Session(placement_engine) as session:
+        _add_node(session, key="solo", alloc_cpu=2.0, alloc_mem=2048)
+        u = UserAuth(username="pe1", password_hash="x", email="pe1@e.com")
+        session.add(u)
+        session.commit()
+        session.refresh(u)
+        ws = Workspace(name="err_ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.ERROR.value)
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=ws.workspace_id,
+                node_id="solo",
+                reserved_cpu=1.9,
+                reserved_memory_mb=2000,
+            ),
+        )
+        session.commit()
+        picked = select_node_for_workspace(
+            session,
+            workspace_id=501,
+            requested_cpu=1.0,
+            requested_memory_mb=512,
+        )
+        assert picked.node_key == "solo"

@@ -86,3 +86,38 @@ def test_deleted_workspace_excluded_from_sum(cap_engine) -> None:
         c, m = total_reserved_on_node_key(session, "n1")
         assert c == pytest.approx(0.0)
         assert m == 0
+
+
+def test_error_workspace_excluded_from_sum(cap_engine) -> None:
+    with Session(cap_engine) as session:
+        _, wid = _add_user_workspace(session, status=WorkspaceStatus.ERROR.value)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=wid,
+                node_id="n1",
+                reserved_cpu=3.0,
+                reserved_memory_mb=2048,
+            )
+        )
+        session.commit()
+        c, m = total_reserved_on_node_key(session, "n1")
+        assert c == pytest.approx(0.0)
+        assert m == 0
+
+
+def test_unpinned_runtime_row_not_counted_toward_node(cap_engine) -> None:
+    """Ledger rows without a concrete ``node_id`` must not attribute reservation to any node_key."""
+    with Session(cap_engine) as session:
+        _, wid = _add_user_workspace(session, status=WorkspaceStatus.RUNNING.value)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=wid,
+                node_id=None,
+                reserved_cpu=99.0,
+                reserved_memory_mb=9999,
+            )
+        )
+        session.commit()
+        c, m = total_reserved_on_node_key(session, "n1")
+        assert c == pytest.approx(0.0)
+        assert m == 0

@@ -31,7 +31,7 @@ class WorkspaceRuntime(SQLModel, table=True):
     )
     # Capacity ledger (V1): set on successful bring-up / restart / update; cleared on stop/delete.
     # Effective free space on a node = execution_node.allocatable_* minus SUM(reserved_*) for
-    # workspace_runtime rows pinned to that node_key with workspace not STOPPED/DELETED.
+    # workspace_runtime rows pinned to that node_key with workspace not STOPPED/DELETED/ERROR.
     reserved_cpu: float = Field(default=0.0, sa_column=Column(Float, nullable=False))
     reserved_memory_mb: int = Field(default=0, ge=0)
     last_heartbeat_at: datetime | None = Field(

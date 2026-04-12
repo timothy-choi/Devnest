@@ -99,6 +99,21 @@ _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
 
 
+def _clear_runtime_capacity_reservation(session: Session, workspace_id: int) -> None:
+    """Zero ``WorkspaceRuntime.reserved_*`` when workspace moves to a non-scheduling terminal error path."""
+    rt = session.exec(
+        select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
+    ).first()
+    if rt is None:
+        return
+    if float(rt.reserved_cpu or 0) <= 0 and int(rt.reserved_memory_mb or 0) <= 0:
+        return
+    rt.reserved_cpu = 0.0
+    rt.reserved_memory_mb = 0
+    rt.updated_at = _now()
+    session.add(rt)
+
+
 def _fail_job_from_placement(
     session: Session,
     ws: Workspace,
@@ -112,6 +127,8 @@ def _fail_job_from_placement(
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_PLACEMENT, message)
     _touch_workspace(session, ws)
+    assert ws.workspace_id is not None
+    _clear_runtime_capacity_reservation(session, ws.workspace_id)
 
 
 def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
@@ -121,6 +138,8 @@ def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: Wo
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_ORCHESTRATOR_BINDING, message)
     _touch_workspace(session, ws)
+    assert ws.workspace_id is not None
+    _clear_runtime_capacity_reservation(session, ws.workspace_id)
 
 
 def _worker_sessionmaker(bind: Engine):
@@ -288,8 +307,13 @@ def _apply_runtime_bringup_like(
     rt.container_state = container_state
     rt.internal_endpoint = internal_endpoint
     rt.config_version = config_version
-    rt.reserved_cpu = float(reserved_cpu)
-    rt.reserved_memory_mb = int(reserved_memory_mb)
+    nk = (node_id or "").strip()
+    if nk:
+        rt.reserved_cpu = float(reserved_cpu)
+        rt.reserved_memory_mb = int(reserved_memory_mb)
+    else:
+        rt.reserved_cpu = 0.0
+        rt.reserved_memory_mb = 0
     rt.health_status = _health_from_probe(probe_healthy)
     if probe_healthy is True:
         rt.last_heartbeat_at = ts
@@ -440,6 +464,8 @@ def _finalize_job_failed_workspace_error(
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_JOB, message)
     _touch_workspace(session, ws)
+    if ws.workspace_id is not None:
+        _clear_runtime_capacity_reservation(session, ws.workspace_id)
 
 
 def _finalize_runtime_running_success(
@@ -797,6 +823,7 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
         ws.status = WorkspaceStatus.ERROR.value
         _workspace_set_error(ws, _ERROR_CODE_ORCH, str(e))
         _touch_workspace(session, ws)
+        _clear_runtime_capacity_reservation(session, wid)
     except UnsupportedWorkspaceJobTypeError as e:
         logger.error(
             "workspace_job_unsupported_type",
@@ -806,6 +833,7 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
         ws.status = WorkspaceStatus.ERROR.value
         _workspace_set_error(ws, _ERROR_CODE_JOB, str(e))
         _touch_workspace(session, ws)
+        _clear_runtime_capacity_reservation(session, wid)
 
     _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
 

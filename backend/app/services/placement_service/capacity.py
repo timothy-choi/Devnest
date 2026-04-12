@@ -5,10 +5,11 @@
 - ``ExecutionNode.total_*``: catalog / hardware envelope (operator-defined).
 - ``ExecutionNode.allocatable_*``: scheduler-visible capacity after node-level overhead (kube-style).
 - **Reserved** capacity is **not** a column on ``ExecutionNode``; it is the sum of
-  ``WorkspaceRuntime.reserved_*`` for rows pinned to ``node_key`` whose workspace is neither
-  ``STOPPED`` nor ``DELETED``.
-- **Effective free** = ``allocatable_* - reserved_sum`` (clamped to ``>= 0`` in application logic;
-  SQL comparisons use the raw difference).
+  ``WorkspaceRuntime.reserved_*`` for rows with a non-empty ``node_id`` whose workspace **counts**
+  toward holding a schedulable slot: not ``STOPPED``, ``DELETED``, or ``ERROR`` (ERROR releases
+  capacity; the row may still show ``node_id`` for ops until cleared).
+- **Effective free** = ``allocatable_* - reserved_sum``. SQL uses the raw difference (negative
+  free excludes the node). Python helpers clamp when reporting diagnostics.
 
 Placement uses correlated subqueries so concurrent workers still rely on ``FOR UPDATE`` on the
 chosen ``execution_node`` row for the duration of the job transaction.
@@ -18,7 +19,7 @@ TODO: Tenant quotas, usage-based (cgroup) telemetry vs reservation, predictive s
 
 from __future__ import annotations
 
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlmodel import Session, select
 
 from app.services.workspace_service.models import Workspace, WorkspaceRuntime
@@ -30,7 +31,26 @@ from .models import ExecutionNode
 _WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM = (
     WorkspaceStatus.STOPPED.value,
     WorkspaceStatus.DELETED.value,
+    WorkspaceStatus.ERROR.value,
 )
+
+
+def _runtime_pin_predicates_for_subquery():
+    """Pinned to this execution node row; ignore null/blank ``node_id`` (defensive)."""
+    return and_(
+        WorkspaceRuntime.node_id == ExecutionNode.node_key,
+        WorkspaceRuntime.node_id.isnot(None),
+        WorkspaceRuntime.node_id != "",
+    )
+
+
+def _runtime_pin_predicates_for_node_key(bind_key: str):
+    """Filter workspace_runtime rows pinned to a concrete ``node_key`` (already non-empty)."""
+    return and_(
+        WorkspaceRuntime.node_id == bind_key,
+        WorkspaceRuntime.node_id.isnot(None),
+        WorkspaceRuntime.node_id != "",
+    )
 
 
 def reserved_cpu_sum_subquery():
@@ -40,7 +60,7 @@ def reserved_cpu_sum_subquery():
         .select_from(WorkspaceRuntime)
         .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
         .where(
-            WorkspaceRuntime.node_id == ExecutionNode.node_key,
+            _runtime_pin_predicates_for_subquery(),
             Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
         )
         .correlate(ExecutionNode)
@@ -54,7 +74,7 @@ def reserved_memory_sum_subquery():
         .select_from(WorkspaceRuntime)
         .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
         .where(
-            WorkspaceRuntime.node_id == ExecutionNode.node_key,
+            _runtime_pin_predicates_for_subquery(),
             Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
         )
         .correlate(ExecutionNode)
@@ -84,14 +104,50 @@ def total_reserved_on_node_key(session: Session, node_key: str) -> tuple[float, 
         .select_from(WorkspaceRuntime)
         .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
         .where(
-            WorkspaceRuntime.node_id == key,
+            _runtime_pin_predicates_for_node_key(key),
             Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
         )
     )
     row = session.exec(stmt).one()
-    cpu = float(row[0] if isinstance(row[0], float) else row[0])
-    mem = int(row[1] if row[1] is not None else 0)
-    return (cpu, mem)
+    raw_cpu = row[0]
+    raw_mem = row[1]
+    try:
+        cpu = float(raw_cpu) if raw_cpu is not None else 0.0
+    except (TypeError, ValueError):
+        cpu = 0.0
+    try:
+        mem = int(raw_mem) if raw_mem is not None else 0
+    except (TypeError, ValueError):
+        mem = 0
+    return (max(0.0, cpu), max(0, mem))
+
+
+def max_effective_free_resources_across_schedulable(
+    session: Session,
+    *,
+    base_predicates: list,
+) -> tuple[float, int]:
+    """
+    Best-effort max effective free (cpu, memory_mb) among nodes matching ``base_predicates``.
+
+    Used for placement/autoscale diagnostics (small N).
+    """
+    if not base_predicates:
+        return (0.0, 0)
+    stmt = select(ExecutionNode).where(and_(*base_predicates))
+    nodes = list(session.exec(stmt).all())
+    best_cpu = 0.0
+    best_mem = 0
+    for n in nodes:
+        k = (n.node_key or "").strip()
+        if not k:
+            continue
+        used_cpu, used_mem = total_reserved_on_node_key(session, k)
+        free_c = max(0.0, float(n.allocatable_cpu or 0.0) - used_cpu)
+        free_m = max(0, int(n.allocatable_memory_mb or 0) - used_mem)
+        best_cpu = max(best_cpu, free_c)
+        best_mem = max(best_mem, free_m)
+    return (best_cpu, best_mem)
 
 
 def max_effective_free_cpu_across_schedulable(session: Session, *, base_predicates: list) -> float:
@@ -100,18 +156,5 @@ def max_effective_free_cpu_across_schedulable(session: Session, *, base_predicat
 
     Uses Python-side evaluation after a light query — acceptable for admin/autoscale logging (small N).
     """
-    from sqlalchemy import and_
-
-    if not base_predicates:
-        return 0.0
-    stmt = select(ExecutionNode).where(and_(*base_predicates))
-    nodes = list(session.exec(stmt).all())
-    best = 0.0
-    for n in nodes:
-        k = (n.node_key or "").strip()
-        if not k:
-            continue
-        used_cpu, _ = total_reserved_on_node_key(session, k)
-        free = max(0.0, float(n.allocatable_cpu or 0.0) - used_cpu)
-        best = max(best, free)
-    return best
+    cpu, _mem = max_effective_free_resources_across_schedulable(session, base_predicates=base_predicates)
+    return cpu

@@ -19,8 +19,9 @@ class ExecutionNode(SQLModel, table=True):
     - **Provider** — ``provider_type`` / ``provider_instance_id`` reserve space for EC2 instance IDs without provisioning logic yet.
     - **Capacity** — ``total_*`` is the catalog envelope; ``allocatable_*`` is what the scheduler may use
       (after node-level overhead). **Effective free** capacity subtracts sums of
-      ``WorkspaceRuntime.reserved_*`` for non-stopped, non-deleted workspaces pinned to this
-      ``node_key`` (see :mod:`app.services.placement_service.capacity`).
+      ``WorkspaceRuntime.reserved_*`` for workloads pinned to this ``node_key`` that still hold a
+      schedulable slot (not ``STOPPED``, ``DELETED``, or ``ERROR``; see
+      :mod:`app.services.placement_service.capacity`).
 
     **Status vs schedulable:** only ``READY`` + ``schedulable=True`` are candidates for V1 placement.
     ``PROVISIONING``, ``NOT_READY``, ``DRAINING``, ``TERMINATING``, ``TERMINATED``, and ``ERROR`` are

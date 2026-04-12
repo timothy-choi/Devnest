@@ -24,7 +24,7 @@ from app.services.infrastructure_service.lifecycle import (
     terminate_ec2_node,
 )
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
-from app.services.placement_service.capacity import max_effective_free_cpu_across_schedulable
+from app.services.placement_service.capacity import max_effective_free_resources_across_schedulable
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeProviderType,
@@ -153,13 +153,17 @@ def evaluate_scale_up(
                 *schedulable_placement_predicates(),
                 ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
             ]
-            max_free_ec2 = max_effective_free_cpu_across_schedulable(session, base_predicates=ec2_preds)
+            max_cpu_ec2, max_mem_ec2 = max_effective_free_resources_across_schedulable(
+                session,
+                base_predicates=ec2_preds,
+            )
         except Exception:
-            max_free_ec2 = None
+            max_cpu_ec2, max_mem_ec2 = None, None
         logger.info(
             "autoscaler_evaluate_insufficient_capacity_context",
             extra={
-                "max_effective_free_cpu_ec2_ready_pool": max_free_ec2,
+                "max_effective_free_cpu_ec2_ready_pool": max_cpu_ec2,
+                "max_effective_free_memory_mb_ec2_ready_pool": max_mem_ec2,
                 "provisioning_in_flight": in_flight,
             },
         )

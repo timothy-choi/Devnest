@@ -9,7 +9,11 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 
-from .capacity import effective_free_cpu_expr, effective_free_memory_mb_expr, max_effective_free_cpu_across_schedulable
+from .capacity import (
+    effective_free_cpu_expr,
+    effective_free_memory_mb_expr,
+    max_effective_free_resources_across_schedulable,
+)
 from .constants import DEFAULT_WORKSPACE_REQUEST_CPU, DEFAULT_WORKSPACE_REQUEST_MEMORY_MB
 from .errors import ExecutionNodeNotFoundError, InvalidPlacementParametersError, NoSchedulableNodeError
 from .models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
@@ -100,7 +104,7 @@ def select_node_for_workspace(
 
     Policy: READY + schedulable, enough **effective** free CPU/RAM:
     ``allocatable_*`` minus sums of ``WorkspaceRuntime.reserved_*`` for workloads on that ``node_key``
-    (workspace not ``STOPPED`` / ``DELETED``).
+    (workspace not ``STOPPED`` / ``DELETED`` / ``ERROR``).
 
     Tie-break: highest effective free CPU, then effective free RAM, then ``node_key`` ascending.
 
@@ -152,14 +156,18 @@ def select_node_for_workspace(
         pool_hint = ""
         if prov in ("local", "ec2"):
             pool_hint = f" [placement pool: devnest_node_provider={prov!r}]"
-        max_free = max_effective_free_cpu_across_schedulable(session, base_predicates=list(_schedulable_base_predicates()))
+        max_cpu, max_mem = max_effective_free_resources_across_schedulable(
+            session,
+            base_predicates=list(_schedulable_base_predicates()),
+        )
         raise NoSchedulableNodeError(
             "no execution node matches placement policy "
             f"(need status=READY, schedulable=true, effective_free_cpu>={req_cpu}, "
             f"effective_free_memory_mb>={req_mem} after workspace reservations; "
             f"{n_gate} node(s) are READY+schedulable (after provider filter) but none have enough "
             f"effective capacity — check execution_node, workspace_runtime reservations, and bootstrap; "
-            f"diagnostic max_effective_free_cpu among that pool ≈ {max_free:.4f})"
+            f"diagnostic max_effective_free_cpu≈{max_cpu:.4f}, "
+            f"max_effective_free_memory_mb≈{max_mem} in that pool)"
             f"{pool_hint}",
         )
     return row

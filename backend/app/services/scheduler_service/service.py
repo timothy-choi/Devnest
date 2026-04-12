@@ -96,7 +96,8 @@ def explain_placement_decision(
         f"selected node_key={chosen.node_key!r} allocatable_cpu={chosen.allocatable_cpu} "
         f"allocatable_memory_mb={chosen.allocatable_memory_mb}",
         f"effective_free_cpu≈{free_c:.4f} effective_free_memory_mb≈{free_m} "
-        f"(after workspace_runtime reservations on this node_key)",
+        f"(after workspace_runtime reservations on this node_key; "
+        f"STOPPED/DELETED/ERROR workspaces excluded from the sum)",
         f"policy: maximize effective_free_cpu, then effective_free_memory_mb, then node_key ascending",
         f"READY+schedulable pool size (after devnest_node_provider filter): {len(pool)}",
         f"pool nodes satisfying effective capacity for cpu>={req.requested_cpu} "
