@@ -1,7 +1,8 @@
 """Construct a real :class:`DefaultOrchestratorService` for API / worker execution (request-scoped DB session).
 
-Uses Docker runtime + :class:`DbTopologyAdapter` + :class:`DefaultProbeRunner`. Linux bridge/attachment
-follow the same env defaults as ``DbTopologyAdapter`` (e.g. ``DEVNEST_TOPOLOGY_SKIP_LINUX_*``).
+Uses :mod:`app.services.node_execution_service` to bind Docker + Linux commands to the placed
+``ExecutionNode`` (local engine or ``ssh_docker``). Topology persistence stays :class:`DbTopologyAdapter`;
+probes use :class:`DefaultProbeRunner` (remote service checks via SSH ``nc`` when applicable).
 
 Image and paths are configurable via settings / env; see :func:`build_default_orchestrator_for_session`.
 """
@@ -12,14 +13,15 @@ import os
 import tempfile
 from pathlib import Path
 
-import docker
 from sqlmodel import Session
 
 from app.libs.common.config import get_settings
-from app.services.workspace_service.models import Workspace, WorkspaceJob
 from app.libs.probes.probe_runner import DefaultProbeRunner
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.topology import DbTopologyAdapter
+from app.services.node_execution_service import resolve_node_execution_bundle
+from app.services.node_execution_service.errors import NodeExecutionBindingError
+from app.services.workspace_service.models import Workspace, WorkspaceJob
 
 from .errors import AppOrchestratorBindingError
 from .service import DefaultOrchestratorService
@@ -35,18 +37,16 @@ def build_default_orchestrator_for_session(
     Build orchestrator wired to ``session`` for topology persistence.
 
     When ``execution_node_key`` / ``topology_id`` are omitted, values come from
-    ``DEVNEST_NODE_ID`` / ``DEVNEST_TOPOLOGY_ID`` (legacy single-process dev).
+    ``DEVNEST_NODE_ID`` / ``DEVNEST_TOPOLOGY_ID`` (legacy single-process dev). Docker and topology
+    commands still use the local host unless a matching ``ExecutionNode`` row selects ``ssh_docker``.
 
     Raises:
-        AppOrchestratorBindingError: if Docker is not available or misconfigured.
+        AppOrchestratorBindingError: if Docker / SSH binding fails.
     """
     try:
-        client = docker.from_env()
-        client.ping()
-    except Exception as e:
-        raise AppOrchestratorBindingError(
-            f"Docker engine not available for workspace orchestrator: {e}",
-        ) from e
+        bundle = resolve_node_execution_bundle(session, execution_node_key)
+    except NodeExecutionBindingError as e:
+        raise AppOrchestratorBindingError(str(e)) from e
 
     settings = get_settings()
     image = (settings.workspace_container_image or "").strip()
@@ -70,9 +70,13 @@ def build_default_orchestrator_for_session(
     if not node_id:
         node_id = (os.environ.get("DEVNEST_NODE_ID", "node-1") or "").strip() or "node-1"
 
-    runtime = DockerRuntimeAdapter(client=client)
-    topology = DbTopologyAdapter(session)
-    probe = DefaultProbeRunner(runtime=runtime, topology=topology)
+    runtime = DockerRuntimeAdapter(client=bundle.docker_client)
+    topology = DbTopologyAdapter(session, command_runner=bundle.topology_command_runner)
+    probe = DefaultProbeRunner(
+        runtime=runtime,
+        topology=topology,
+        service_reachability_runner=bundle.service_reachability_runner,
+    )
 
     return DefaultOrchestratorService(
         runtime,
@@ -82,6 +86,7 @@ def build_default_orchestrator_for_session(
         node_id=node_id,
         workspace_projects_base=base,
         workspace_image=image,
+        ensure_workspace_project_dir=bundle.ensure_workspace_project_dir,
     )
 
 

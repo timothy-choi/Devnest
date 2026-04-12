@@ -8,7 +8,12 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 
-from .models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
+from .models import (
+    ExecutionNode,
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+    ExecutionNodeStatus,
+)
 
 
 def default_local_node_key() -> str:
@@ -33,6 +38,7 @@ def ensure_default_local_execution_node(session: Session) -> ExecutionNode:
         name=f"local-{key}",
         provider_type=ExecutionNodeProviderType.LOCAL.value,
         provider_instance_id=None,
+        execution_mode=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
         hostname="localhost",
         private_ip=None,
         status=ExecutionNodeStatus.READY.value,

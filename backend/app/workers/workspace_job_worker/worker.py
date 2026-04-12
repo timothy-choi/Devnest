@@ -39,6 +39,7 @@ from sqlmodel import Session, select
 logger = logging.getLogger(__name__)
 
 from app.services.orchestrator_service.errors import (
+    AppOrchestratorBindingError,
     WorkspaceBringUpError,
     WorkspaceDeleteError,
     WorkspaceRestartError,
@@ -87,12 +88,21 @@ _ORCHESTRATOR_EXCEPTIONS: tuple[type[Exception], ...] = (
 _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
 _ERROR_CODE_ORCH = "ORCHESTRATOR_EXCEPTION"
 _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
+_ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
 
 
 def _fail_job_from_placement(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
     _mark_job_failed(session, job, message)
     ws.status = WorkspaceStatus.ERROR.value
     _workspace_set_error(ws, _ERROR_CODE_PLACEMENT, message)
+    _touch_workspace(session, ws)
+
+
+def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, message: str) -> None:
+    """Node execution / Docker / SSH binding failed before orchestrator could run the job."""
+    _mark_job_failed(session, job, message)
+    ws.status = WorkspaceStatus.ERROR.value
+    _workspace_set_error(ws, _ERROR_CODE_ORCHESTRATOR_BINDING, message)
     _touch_workspace(session, ws)
 
 
@@ -779,6 +789,18 @@ def _process_next_queued_job_return_id(
         )
         _fail_job_from_placement(session, ws, job, str(e))
         return jid
+    except AppOrchestratorBindingError as e:
+        logger.warning(
+            "workspace_job_orchestrator_binding_failed",
+            extra={
+                "workspace_id": wid,
+                "workspace_job_id": jid,
+                "job_type": job.job_type,
+                "error": str(e),
+            },
+        )
+        _fail_job_from_orchestrator_binding(session, ws, job, str(e))
+        return jid
     _process_claimed_running_job(session, orchestrator, job)
     return jid
 
@@ -885,6 +907,19 @@ def run_queued_workspace_job_by_id(
                 },
             )
             _fail_job_from_placement(work, ws, job, str(e))
+            work.commit()
+            return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
+        except AppOrchestratorBindingError as e:
+            logger.warning(
+                "workspace_job_orchestrator_binding_failed",
+                extra={
+                    "workspace_id": wid,
+                    "workspace_job_id": jid,
+                    "job_type": job.job_type,
+                    "error": str(e),
+                },
+            )
+            _fail_job_from_orchestrator_binding(work, ws, job, str(e))
             work.commit()
             return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
         _process_claimed_running_job(work, orch, job)

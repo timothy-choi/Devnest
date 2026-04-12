@@ -14,9 +14,12 @@ import math
 import socket
 import time
 
+import ipaddress
+
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology.errors import AttachmentHealthCheckError, TopologyHealthCheckError
 from app.libs.topology.interfaces import TopologyAdapter
+from app.libs.topology.system.command_runner import CommandRunner
 
 from .constants import ProbeIssueCode
 from .interfaces import ProbeRunner
@@ -83,9 +86,16 @@ def _service_issue(
 class DefaultProbeRunner(ProbeRunner):
     """Probe runner backed by ``RuntimeAdapter`` and ``TopologyAdapter`` for inspection-only checks."""
 
-    def __init__(self, *, runtime: RuntimeAdapter, topology: TopologyAdapter) -> None:
+    def __init__(
+        self,
+        *,
+        runtime: RuntimeAdapter,
+        topology: TopologyAdapter,
+        service_reachability_runner: CommandRunner | None = None,
+    ) -> None:
         self._runtime = runtime
         self._topology = topology
+        self._service_reachability_runner = service_reachability_runner
 
     def check_container_running(
         self,
@@ -313,6 +323,57 @@ class DefaultProbeRunner(ProbeRunner):
             issues=tuple(issues),
         )
 
+    def _check_service_reachable_via_runner(
+        self,
+        *,
+        workspace_ip: str,
+        port: int,
+        timeout_seconds: float,
+    ) -> ServiceProbeResult:
+        """TCP check from the execution host (SSH) using ``nc``; IPv4 only."""
+        ip = (workspace_ip or "").strip()
+        try:
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip or None,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
+                    message=(
+                        "remote service probe requires IPv4 workspace_ip "
+                        f"(got {workspace_ip!r}); extend probe for IPv6 or use local routing"
+                    ),
+                ),
+            )
+        w = max(1, min(60, int(math.ceil(timeout_seconds))))
+        runner = self._service_reachability_runner
+        assert runner is not None
+        t0 = time.perf_counter()
+        try:
+            runner.run(["timeout", str(w), "nc", "-z", ip, str(port)])
+        except RuntimeError as e:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_UNREACHABLE,
+                    message=f"remote nc probe failed for {ip!r}:{port}: {e}",
+                ),
+            )
+        t1 = time.perf_counter()
+        return ServiceProbeResult(
+            healthy=True,
+            workspace_ip=ip,
+            port=port,
+            latency_ms=(t1 - t0) * 1000.0,
+            issues=(),
+        )
+
     def check_service_reachable(
         self,
         *,
@@ -353,6 +414,13 @@ class DefaultProbeRunner(ProbeRunner):
                     code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
                     message=f"timeout_seconds must be a finite positive value, got {timeout_seconds!r}",
                 ),
+            )
+
+        if self._service_reachability_runner is not None:
+            return self._check_service_reachable_via_runner(
+                workspace_ip=ip,
+                port=port,
+                timeout_seconds=timeout_seconds,
             )
 
         sock: socket.socket | None = None

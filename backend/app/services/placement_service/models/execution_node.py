@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import JSON, CheckConstraint, Column, DateTime, Float, Integer
 from sqlmodel import Field, SQLModel
 
-from .enums import ExecutionNodeProviderType, ExecutionNodeStatus
+from .enums import ExecutionNodeExecutionMode, ExecutionNodeProviderType, ExecutionNodeStatus
 
 
 class ExecutionNode(SQLModel, table=True):
@@ -26,7 +26,14 @@ class ExecutionNode(SQLModel, table=True):
     filters on allocatable only and does not decrement it — concurrent workspaces can exceed
     real capacity until reservation accounting lands (TODO).
 
-    TODO: Node agent heartbeats, persistent CPU/RAM reservations, EC2 lifecycle sync.
+    **Execution:** ``execution_mode`` selects how :mod:`app.services.node_execution_service` builds
+    a Docker client and Linux command runner. ``LOCAL_DOCKER`` uses the worker process environment
+    (``docker.from_env()``). ``SSH_DOCKER`` uses Docker's ``ssh://`` transport to the daemon on
+    ``ssh_host`` (requires SSH keys; ``paramiko`` for docker-py). Topology bridge/veth commands run
+    on the same host as the daemon via the SSH-backed runner. ``ssh_*`` fields are ignored for
+    ``LOCAL_DOCKER``.
+
+    TODO: Node agent heartbeats, persistent CPU/RAM reservations, EC2 lifecycle sync, SSM transport.
     """
 
     __tablename__ = "execution_node"
@@ -53,6 +60,17 @@ class ExecutionNode(SQLModel, table=True):
     provider_instance_id: str | None = Field(default=None, max_length=255)
     hostname: str | None = Field(default=None, max_length=255)
     private_ip: str | None = Field(default=None, max_length=64)
+
+    execution_mode: str = Field(
+        default=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
+        max_length=32,
+        index=True,
+        description="local_docker | ssh_docker — see ExecutionNodeExecutionMode.",
+    )
+    ssh_host: str | None = Field(default=None, max_length=255)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_user: str | None = Field(default=None, max_length=64)
+
     status: str = Field(
         default=ExecutionNodeStatus.READY.value,
         max_length=32,

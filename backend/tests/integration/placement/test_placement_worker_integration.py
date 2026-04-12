@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlmodel import Session
@@ -105,3 +105,21 @@ def test_resolve_placement_create_uses_seeded_execution_node(db_session: Session
     node_key, topology_id = resolve_orchestrator_placement(db_session, ws, job)
     assert node_key == default_local_node_key()
     assert isinstance(topology_id, int)
+
+
+def test_build_orchestrator_wires_node_execution_for_placed_node(db_session: Session) -> None:
+    """Orchestrator uses :mod:`node_execution_service` bundle (local Docker) for the placed ``node_key``."""
+    owner = _seed_owner(db_session)
+    wid, jid = _seed_create_job(db_session, owner)
+    ws = db_session.get(Workspace, wid)
+    job = db_session.get(WorkspaceJob, jid)
+    assert ws is not None and job is not None
+    mock_client = MagicMock()
+    with patch(
+        "app.services.node_execution_service.factory.docker.from_env",
+        return_value=mock_client,
+    ):
+        orch = build_orchestrator_for_workspace_job(db_session, ws, job)
+    assert orch._node_id == default_local_node_key()
+    assert orch._runtime_adapter._client is mock_client
+    mock_client.ping.assert_called()

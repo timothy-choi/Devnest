@@ -17,3 +17,10 @@ class ExecutionNodeStatus(str, Enum):
     READY = "READY"
     NOT_READY = "NOT_READY"
     DRAINING = "DRAINING"
+
+
+class ExecutionNodeExecutionMode(str, Enum):
+    """How the worker reaches Docker + node-local topology commands for this node."""
+
+    LOCAL_DOCKER = "local_docker"
+    SSH_DOCKER = "ssh_docker"

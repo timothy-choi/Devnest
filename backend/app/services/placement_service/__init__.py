@@ -7,7 +7,12 @@ from .errors import (
     NoSchedulableNodeError,
     PlacementError,
 )
-from .models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
+from .models import (
+    ExecutionNode,
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+    ExecutionNodeStatus,
+)
 from .node_placement import (
     get_node,
     list_schedulable_nodes,
@@ -19,6 +24,7 @@ from .orchestrator_binding import resolve_orchestrator_placement
 
 __all__ = [
     "ExecutionNode",
+    "ExecutionNodeExecutionMode",
     "ExecutionNodeNotFoundError",
     "ExecutionNodeProviderType",
     "ExecutionNodeStatus",
