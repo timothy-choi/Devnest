@@ -20,8 +20,9 @@ INTERNAL_KEY = "integration-test-internal-key"
 # ---------------------------------------------------------------------------
 
 def _register_and_login(client: TestClient, email: str, password: str = "securepass1") -> str:
-    client.post("/auth/register", json={"username": email.split("@")[0], "email": email, "password": password})
-    resp = client.post("/auth/login", json={"email": email, "password": password})
+    username = email.split("@")[0]
+    client.post("/auth/register", json={"username": username, "email": email, "password": password})
+    resp = client.post("/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 200, resp.json()
     return resp.json()["access_token"]
 

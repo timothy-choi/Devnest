@@ -18,11 +18,15 @@ INTERNAL_KEY = "integration-test-internal-key"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _register_and_login(client: TestClient, email: str, password: str = "securepass1") -> str:
-    client.post("/auth/register", json={"username": email.split("@")[0], "email": email, "password": password})
-    resp = client.post("/auth/login", json={"email": email, "password": password})
+def _register_and_login(client: TestClient, email: str, password: str = "securepass1") -> tuple[str, int]:
+    """Return (access_token, user_auth_id)."""
+    username = email.split("@")[0]
+    reg = client.post("/auth/register", json={"username": username, "email": email, "password": password})
+    assert reg.status_code == 201, reg.json()
+    uid = reg.json()["user_auth_id"]
+    resp = client.post("/auth/login", json={"username": username, "password": password})
     assert resp.status_code == 200, resp.json()
-    return resp.json()["access_token"]
+    return resp.json()["access_token"], uid
 
 
 def _create_workspace(client: TestClient, token: str, name: str = "ws") -> dict:
@@ -31,12 +35,6 @@ def _create_workspace(client: TestClient, token: str, name: str = "ws") -> dict:
         json={"name": name, "description": "", "runtime": {"image": "nginx:alpine"}, "is_private": True},
         headers={"Authorization": f"Bearer {token}"},
     )
-
-
-def _get_owner_id(client: TestClient, token: str) -> int:
-    resp = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert resp.status_code == 200, resp.json()
-    return resp.json()["user_auth_id"]
 
 
 def _seed_quota(session: Session, *, scope_type: ScopeType, scope_id: int | None = None, **limits) -> Quota:
@@ -134,13 +132,13 @@ class TestQuotaAdminApi:
 
 class TestWorkspaceQuotaEnforcement:
     def test_no_quota_allows_many_workspaces(self, client: TestClient) -> None:
-        token = _register_and_login(client, "no_quota@test.dev")
+        token, _ = _register_and_login(client, "no_quota@test.dev")
         for i in range(3):
             resp = _create_workspace(client, token, name=f"ws-{i}")
             assert resp.status_code == 201
 
     def test_global_quota_blocks_at_limit(self, client: TestClient, db_session: Session) -> None:
-        token = _register_and_login(client, "global_q@test.dev")
+        token, _ = _register_and_login(client, "global_q@test.dev")
         _seed_quota(db_session, scope_type=ScopeType.GLOBAL, max_workspaces=2)
 
         assert _create_workspace(client, token, name="ws-1").status_code == 201
@@ -153,8 +151,7 @@ class TestWorkspaceQuotaEnforcement:
         assert body["limit"] == 2
 
     def test_user_quota_overrides_global(self, client: TestClient, db_session: Session) -> None:
-        token = _register_and_login(client, "user_q@test.dev")
-        uid = _get_owner_id(client, token)
+        token, uid = _register_and_login(client, "user_q@test.dev")
         _seed_quota(db_session, scope_type=ScopeType.GLOBAL, max_workspaces=1)
         _seed_quota(db_session, scope_type=ScopeType.USER, scope_id=uid, max_workspaces=3)
 
@@ -166,7 +163,7 @@ class TestWorkspaceQuotaEnforcement:
         from app.services.audit_service.models import AuditLog
         from sqlmodel import select as sel
 
-        token = _register_and_login(client, "qaudit@test.dev")
+        token, _ = _register_and_login(client, "qaudit@test.dev")
         _seed_quota(db_session, scope_type=ScopeType.GLOBAL, max_workspaces=0)
         _create_workspace(client, token)
 
@@ -183,7 +180,8 @@ class TestWorkspaceQuotaEnforcement:
 class TestSnapshotQuotaEnforcement:
     def _setup_stopped_workspace(self, client: TestClient, db_session: Session) -> tuple[str, int, int]:
         """Register user, create workspace, fake-settle it to STOPPED."""
-        token = _register_and_login(client, f"snq_{id(self)}@test.dev")
+        import uuid as _uuid
+        token, uid = _register_and_login(client, f"snq{_uuid.uuid4().hex[:8]}@test.dev")
         resp = _create_workspace(client, token)
         assert resp.status_code == 201, resp.json()
         ws_id = resp.json()["workspace_id"]
@@ -195,7 +193,6 @@ class TestSnapshotQuotaEnforcement:
         db_session.add(ws)
         db_session.commit()
 
-        uid = _get_owner_id(client, token)
         return token, ws_id, uid
 
     def test_snapshot_blocked_at_limit(self, client: TestClient, db_session: Session) -> None:
