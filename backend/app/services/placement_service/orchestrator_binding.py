@@ -3,8 +3,8 @@
 ``node_key`` selects the :class:`~app.services.placement_service.models.ExecutionNode` row used by
 :mod:`app.services.node_execution_service` to build runtime + host command execution (local Docker,
 ``ssh_docker``, or ``ssm_docker``). The same key is persisted on ``WorkspaceRuntime.node_id`` after
-bring-up. EC2 provisioning and SSM/agent transports are out of scope for V1 (see node execution
-TODOs).
+bring-up. New placement for bring-up class jobs goes through :mod:`app.services.scheduler_service`
+(policy + explain); row locking remains in :mod:`app.services.placement_service.node_placement`.
 
 """
 
@@ -14,9 +14,10 @@ import os
 
 from sqlmodel import Session, select
 
+from app.services.scheduler_service.service import schedule_workspace
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceJobType, WorkspaceRuntime
 
-from .node_placement import reserve_node_for_workspace
+from .errors import InvalidPlacementParametersError, NoSchedulableNodeError
 
 
 def _topology_id_from_env() -> int:
@@ -81,7 +82,12 @@ def resolve_orchestrator_placement(
         WorkspaceJobType.UPDATE.value,
     )
     if needs_new_placement:
-        node = reserve_node_for_workspace(session, workspace_id=wid)
+        sch = schedule_workspace(session, workspace_id=wid)
+        if sch.invalid_request:
+            raise InvalidPlacementParametersError(sch.message)
+        if sch.execution_node is None:
+            raise NoSchedulableNodeError(sch.message)
+        node = sch.execution_node
         topo = node.default_topology_id if node.default_topology_id is not None else _topology_id_from_env()
         return node.node_key, int(topo)
 

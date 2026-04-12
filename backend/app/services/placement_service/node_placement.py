@@ -95,6 +95,8 @@ def select_node_for_workspace(
     Policy: READY + schedulable, enough allocatable CPU/RAM (filter-only; no persistent accounting).
     Tie-break: most allocatable CPU, then most RAM, then ``node_key`` ascending (deterministic).
 
+    Keep ordering aligned with :func:`app.services.scheduler_service.policy.scheduling_sort_key`.
+
     ``workspace_id`` is accepted for future affinity / anti-affinity; unused in V1.
 
     When ``DEVNEST_NODE_PROVIDER`` is ``local`` or ``ec2``, only matching ``provider_type`` rows are

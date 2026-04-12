@@ -21,8 +21,8 @@ do not use it to drive execution.
 returns result DTOs only; this module maps them onto ORM rows and emits workspace stream events.
 
 Best-effort **route-admin** registration (``DEVNEST_GATEWAY_ENABLED``) runs after RUNNING / stop /
-delete finalization; failures are logged only. SSE transport, reconcile, and EC2/scheduler integrations
-remain out of scope.
+delete finalization; failures are logged only. On ``NoSchedulableNodeError``, optional EC2 autoscaler
+hook (``devnest_autoscaler_*`` settings) may start one provision before the job is marked failed.
 """
 
 from __future__ import annotations
@@ -47,7 +47,8 @@ from app.services.orchestrator_service.errors import (
     WorkspaceUpdateError,
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
-from app.services.placement_service.errors import PlacementError
+from app.services.autoscaler_service.service import maybe_provision_on_no_schedulable_capacity
+from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
@@ -778,6 +779,11 @@ def _process_next_queued_job_return_id(
     try:
         orchestrator = get_orchestrator(session, ws, job)
     except PlacementError as e:
+        if isinstance(e, NoSchedulableNodeError):
+            try:
+                maybe_provision_on_no_schedulable_capacity(session)
+            except Exception:
+                logger.exception("autoscaler_provision_on_no_capacity_unexpected_error")
         logger.warning(
             "workspace_job_placement_failed",
             extra={
@@ -897,6 +903,11 @@ def run_queued_workspace_job_by_id(
         try:
             orch = get_orchestrator(work, ws, job)
         except PlacementError as e:
+            if isinstance(e, NoSchedulableNodeError):
+                try:
+                    maybe_provision_on_no_schedulable_capacity(work)
+                except Exception:
+                    logger.exception("autoscaler_provision_on_no_capacity_unexpected_error")
             logger.warning(
                 "workspace_job_placement_failed",
                 extra={
