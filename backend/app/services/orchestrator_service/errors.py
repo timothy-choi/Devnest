@@ -41,3 +41,9 @@ class WorkspaceUpdateError(OrchestratorError):
     """Unexpected update failure: validation, inspect, probe errors in noop path, or wrapped restart errors."""
 
     pass
+
+
+class WorkspaceSnapshotError(OrchestratorError):
+    """Snapshot export/import failed (validation, I/O, or unsafe archive contents)."""
+
+    pass

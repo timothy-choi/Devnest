@@ -29,3 +29,15 @@ class WorkspaceAccessDeniedError(WorkspaceServiceError):
     """Caller is authenticated but lacks a valid workspace session for access coordinates."""
 
     pass
+
+
+class SnapshotNotFoundError(WorkspaceServiceError):
+    """Snapshot id missing or not visible to the requester."""
+
+    pass
+
+
+class SnapshotConflictError(WorkspaceServiceError):
+    """Snapshot operation conflicts with current state or an in-flight job."""
+
+    pass

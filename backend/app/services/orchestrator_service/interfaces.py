@@ -8,6 +8,7 @@ from .results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
     WorkspaceRestartResult,
+    WorkspaceSnapshotOperationResult,
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
@@ -64,3 +65,21 @@ class OrchestratorService(ABC):
     @abstractmethod
     def check_workspace_runtime_health(self, *, workspace_id: str) -> WorkspaceBringUpResult:
         """Read-only probe roll-up for an existing workspace runtime (no repair, no topology mutation)."""
+
+    @abstractmethod
+    def export_workspace_filesystem_snapshot(
+        self,
+        *,
+        workspace_id: str,
+        archive_path: str,
+    ) -> WorkspaceSnapshotOperationResult:
+        """Write a compressed archive of the workspace project directory to ``archive_path``."""
+
+    @abstractmethod
+    def import_workspace_filesystem_snapshot(
+        self,
+        *,
+        workspace_id: str,
+        archive_path: str,
+    ) -> WorkspaceSnapshotOperationResult:
+        """Extract a snapshot archive into the workspace project directory (V1: overwrites files)."""

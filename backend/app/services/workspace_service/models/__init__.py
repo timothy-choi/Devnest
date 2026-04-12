@@ -7,6 +7,7 @@ from .enums import (
     WorkspaceRuntimeHealthStatus,
     WorkspaceSessionRole,
     WorkspaceSessionStatus,
+    WorkspaceSnapshotStatus,
     WorkspaceStatus,
 )
 from .workspace import Workspace
@@ -15,6 +16,7 @@ from .workspace_event import WorkspaceEvent
 from .workspace_job import WorkspaceJob
 from .workspace_runtime import WorkspaceRuntime
 from .workspace_session import WorkspaceSession
+from .workspace_snapshot import WorkspaceSnapshot
 
 __all__ = [
     "FailureStage",
@@ -29,5 +31,7 @@ __all__ = [
     "WorkspaceSession",
     "WorkspaceSessionRole",
     "WorkspaceSessionStatus",
+    "WorkspaceSnapshot",
+    "WorkspaceSnapshotStatus",
     "WorkspaceStatus",
 ]

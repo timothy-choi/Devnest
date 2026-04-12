@@ -43,6 +43,7 @@ from app.services.orchestrator_service.errors import (
     WorkspaceBringUpError,
     WorkspaceDeleteError,
     WorkspaceRestartError,
+    WorkspaceSnapshotError,
     WorkspaceStopError,
     WorkspaceUpdateError,
 )
@@ -61,16 +62,19 @@ from app.services.orchestrator_service.results import (
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
+from app.services.storage.factory import get_snapshot_storage_provider
 from app.services.workspace_service.models import (
     Workspace,
     WorkspaceJob,
     WorkspaceRuntime,
+    WorkspaceSnapshot,
 )
 from app.services.workspace_service.models.enums import (
     FailureStage,
     WorkspaceJobStatus,
     WorkspaceJobType,
     WorkspaceRuntimeHealthStatus,
+    WorkspaceSnapshotStatus,
     WorkspaceStatus,
 )
 from app.services.workspace_service.services.workspace_event_service import (
@@ -102,6 +106,7 @@ _ORCHESTRATOR_EXCEPTIONS: tuple[type[Exception], ...] = (
     WorkspaceDeleteError,
     WorkspaceRestartError,
     WorkspaceUpdateError,
+    WorkspaceSnapshotError,
 )
 
 _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
@@ -791,6 +796,251 @@ def _finalize_update_result(
     )
 
 
+def _execute_snapshot_create_job(
+    session: Session,
+    orchestrator: OrchestratorService,
+    ws: Workspace,
+    job: WorkspaceJob,
+) -> None:
+    """Materialize snapshot archive via orchestrator export; snapshot row is pre-created by API.
+
+    On export failure, best-effort removal of a partial archive avoids orphaned blobs under the
+    storage root.
+    """
+    wid = ws.workspace_id
+    assert wid is not None
+    wid_str = str(wid)
+    sid = job.workspace_snapshot_id
+    if sid is None:
+        _mark_job_failed(
+            session,
+            job,
+            "SNAPSHOT_CREATE job missing workspace_snapshot_id",
+            failure_stage=FailureStage.UNKNOWN.value,
+            failure_code="SNAPSHOT_JOB_INVALID",
+        )
+        _touch_workspace(session, ws)
+        return
+
+    snap = session.get(WorkspaceSnapshot, sid)
+    if snap is None or int(snap.workspace_id) != int(wid):
+        _mark_job_failed(
+            session,
+            job,
+            "Snapshot row missing or workspace mismatch",
+            failure_stage=FailureStage.UNKNOWN.value,
+            failure_code="SNAPSHOT_ROW_INVALID",
+        )
+        if snap is not None:
+            snap.status = WorkspaceSnapshotStatus.FAILED.value
+        _touch_workspace(session, ws)
+        return
+
+    storage = get_snapshot_storage_provider()
+    archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
+    res = orchestrator.export_workspace_filesystem_snapshot(
+        workspace_id=wid_str,
+        archive_path=archive_path,
+    )
+
+    if res.success:
+        snap.storage_uri = storage.storage_uri(workspace_id=wid, snapshot_id=sid)
+        snap.size_bytes = int(res.size_bytes or 0)
+        snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
+        session.add(snap)
+        _mark_job_succeeded(session, job)
+        _touch_workspace(session, ws)
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.SNAPSHOT_CREATED,
+            status=ws.status,
+            message="Workspace snapshot materialized",
+            payload={
+                "job_id": job.workspace_job_id,
+                "workspace_snapshot_id": sid,
+                "size_bytes": snap.size_bytes,
+                "storage_uri": snap.storage_uri,
+            },
+        )
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_SNAPSHOT_CREATED,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=job.workspace_job_id,
+            workspace_snapshot_id=sid,
+            phase="materialized",
+        )
+        return
+
+    msg = "; ".join(res.issues or ["snapshot:create:failed"])
+    snap.status = WorkspaceSnapshotStatus.FAILED.value
+    session.add(snap)
+    try:
+        storage.delete_archive(workspace_id=wid, snapshot_id=sid)
+    except Exception:
+        logger.warning(
+            "snapshot_create_cleanup_archive_failed",
+            extra={"workspace_id": wid, "workspace_snapshot_id": sid},
+            exc_info=True,
+        )
+    _mark_job_failed(
+        session,
+        job,
+        msg,
+        failure_stage=FailureStage.STORAGE.value,
+        failure_code="SNAPSHOT_CREATE_FAILED",
+    )
+    _touch_workspace(session, ws)
+    record_workspace_event(
+        session,
+        workspace_id=wid,
+        event_type=WorkspaceStreamEventType.SNAPSHOT_FAILED,
+        status=ws.status,
+        message=msg,
+        payload={"job_id": job.workspace_job_id, "workspace_snapshot_id": sid},
+    )
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_SNAPSHOT_FAILED,
+        correlation_id=job.correlation_id,
+        workspace_id=wid,
+        workspace_snapshot_id=sid,
+        phase="create",
+    )
+
+
+def _execute_snapshot_restore_job(
+    session: Session,
+    orchestrator: OrchestratorService,
+    ws: Workspace,
+    job: WorkspaceJob,
+) -> None:
+    """Extract snapshot archive into workspace project dir (workspace must be STOPPED).
+
+    TODO: For stronger safety, extract to a temp directory then atomic rename/swap (avoids torn
+    trees if import fails mid-way); V1 uses in-place extract after path validation in orchestrator.
+    """
+    wid = ws.workspace_id
+    assert wid is not None
+    wid_str = str(wid)
+    sid = job.workspace_snapshot_id
+    if sid is None:
+        _mark_job_failed(
+            session,
+            job,
+            "SNAPSHOT_RESTORE job missing workspace_snapshot_id",
+            failure_stage=FailureStage.UNKNOWN.value,
+            failure_code="SNAPSHOT_JOB_INVALID",
+        )
+        _touch_workspace(session, ws)
+        return
+
+    snap = session.get(WorkspaceSnapshot, sid)
+    if snap is None or int(snap.workspace_id) != int(wid):
+        _mark_job_failed(
+            session,
+            job,
+            "Snapshot row missing or workspace mismatch",
+            failure_stage=FailureStage.UNKNOWN.value,
+            failure_code="SNAPSHOT_ROW_INVALID",
+        )
+        _touch_workspace(session, ws)
+        return
+
+    storage = get_snapshot_storage_provider()
+    archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
+    if not storage.has_nonempty_archive(workspace_id=wid, snapshot_id=sid):
+        msg = f"snapshot:restore:archive_missing_or_empty:{archive_path}"
+        snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
+        session.add(snap)
+        _mark_job_failed(
+            session,
+            job,
+            msg,
+            failure_stage=FailureStage.STORAGE.value,
+            failure_code="SNAPSHOT_RESTORE_MISSING_ARCHIVE",
+        )
+        _touch_workspace(session, ws)
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.SNAPSHOT_FAILED,
+            status=ws.status,
+            message=msg,
+            payload={"job_id": job.workspace_job_id, "workspace_snapshot_id": sid},
+        )
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_SNAPSHOT_FAILED,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_snapshot_id=sid,
+            phase="restore",
+        )
+        return
+
+    res = orchestrator.import_workspace_filesystem_snapshot(
+        workspace_id=wid_str,
+        archive_path=archive_path,
+    )
+
+    if res.success:
+        snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
+        session.add(snap)
+        _mark_job_succeeded(session, job)
+        _touch_workspace(session, ws)
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.SNAPSHOT_RESTORED,
+            status=ws.status,
+            message="Workspace files restored from snapshot",
+            payload={
+                "job_id": job.workspace_job_id,
+                "workspace_snapshot_id": sid,
+                "size_bytes": res.size_bytes,
+            },
+        )
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_SNAPSHOT_RESTORED,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_snapshot_id=sid,
+        )
+        return
+
+    msg = "; ".join(res.issues or ["snapshot:restore:failed"])
+    snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
+    session.add(snap)
+    _mark_job_failed(
+        session,
+        job,
+        msg,
+        failure_stage=FailureStage.STORAGE.value,
+        failure_code="SNAPSHOT_RESTORE_FAILED",
+    )
+    _touch_workspace(session, ws)
+    record_workspace_event(
+        session,
+        workspace_id=wid,
+        event_type=WorkspaceStreamEventType.SNAPSHOT_FAILED,
+        status=ws.status,
+        message=msg,
+        payload={"job_id": job.workspace_job_id, "workspace_snapshot_id": sid},
+    )
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_SNAPSHOT_FAILED,
+        correlation_id=job.correlation_id,
+        workspace_id=wid,
+        workspace_snapshot_id=sid,
+        phase="restore",
+    )
+
+
 def _execute_job_body(
     session: Session,
     orchestrator: OrchestratorService,
@@ -845,6 +1095,14 @@ def _execute_job_body(
         from app.services.reconcile_service.reconcile_runtime import execute_reconcile_runtime_job
 
         execute_reconcile_runtime_job(session, orchestrator, ws, job)
+        return
+
+    if jt == WorkspaceJobType.SNAPSHOT_CREATE.value:
+        _execute_snapshot_create_job(session, orchestrator, ws, job)
+        return
+
+    if jt == WorkspaceJobType.SNAPSHOT_RESTORE.value:
+        _execute_snapshot_restore_job(session, orchestrator, ws, job)
         return
 
     raise UnsupportedWorkspaceJobTypeError(f"Unsupported WorkspaceJob.type={jt!r}")
@@ -1066,7 +1324,15 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
             },
         )
         msg = str(e)
-        stage = FailureStage.CONTAINER
+        stage = (
+            FailureStage.STORAGE
+            if jt
+            in (
+                WorkspaceJobType.SNAPSHOT_CREATE.value,
+                WorkspaceJobType.SNAPSHOT_RESTORE.value,
+            )
+            else FailureStage.CONTAINER
+        )
         retry = orchestrator_exception_retryable(jt)
         if isinstance(e, (WorkspaceStopError, WorkspaceDeleteError)):
             retry = False
@@ -1086,10 +1352,26 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
             _touch_workspace(session, ws)
         else:
             _mark_job_failed(session, job, msg, failure_stage=stage.value, failure_code=_ERROR_CODE_ORCH)
-            ws.status = WorkspaceStatus.ERROR.value
-            _workspace_set_error(ws, _ERROR_CODE_ORCH, msg)
-            _touch_workspace(session, ws)
-            _clear_runtime_capacity_reservation(session, wid)
+            if jt == WorkspaceJobType.SNAPSHOT_CREATE.value and job.workspace_snapshot_id is not None:
+                snap = session.get(WorkspaceSnapshot, job.workspace_snapshot_id)
+                if snap is not None and snap.status == WorkspaceSnapshotStatus.CREATING.value:
+                    snap.status = WorkspaceSnapshotStatus.FAILED.value
+                    session.add(snap)
+            elif jt == WorkspaceJobType.SNAPSHOT_RESTORE.value and job.workspace_snapshot_id is not None:
+                snap = session.get(WorkspaceSnapshot, job.workspace_snapshot_id)
+                if snap is not None:
+                    snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
+                    session.add(snap)
+            if jt not in (
+                WorkspaceJobType.SNAPSHOT_CREATE.value,
+                WorkspaceJobType.SNAPSHOT_RESTORE.value,
+            ):
+                ws.status = WorkspaceStatus.ERROR.value
+                _workspace_set_error(ws, _ERROR_CODE_ORCH, msg)
+                _touch_workspace(session, ws)
+                _clear_runtime_capacity_reservation(session, wid)
+            else:
+                _touch_workspace(session, ws)
     except UnsupportedWorkspaceJobTypeError as e:
         logger.error(
             "workspace_job_unsupported_type",

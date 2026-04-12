@@ -43,6 +43,8 @@ def lifecycle_result_failure_retryable(job_type: str | None) -> bool:
         WorkspaceJobType.START.value,
         WorkspaceJobType.RESTART.value,
         WorkspaceJobType.UPDATE.value,
+        WorkspaceJobType.SNAPSHOT_CREATE.value,
+        WorkspaceJobType.SNAPSHOT_RESTORE.value,
     }
 
 
@@ -55,6 +57,8 @@ def orchestrator_exception_retryable(job_type: str | None) -> bool:
         WorkspaceJobType.RESTART.value,
         WorkspaceJobType.UPDATE.value,
         WorkspaceJobType.RECONCILE_RUNTIME.value,
+        WorkspaceJobType.SNAPSHOT_CREATE.value,
+        WorkspaceJobType.SNAPSHOT_RESTORE.value,
     }
 
 

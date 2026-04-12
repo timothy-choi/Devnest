@@ -13,9 +13,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
+import tarfile
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.probes.interfaces import ProbeRunner
@@ -40,6 +43,7 @@ from .errors import (
     WorkspaceBringUpError,
     WorkspaceDeleteError,
     WorkspaceRestartError,
+    WorkspaceSnapshotError,
     WorkspaceStopError,
     WorkspaceUpdateError,
 )
@@ -48,6 +52,7 @@ from .results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
     WorkspaceRestartResult,
+    WorkspaceSnapshotOperationResult,
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
@@ -904,6 +909,153 @@ class DefaultOrchestratorService(OrchestratorService):
             internal_endpoint=health.internal_endpoint,
             probe_healthy=health.healthy,
             issues=_issues_or_none(issue_msgs),
+        )
+
+    def _workspace_project_path_for_snapshot(self, workspace_id: str) -> str:
+        wid = (workspace_id or "").strip()
+        if not wid:
+            raise WorkspaceSnapshotError("workspace_id is empty")
+        _parse_topology_workspace_id(wid)
+        try:
+            return self._ensure_workspace_project_dir(self._workspace_projects_base, wid)
+        except ValueError as e:
+            raise WorkspaceSnapshotError(str(e)) from e
+
+    @staticmethod
+    def _safe_snapshot_tar_extract(tf: tarfile.TarFile, dest: Path) -> None:
+        """Reject member paths that escape ``dest`` (tar slip). Symlinks in archives are a TODO for V1."""
+        dest_resolved = dest.resolve()
+        dest_resolved.mkdir(parents=True, exist_ok=True)
+        for m in tf.getmembers():
+            name = (m.name or "").strip()
+            if not name or name.startswith("/"):
+                raise WorkspaceSnapshotError(f"snapshot:import:unsafe_path:{name!r}")
+            target = (dest_resolved / name).resolve()
+            if target != dest_resolved and dest_resolved not in target.parents:
+                raise WorkspaceSnapshotError(f"snapshot:import:unsafe_path:{name!r}")
+        if sys.version_info >= (3, 12):
+            tf.extractall(path=str(dest_resolved), filter="data")
+        else:
+            tf.extractall(path=str(dest_resolved))
+
+    def export_workspace_filesystem_snapshot(
+        self,
+        *,
+        workspace_id: str,
+        archive_path: str,
+    ) -> WorkspaceSnapshotOperationResult:
+        wid = (workspace_id or "").strip()
+        try:
+            root = self._workspace_project_path_for_snapshot(wid)
+        except WorkspaceSnapshotError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid or (workspace_id or ""),
+                success=False,
+                issues=[str(e)],
+            )
+
+        dest = Path(archive_path).expanduser().resolve()
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=[f"snapshot:export:mkdir_failed:{e}"],
+            )
+
+        root_path = Path(root).resolve()
+        if not root_path.is_dir():
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=["snapshot:export:project_dir_missing"],
+            )
+
+        try:
+            with tarfile.open(dest, "w:gz", format=tarfile.PAX_FORMAT) as tf:
+                for path in sorted(root_path.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    try:
+                        arcname = path.relative_to(root_path).as_posix()
+                    except ValueError:
+                        continue
+                    tf.add(path, arcname=arcname, recursive=False)
+        except OSError as e:
+            try:
+                if dest.is_file():
+                    dest.unlink()
+            except OSError:
+                pass
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=[f"snapshot:export:io_error:{e}"],
+            )
+
+        try:
+            size_bytes = int(dest.stat().st_size)
+        except OSError:
+            size_bytes = None
+
+        log_event(
+            logger,
+            LogEvent.ORCHESTRATOR_SNAPSHOT_EXPORT_SUCCEEDED,
+            workspace_id=wid,
+            size_bytes=size_bytes,
+        )
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=wid,
+            success=True,
+            size_bytes=size_bytes,
+            issues=None,
+        )
+
+    def import_workspace_filesystem_snapshot(
+        self,
+        *,
+        workspace_id: str,
+        archive_path: str,
+    ) -> WorkspaceSnapshotOperationResult:
+        wid = (workspace_id or "").strip()
+        try:
+            dest_root = Path(self._workspace_project_path_for_snapshot(wid)).resolve()
+        except WorkspaceSnapshotError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid or (workspace_id or ""),
+                success=False,
+                issues=[str(e)],
+            )
+
+        src = Path(archive_path).expanduser().resolve()
+        if not src.is_file():
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=["snapshot:import:archive_missing"],
+            )
+
+        try:
+            with tarfile.open(src, "r:*") as tf:
+                self._safe_snapshot_tar_extract(tf, dest_root)
+        except (OSError, tarfile.TarError, WorkspaceSnapshotError) as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=[f"snapshot:import:failed:{e}"],
+            )
+
+        log_event(
+            logger,
+            LogEvent.ORCHESTRATOR_SNAPSHOT_IMPORT_SUCCEEDED,
+            workspace_id=wid,
+        )
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=wid,
+            success=True,
+            size_bytes=int(src.stat().st_size),
+            issues=None,
         )
 
     def _update_workspace_runtime_noop(

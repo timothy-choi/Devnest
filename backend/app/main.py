@@ -15,6 +15,8 @@ from app.services.infrastructure_service.api.routers import internal_execution_n
 from app.services.workspace_service.api.routers import (
     internal_workspace_jobs_router,
     internal_workspace_reconcile_router,
+    snapshots_router,
+    workspace_snapshots_router,
     workspaces_router,
 )
 
@@ -31,6 +33,8 @@ app.include_router(observability_router)
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(workspaces_router)
+app.include_router(workspace_snapshots_router)
+app.include_router(snapshots_router)
 app.include_router(notifications_router)
 app.include_router(internal_notifications_router)
 app.include_router(internal_workspace_jobs_router)

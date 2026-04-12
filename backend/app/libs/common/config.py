@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     workspace_container_image: str = ""
     # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
     workspace_projects_base: str = ""
+    # Root directory for snapshot archives (local filesystem provider). Empty → system temp / devnest-snapshots.
+    devnest_snapshot_storage_root: str = ""
 
     # Standalone gateway route-admin (data plane): register/deregister workspace routes after orchestration.
     # DEVNEST_GATEWAY_URL is the route-admin HTTP base (not Traefik's public :80). Default matches compose

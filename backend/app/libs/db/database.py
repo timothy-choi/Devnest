@@ -29,6 +29,7 @@ from ...services.workspace_service.models import (  # noqa: F401 — register me
     WorkspaceJob,
     WorkspaceRuntime,
     WorkspaceSession,
+    WorkspaceSnapshot,
 )
 
 _engine = None

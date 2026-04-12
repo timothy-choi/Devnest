@@ -78,6 +78,13 @@ class LogEvent:
     ORCHESTRATOR_BRINGUP_STARTED = "orchestrator.bringup.started"
     ORCHESTRATOR_BRINGUP_SUCCEEDED = "orchestrator.bringup.succeeded"
     ORCHESTRATOR_BRINGUP_FAILED = "orchestrator.bringup.failed"
+    ORCHESTRATOR_SNAPSHOT_EXPORT_SUCCEEDED = "orchestrator.snapshot.export_succeeded"
+    ORCHESTRATOR_SNAPSHOT_IMPORT_SUCCEEDED = "orchestrator.snapshot.import_succeeded"
+
+    WORKSPACE_SNAPSHOT_CREATED = "workspace.snapshot.created"
+    WORKSPACE_SNAPSHOT_FAILED = "workspace.snapshot.failed"
+    WORKSPACE_SNAPSHOT_RESTORED = "workspace.snapshot.restored"
+    WORKSPACE_SNAPSHOT_DELETED = "workspace.snapshot.deleted"
 
     GATEWAY_ROUTE_REGISTERED = "gateway.route.registered"
     GATEWAY_ROUTE_DEREGISTERED = "gateway.route.deregistered"

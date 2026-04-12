@@ -13,6 +13,12 @@ class WorkspaceJob(SQLModel, table=True):
 
     workspace_job_id: int | None = Field(default=None, primary_key=True)
     workspace_id: int = Field(foreign_key="workspace.workspace_id", index=True)
+    workspace_snapshot_id: int | None = Field(
+        default=None,
+        foreign_key="workspace_snapshot.workspace_snapshot_id",
+        index=True,
+        description="Set for SNAPSHOT_CREATE / SNAPSHOT_RESTORE jobs.",
+    )
     job_type: str = Field(
         sa_column=Column("type", String(32), nullable=False, index=True),
     )
