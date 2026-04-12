@@ -61,6 +61,15 @@ logger = logging.getLogger(__name__)
 _EnsureWorkspaceProjectDir = Callable[[str, str], str]
 
 
+def _env_skip_linux_topology_attachment() -> bool:
+    """True when ``DbTopologyAdapter`` skips Linux veth wiring (same truthiness as adapter env check)."""
+    return os.environ.get("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 @dataclass(frozen=True)
 class _BringUpContext:
     """Validated bring-up inputs; ``workspace_host_path`` is on the execution host (local or remote)."""
@@ -209,7 +218,7 @@ class DefaultOrchestratorService(OrchestratorService):
         )
 
     def _bring_up_start_container(self, ctx: _BringUpContext) -> EnsureRunningRuntimeResult:
-        """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns)."""
+        """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns unless skip-linux-attach)."""
         try:
             return ensure_running_runtime_only(
                 self._runtime_adapter,
@@ -218,6 +227,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
                 labels=ctx.labels,
                 workspace_host_path=ctx.workspace_host_path,
+                skip_netns_resolution=_env_skip_linux_topology_attachment(),
             )
         except RuntimeAdapterError as e:
             raise WorkspaceBringUpError(f"runtime bring-up failed: {e}") from e
@@ -238,7 +248,16 @@ class DefaultOrchestratorService(OrchestratorService):
                 node_id=self._node_id,
                 workspace_id=ctx.ws_int,
             )
-            netns = self._runtime_adapter.get_container_netns_ref(container_id=running.container_id)
+            # When Linux veth attachment is disabled, ``ensure_running_runtime_only`` already used a
+            # placeholder netns; reuse it (no second ``get_container_netns_ref``).
+            if _env_skip_linux_topology_attachment():
+                netns = NetnsRefResult(
+                    container_id=running.container_id,
+                    pid=running.pid,
+                    netns_ref=running.netns_ref,
+                )
+            else:
+                netns = self._runtime_adapter.get_container_netns_ref(container_id=running.container_id)
             attach_res = self._topology_service.attach_workspace(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
@@ -249,6 +268,8 @@ class DefaultOrchestratorService(OrchestratorService):
             )
         except TopologyError as e:
             raise WorkspaceBringUpError(f"topology bring-up failed: {e}") from e
+        except RuntimeAdapterError as e:
+            raise WorkspaceBringUpError(f"runtime topology handoff failed: {e}") from e
         return netns, attach_res
 
     def _bring_up_run_probe(

@@ -8,9 +8,13 @@ from .errors import ContainerCreateError, ContainerStartError
 from .interfaces import RuntimeAdapter
 from .models import (
     EnsureRunningRuntimeResult,
+    NetnsRefResult,
     WorkspaceExtraBindMountSpec,
     WorkspaceProjectMountSpec,
 )
+
+# Placeholder when ``skip_netns_resolution=True`` (CI / dev: Linux veth attachment disabled).
+_SKIP_NETNS_PLACEHOLDER_REF = "/devnest-skip-linux-topology-attachment"
 
 
 def ensure_running_runtime_only(
@@ -27,15 +31,17 @@ def ensure_running_runtime_only(
     workspace_host_path: str | None = None,
     extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None = None,
     existing_container_id: str | None = None,
+    skip_netns_resolution: bool = False,
 ) -> EnsureRunningRuntimeResult:
     """
     Narrow orchestrator slice: bring a container to a running state and collect runtime facts.
 
     **Call order:** ``ensure_container`` → ``start_container`` → ``inspect_container`` →
-    ``get_container_netns_ref`` (all via ``runtime``).
+    ``get_container_netns_ref`` (skipped when ``skip_netns_resolution`` is true).
 
     **Raises:** ``ContainerCreateError`` (empty id after ensure), ``ContainerStartError`` (start
-    not successful), ``NetnsRefError`` (from ``get_container_netns_ref`` if PID/netns unavailable).
+    not successful), ``NetnsRefError`` (from ``get_container_netns_ref`` if PID/netns unavailable,
+    unless ``skip_netns_resolution``).
 
     Does not write the database, attach topology, compute public URLs, or register gateway routes.
     Callers persist workspace / routing state separately.
@@ -61,7 +67,15 @@ def ensure_running_runtime_only(
         raise ContainerStartError(start_res.message or "container did not reach running state")
 
     inspected = runtime.inspect_container(container_id=ensure_res.container_id)
-    netns = runtime.get_container_netns_ref(container_id=ensure_res.container_id)
+    cid_for_netns = inspected.container_id or ensure_res.container_id
+    if skip_netns_resolution:
+        netns = NetnsRefResult(
+            container_id=cid_for_netns,
+            pid=0,
+            netns_ref=_SKIP_NETNS_PLACEHOLDER_REF,
+        )
+    else:
+        netns = runtime.get_container_netns_ref(container_id=ensure_res.container_id)
 
     container_id = inspected.container_id or ensure_res.container_id
     resolved_ports = inspected.ports if inspected.ports else ensure_res.resolved_ports
