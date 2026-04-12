@@ -27,6 +27,9 @@ from app.services.auth_service.services.oauth_service import (
 from app.services.auth_service.services.oauth_state import OAuthStateError
 from app.services.auth_service.services.delete_account_service import InvalidAccountPasswordError, delete_account_for_current_user
 
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
+
 from ..dependencies import get_current_user, get_db
 from ..schemas import (
     AuthProfileResponse,
@@ -138,6 +141,16 @@ def register(body: RegisterRequest, session: Session = Depends(get_db)) -> Regis
     except DuplicateEmailError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered") from None
     assert user.user_auth_id is not None
+    record_audit(
+        session,
+        action=AuditAction.USER_REGISTERED.value,
+        resource_type="user",
+        resource_id=user.user_auth_id,
+        actor_user_id=user.user_auth_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+    )
+    session.commit()
     return RegisterResponse(
         user_auth_id=user.user_auth_id,
         username=user.username,
@@ -282,9 +295,25 @@ def delete_account(
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
 ) -> DeleteAccountResponse:
+    assert current.user_auth_id is not None
+    uid = current.user_auth_id
+    # Record audit BEFORE the delete so actor_user_id FK is still valid when we flush.
+    # delete_account_for_current_user commits the transaction (including this flush).
+    # The ON DELETE SET NULL FK on audit_log.actor_user_id then nulls the reference
+    # when the user row is removed in the same commit.
+    record_audit(
+        session,
+        action=AuditAction.USER_DELETED.value,
+        resource_type="user",
+        resource_id=uid,
+        actor_user_id=uid,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+    )
     try:
         delete_account_for_current_user(session, current, password=body.password)
     except InvalidAccountPasswordError:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Password required or invalid",

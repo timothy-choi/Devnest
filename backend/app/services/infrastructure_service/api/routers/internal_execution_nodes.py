@@ -17,6 +17,8 @@ from app.libs.db.database import get_db
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.security.dependencies import require_internal_api_key
 from app.libs.security.internal_auth import InternalApiScope
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
 from app.services.placement_service.errors import ExecutionNodeNotFoundError
 from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
 
@@ -142,6 +144,16 @@ def post_register_existing_ec2(
             ssh_user=body.ssh_user,
             execution_mode=body.execution_mode,
         )
+        record_audit(
+            session,
+            action=AuditAction.NODE_REGISTERED.value,
+            resource_type="node",
+            resource_id=node.node_key,
+            actor_type=AuditActorType.INTERNAL_SERVICE.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            node_id=node.node_key,
+            metadata={"instance_id": body.instance_id.strip(), "execution_mode": body.execution_mode},
+        )
         session.commit()
         session.refresh(node)
     except Ec2InvalidInstanceIdError as e:
@@ -209,6 +221,15 @@ def post_deregister_execution_node(
     _audit_mutation("deregister", node_id=body.node_id, node_key=body.node_key)
     try:
         node = deregister_node(session, **_select_kwargs(body))
+        record_audit(
+            session,
+            action=AuditAction.NODE_DEREGISTERED.value,
+            resource_type="node",
+            resource_id=node.node_key,
+            actor_type=AuditActorType.INTERNAL_SERVICE.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            node_id=node.node_key,
+        )
         session.commit()
         session.refresh(node)
     except ExecutionNodeNotFoundError as e:
@@ -228,6 +249,16 @@ def post_terminate_execution_node(
     _audit_mutation("terminate", node_id=body.node_id, node_key=body.node_key)
     try:
         node = terminate_ec2_node(session, **_select_kwargs(body))
+        record_audit(
+            session,
+            action=AuditAction.NODE_TERMINATED.value,
+            resource_type="node",
+            resource_id=node.node_key,
+            actor_type=AuditActorType.INTERNAL_SERVICE.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            node_id=node.node_key,
+            metadata={"instance_id": node.provider_instance_id or None},
+        )
         session.commit()
         session.refresh(node)
     except ExecutionNodeNotFoundError as e:
