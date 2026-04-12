@@ -76,6 +76,7 @@ from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
     record_workspace_event,
 )
+from app.services.workspace_service.services.workspace_session_service import revoke_all_workspace_sessions
 
 from app.libs.common.config import get_settings
 from app.libs.observability.correlation import correlation_scope
@@ -508,6 +509,12 @@ def _finalize_runtime_running_success(
     ws.endpoint_ref = internal_endpoint or ws.endpoint_ref
     ws.last_started = _now()
     _touch_workspace(session, ws)
+    revoke_all_workspace_sessions(
+        session,
+        wid,
+        reason="worker.runtime_running",
+        correlation_id=job.correlation_id,
+    )
     _gateway_try_register_running(ws, internal_endpoint)
 
 
@@ -550,6 +557,12 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
         _workspace_clear_errors(ws)
         ws.last_stopped = _now()
         _touch_workspace(session, ws)
+        revoke_all_workspace_sessions(
+            session,
+            wid,
+            reason="worker.stop",
+            correlation_id=job.correlation_id,
+        )
         _gateway_try_deregister(wid)
         return
 
@@ -566,6 +579,12 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
         _workspace_clear_errors(ws)
         _clear_runtime_after_delete(session, wid)
         _touch_workspace(session, ws)
+        revoke_all_workspace_sessions(
+            session,
+            wid,
+            reason="worker.delete",
+            correlation_id=job.correlation_id,
+        )
         _gateway_try_deregister(wid)
         return
 
@@ -649,6 +668,12 @@ def _finalize_update_result(
         _workspace_clear_errors(ws)
         ws.status_reason = _truncate(msg, 1024)
         _touch_workspace(session, ws)
+        revoke_all_workspace_sessions(
+            session,
+            wid,
+            reason="worker.update_noop_stopped",
+            correlation_id=job.correlation_id,
+        )
         return
 
     _finalize_job_failed_workspace_error(session, ws, job, message=msg)

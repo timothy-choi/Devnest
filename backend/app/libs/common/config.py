@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
+    # Opaque workspace session tokens (attach → access); hashed at rest with HMAC-SHA256(jwt_secret_key, token).
+    workspace_session_ttl_seconds: int = 86400
     password_reset_token_expire_minutes: int = 60
     # If true, PUT /auth/forgot-password includes reset_token in JSON (local/testing only; use email in production).
     password_reset_return_token: bool = False

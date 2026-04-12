@@ -15,6 +15,7 @@ from app.services.workspace_service.models import (
     WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
 )
+from app.services.workspace_service.services.workspace_session_service import WORKSPACE_SESSION_HTTP_HEADER
 
 ENDPOINT_REF = "node-1:12345"
 PUBLIC_HOST = "ws-123.devnest.local"
@@ -34,6 +35,13 @@ def _register_and_token(client, *, username: str, email: str) -> tuple[int, str]
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _auth_and_ws_session(access_token: str, workspace_session_token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        WORKSPACE_SESSION_HTTP_HEADER: workspace_session_token,
+    }
 
 
 def _seed_ready_workspace_with_runtime(
@@ -99,6 +107,7 @@ def test_post_attach_200_reflects_persisted_workspace_and_runtime(client, db_ses
     assert data["gateway_url"] is None
     assert data["issues"] == []
     assert data["active_sessions_count"] == 1
+    assert data["session_token"].startswith("dnws_")
 
     ws = db_session.get(Workspace, wid)
     assert ws is not None
@@ -113,9 +122,13 @@ def test_get_access_200_reflects_persisted_rows_and_does_not_bump_sessions(
     db_session: Session,
 ) -> None:
     uid, token = _register_and_token(client, username="int_access_ok", email="int_access_ok@example.com")
-    wid = _seed_ready_workspace_with_runtime(db_session, uid, active_sessions_count=6)
+    wid = _seed_ready_workspace_with_runtime(db_session, uid, active_sessions_count=0)
 
-    r = client.get(f"/workspaces/{wid}/access", headers=_auth(token))
+    att = client.post(f"/workspaces/attach/{wid}", headers=_auth(token))
+    assert att.status_code == status.HTTP_200_OK, att.text
+    ws_tok = att.json()["session_token"]
+
+    r = client.get(f"/workspaces/{wid}/access", headers=_auth_and_ws_session(token, ws_tok))
     assert r.status_code == status.HTTP_200_OK, r.text
     data = r.json()
     assert data["success"] is True
@@ -130,7 +143,22 @@ def test_get_access_200_reflects_persisted_rows_and_does_not_bump_sessions(
 
     ws = db_session.get(Workspace, wid)
     assert ws is not None
-    assert ws.active_sessions_count == 6
+    assert ws.active_sessions_count == 1
+
+    r2 = client.get(f"/workspaces/{wid}/access", headers=_auth_and_ws_session(token, ws_tok))
+    assert r2.status_code == status.HTTP_200_OK, r2.text
+    ws2 = db_session.get(Workspace, wid)
+    assert ws2 is not None
+    assert ws2.active_sessions_count == 1
+
+
+def test_get_access_403_without_workspace_session(client, db_session: Session) -> None:
+    uid, token = _register_and_token(client, username="int_access_403", email="int_access_403@example.com")
+    wid = _seed_ready_workspace_with_runtime(db_session, uid)
+
+    r = client.get(f"/workspaces/{wid}/access", headers=_auth(token))
+    assert r.status_code == status.HTTP_403_FORBIDDEN
+    assert "session" in r.json()["detail"].lower()
 
 
 def test_post_attach_404_missing_workspace(client, db_session: Session) -> None:

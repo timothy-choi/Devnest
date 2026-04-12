@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.errors import (
+    WorkspaceAccessDeniedError,
     WorkspaceBusyError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
@@ -121,6 +122,8 @@ def test_request_attach_happy_path_persists_session_count_and_matches_runtime(
     assert out.gateway_url is None
     assert out.issues == ()
     assert out.active_sessions_count == 1
+    assert out.session_token.startswith("dnws_")
+    assert out.workspace_session_id >= 1
 
     ws = db_session.get(Workspace, wid)
     assert ws is not None
@@ -135,12 +138,21 @@ def test_request_attach_happy_path_persists_session_count_and_matches_runtime(
 
 def test_get_workspace_access_happy_path_read_only_matches_persisted_rows(db_session: Session) -> None:
     owner_id = _seed_owner(db_session)
-    wid = _seed_ready_workspace_with_runtime(db_session, owner_id, active_sessions_count=4)
+    wid = _seed_ready_workspace_with_runtime(db_session, owner_id, active_sessions_count=0)
+
+    att = workspace_intent_service.request_attach_workspace(
+        db_session,
+        workspace_id=wid,
+        owner_user_id=owner_id,
+        requested_by_user_id=owner_id,
+    )
+    tok = att.session_token
 
     out = workspace_intent_service.get_workspace_access(
         db_session,
         workspace_id=wid,
         owner_user_id=owner_id,
+        workspace_session_token=tok,
     )
 
     assert out.success is True
@@ -155,7 +167,20 @@ def test_get_workspace_access_happy_path_read_only_matches_persisted_rows(db_ses
 
     ws = db_session.get(Workspace, wid)
     assert ws is not None
-    assert ws.active_sessions_count == 4
+    assert ws.active_sessions_count == 1
+
+
+def test_get_workspace_access_requires_session_token(db_session: Session) -> None:
+    owner_id = _seed_owner(db_session)
+    wid = _seed_ready_workspace_with_runtime(db_session, owner_id)
+
+    with pytest.raises(WorkspaceAccessDeniedError, match="session token required"):
+        workspace_intent_service.get_workspace_access(
+            db_session,
+            workspace_id=wid,
+            owner_user_id=owner_id,
+            workspace_session_token=None,
+        )
 
 
 def test_attach_rejected_when_stopped_even_if_runtime_row_exists(db_session: Session) -> None:
@@ -181,6 +206,7 @@ def test_access_rejected_when_stopped_even_if_runtime_row_exists(db_session: Ses
             db_session,
             workspace_id=wid,
             owner_user_id=owner_id,
+            workspace_session_token=None,
         )
 
 
@@ -216,6 +242,7 @@ def test_attach_access_rejected_when_running_without_runtime_row(db_session: Ses
             db_session,
             workspace_id=wid,
             owner_user_id=owner_id,
+            workspace_session_token=None,
         )
 
 
@@ -235,6 +262,7 @@ def test_attach_access_rejected_when_container_id_blank(db_session: Session) -> 
             db_session,
             workspace_id=wid,
             owner_user_id=owner_id,
+            workspace_session_token=None,
         )
 
 
@@ -254,6 +282,7 @@ def test_attach_access_busy_status_before_runtime_checks(db_session: Session) ->
             db_session,
             workspace_id=wid,
             owner_user_id=owner_id,
+            workspace_session_token=None,
         )
 
 
@@ -277,6 +306,7 @@ def test_access_workspace_not_found(db_session: Session) -> None:
             db_session,
             workspace_id=99_999_999,
             owner_user_id=owner_id,
+            workspace_session_token=None,
         )
 
 
@@ -307,6 +337,7 @@ def test_attach_access_wrong_owner(db_session: Session) -> None:
             db_session,
             workspace_id=wid,
             owner_user_id=other_id,
+            workspace_session_token=None,
         )
 
 
@@ -318,16 +349,6 @@ def test_access_reflects_non_healthy_runtime_issue(db_session: Session) -> None:
         health_status=WorkspaceRuntimeHealthStatus.DEGRADED.value,
     )
 
-    out = workspace_intent_service.get_workspace_access(
-        db_session,
-        workspace_id=wid,
-        owner_user_id=owner_id,
-    )
-    assert out.success is True
-    assert out.runtime_ready is True
-    assert len(out.issues) == 1
-    assert "access:runtime:health:" in out.issues[0]
-
     attach_out = workspace_intent_service.request_attach_workspace(
         db_session,
         workspace_id=wid,
@@ -336,3 +357,14 @@ def test_access_reflects_non_healthy_runtime_issue(db_session: Session) -> None:
     )
     assert attach_out.accepted is True
     assert len(attach_out.issues) == 1
+
+    out = workspace_intent_service.get_workspace_access(
+        db_session,
+        workspace_id=wid,
+        owner_user_id=owner_id,
+        workspace_session_token=attach_out.session_token,
+    )
+    assert out.success is True
+    assert out.runtime_ready is True
+    assert len(out.issues) == 1
+    assert "access:runtime:health:" in out.issues[0]

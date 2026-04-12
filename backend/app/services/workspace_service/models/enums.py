@@ -51,3 +51,17 @@ class WorkspaceRuntimeHealthStatus(str, Enum):
     HEALTHY = "HEALTHY"
     DEGRADED = "DEGRADED"
     UNHEALTHY = "UNHEALTHY"
+
+
+class WorkspaceSessionStatus(str, Enum):
+    """Lifecycle for :class:`~app.services.workspace_service.models.workspace_session.WorkspaceSession`."""
+
+    ACTIVE = "ACTIVE"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+
+
+class WorkspaceSessionRole(str, Enum):
+    """V1: only ``OWNER`` is issued; collaborators / org roles are deferred."""
+
+    OWNER = "OWNER"

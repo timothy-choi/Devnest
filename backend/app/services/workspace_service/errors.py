@@ -23,3 +23,9 @@ class WorkspaceInvalidStateError(WorkspaceServiceError):
     """Requested operation is not valid for the current workspace status."""
 
     pass
+
+
+class WorkspaceAccessDeniedError(WorkspaceServiceError):
+    """Caller is authenticated but lacks a valid workspace session for access coordinates."""
+
+    pass
