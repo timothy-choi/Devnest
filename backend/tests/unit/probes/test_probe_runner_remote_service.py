@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from app.libs.probes.constants import ProbeIssueCode
 from app.libs.probes.probe_runner import DefaultProbeRunner
-from app.libs.probes.results import ProbeIssueCode
 
 
 def test_remote_service_probe_uses_runner_ipv4() -> None:
