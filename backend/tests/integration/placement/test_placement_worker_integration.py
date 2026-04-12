@@ -73,10 +73,7 @@ def _seed_create_job(session: Session, owner_id: int) -> tuple[int, int]:
     return ws.workspace_id, job.workspace_job_id
 
 
-def test_create_job_fails_when_placement_raises(
-    db_session: Session,
-    patch_worker_now: None,
-) -> None:
+def test_create_job_fails_when_placement_raises(db_session: Session) -> None:
     """Reserve failure happens before Docker; job should end FAILED with placement code."""
     owner = _seed_owner(db_session)
     _wid, jid = _seed_create_job(db_session, owner)
