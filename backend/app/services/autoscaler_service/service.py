@@ -98,8 +98,15 @@ def _count_idle_ec2_nodes(session: Session) -> int:
     """Count READY+schedulable EC2 nodes that have zero active workload placements.
 
     Used for cost-aware scale-up suppression: if idle nodes already exist there is no
-    reason to provision more capacity.  "Idle" = zero non-deleted workspace_runtime
-    placements (same cohort the autoscaler uses for scale-down candidate selection).
+    reason to provision more capacity.
+
+    **Cohort note:** uses ``_workload_counts_by_node_keys`` which excludes only DELETED
+    workspaces (STOPPED workspaces count as pinning the node).  This is intentionally more
+    conservative than the scheduler's ``count_active_workloads_on_node_key`` (which also
+    excludes STOPPED and ERROR): a node with only STOPPED workspaces is NOT considered idle
+    for scale-up suppression because those workspaces may restart at any moment.  If we
+    considered it idle and suppressed scale-up, a burst restart could immediately exhaust
+    effective capacity on that node, requiring a new provision cycle anyway.
     """
     stmt = (
         select(ExecutionNode)
@@ -172,7 +179,8 @@ def evaluate_scale_up(
             reason="capacity not marked insufficient",
             provisioning_in_flight=in_flight,
         )
-    if _provider_allows_ec2_autoscale():
+    ec2_allowed = _provider_allows_ec2_autoscale()
+    if ec2_allowed:
         try:
             ec2_preds = [
                 *schedulable_placement_predicates(),
@@ -192,7 +200,7 @@ def evaluate_scale_up(
                 "provisioning_in_flight": in_flight,
             },
         )
-    if not _provider_allows_ec2_autoscale():
+    if not ec2_allowed:
         return ScaleUpEvaluation(
             should_provision=False,
             reason="devnest_node_provider is local-only; EC2 autoscale skipped",
@@ -314,12 +322,20 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
     n_ready = count_ec2_ready_schedulable(session)
     min_ready_required = _min_ready_ec2_before_reclaim()
     if n_ready < min_ready_required:
+        reason = (
+            f"READY+schedulable EC2 count {n_ready} below minimum {min_ready_required} "
+            f"(devnest_autoscaler_min_ec2_nodes_before_reclaim; last-node safety)"
+        )
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_DOWN_SUPPRESSED,
+            idle_ec2_ready_nodes=n_ready,
+            min_ready_required=min_ready_required,
+            detail=reason,
+        )
         return ScaleDownEvaluation(
             node_key=None,
-            reason=(
-                f"READY+schedulable EC2 count {n_ready} below minimum {min_ready_required} "
-                f"(devnest_autoscaler_min_ec2_nodes_before_reclaim; last-node safety)"
-            ),
+            reason=reason,
             idle_ec2_ready_nodes=n_ready,
         )
     stmt = (

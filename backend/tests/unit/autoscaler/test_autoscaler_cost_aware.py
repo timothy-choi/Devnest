@@ -85,6 +85,23 @@ class TestScaleUpIdleNodeSuppression:
         assert ev.should_provision is False
         assert ev.idle_ec2_node_count == 0
 
+    @patch("app.services.autoscaler_service.service._count_idle_ec2_nodes")
+    @patch("app.services.autoscaler_service.service.count_ec2_provisioning_nodes", return_value=0)
+    @patch("app.services.autoscaler_service.service.get_settings")
+    def test_insufficient_capacity_false_never_queries_idle_nodes(
+        self, mock_settings: MagicMock, _prov: MagicMock, mock_idle: MagicMock
+    ) -> None:
+        """When insufficient_capacity=False, evaluation returns before checking idle nodes."""
+        mock_settings.return_value = SimpleNamespace(
+            devnest_autoscaler_enabled=True,
+            devnest_node_provider="ec2",
+            devnest_autoscaler_max_concurrent_provisioning=3,
+        )
+        ev = evaluate_scale_up(MagicMock(), insufficient_capacity=False)
+        assert ev.should_provision is False
+        assert "capacity not marked insufficient" in ev.reason
+        mock_idle.assert_not_called()
+
     @patch("app.services.autoscaler_service.service.count_ec2_provisioning_nodes", return_value=0)
     @patch("app.services.autoscaler_service.service._count_idle_ec2_nodes", return_value=1)
     @patch("app.services.autoscaler_service.service.get_settings")
@@ -208,7 +225,7 @@ class TestScaleDownSuppressedLog:
     )
     @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=3)
     @patch("app.services.autoscaler_service.service.get_settings")
-    def test_suppressed_log_event_emitted(
+    def test_suppressed_log_event_emitted_when_all_nodes_busy(
         self, mock_settings: MagicMock, _n_ready: MagicMock, _counts: MagicMock
     ) -> None:
         mock_settings.return_value = SimpleNamespace(devnest_autoscaler_min_ec2_nodes_before_reclaim=2)
@@ -227,6 +244,23 @@ class TestScaleDownSuppressedLog:
             ev = evaluate_scale_down(session)
 
         assert ev.node_key is None
+        from app.libs.observability.log_events import LogEvent
+        logged_events = [c.args[1] for c in mock_log.call_args_list]
+        assert LogEvent.AUTOSCALER_SCALE_DOWN_SUPPRESSED in logged_events
+
+    @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=1)
+    @patch("app.services.autoscaler_service.service.get_settings")
+    def test_suppressed_log_event_emitted_when_below_minimum_ready(
+        self, mock_settings: MagicMock, _n_ready: MagicMock
+    ) -> None:
+        """AUTOSCALER_SCALE_DOWN_SUPPRESSED must also fire for the last-node safety guard."""
+        mock_settings.return_value = SimpleNamespace(devnest_autoscaler_min_ec2_nodes_before_reclaim=2)
+
+        with patch("app.services.autoscaler_service.service.log_event") as mock_log:
+            ev = evaluate_scale_down(MagicMock())
+
+        assert ev.node_key is None
+        assert "last-node safety" in ev.reason
         from app.libs.observability.log_events import LogEvent
         logged_events = [c.args[1] for c in mock_log.call_args_list]
         assert LogEvent.AUTOSCALER_SCALE_DOWN_SUPPRESSED in logged_events

@@ -107,9 +107,16 @@ def select_node_for_workspace(
     ``allocatable_*`` minus sums of ``WorkspaceRuntime.reserved_*`` for workloads on that ``node_key``
     (workspace not ``STOPPED`` / ``DELETED`` / ``ERROR``).
 
-    Tie-break: highest effective free CPU, then effective free RAM, then ``node_key`` ascending.
+    **Sort policy (4 levels, descending priority):**
 
-    Keep ordering aligned with :func:`app.services.scheduler_service.policy.rank_candidate_nodes`.
+    1. ``effective_free_cpu DESC`` — capacity-first; prevents fragmentation on large requests.
+    2. ``effective_free_memory_mb DESC`` — secondary capacity dimension.
+    3. ``active_workload_count ASC`` — spread/anti-concentration; fewer active workloads preferred
+       when capacity is similar across candidates.
+    4. ``node_key ASC`` — stable tiebreak.
+
+    Must stay aligned with :func:`app.services.scheduler_service.policy.rank_candidate_nodes`
+    and :func:`app.services.scheduler_service.policy.scheduling_sort_key_spread`.
 
     ``workspace_id`` is accepted for future affinity / anti-affinity; unused in V1.
 
