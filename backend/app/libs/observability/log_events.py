@@ -119,6 +119,14 @@ class LogEvent:
     SECURITY_INTERNAL_AUTH_FAILED = "security.internal.auth_failed"
     SECURITY_INTERNAL_NOT_CONFIGURED = "security.internal.not_configured"
 
+    LIFESPAN_WORKER_STARTED = "lifespan.worker.started"
+    LIFESPAN_WORKER_STOPPED = "lifespan.worker.stopped"
+    LIFESPAN_WORKER_TICK = "lifespan.worker.tick"
+    # Aliases used in lifespan_worker.py (maps to same event strings as above).
+    WORKSPACE_JOB_WORKER_STARTED = "lifespan.worker.started"
+    WORKSPACE_JOB_WORKER_STOPPED = "lifespan.worker.stopped"
+    WORKSPACE_JOB_WORKER_TICK = "lifespan.worker.tick"
+
     WORKSPACE_SESSION_CREATED = "workspace.session.created"
     WORKSPACE_SESSION_REFRESHED = "workspace.session.refreshed"
     WORKSPACE_SESSION_EXPIRED = "workspace.session.expired"

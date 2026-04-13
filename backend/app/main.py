@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.libs.db.database import init_db
 from app.libs.observability.middleware import CorrelationIdMiddleware
+from app.workers.lifespan_worker import start_background_worker, stop_background_worker
 from app.libs.observability.routes import router as observability_router
 from app.services.audit_service.api.routers import router as audit_router
 from app.services.auth_service.api.routers.auth import router as auth_router
@@ -31,7 +32,11 @@ from app.services.workspace_service.api.routers import (
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    yield
+    start_background_worker()
+    try:
+        yield
+    finally:
+        await stop_background_worker()
 
 
 app = FastAPI(title="DevNest API", lifespan=lifespan)

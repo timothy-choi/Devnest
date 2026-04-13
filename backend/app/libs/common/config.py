@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     database_url: str
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
+    # When true, startup aborts if jwt_secret_key is the default placeholder value.
+    # Set DEVNEST_REQUIRE_SECRETS=true in staging and production environments.
+    # A loud WARNING is always emitted when the default secret is detected regardless of this flag.
+    devnest_require_secrets: bool = False
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 14
     # Opaque workspace session tokens (attach → access); hashed at rest with HMAC-SHA256(jwt_secret_key, token).
@@ -145,6 +149,17 @@ class Settings(BaseSettings):
     # Prefix for ``{prefix}:managed`` and ``{prefix}:node_key`` tags on provisioned instances.
     devnest_ec2_tag_prefix: str = "devnest"
 
+    # ── Built-in background job worker ──────────────────────────────────────────
+    # When true, the FastAPI process runs the job poll loop in an asyncio background
+    # task (no separate worker process required). Disabled by default so existing
+    # deployments that use the standalone `workspace_job_poll_loop` process or the
+    # POST /internal/workspace-jobs/process endpoint are unaffected.
+    devnest_worker_enabled: bool = False
+    # Seconds between job poll ticks. Values below 1 are coerced to 1.
+    devnest_worker_poll_interval_seconds: int = 5
+    # Max workspace jobs to dequeue and process per tick.
+    devnest_worker_batch_size: int = 5
+
     # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
     devnest_autoscaler_enabled: bool = False
     # When set with ``devnest_autoscaler_enabled``, worker triggers one EC2 provision on NoSchedulableNodeError.
@@ -153,6 +168,33 @@ class Settings(BaseSettings):
     # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist (last-node safety).
     # Values below 2 are coerced to 2 so scale-down cannot target the sole READY EC2 node via misconfiguration.
     devnest_autoscaler_min_ec2_nodes_before_reclaim: int = 2
+
+    @field_validator("devnest_worker_enabled", mode="before")
+    @classmethod
+    def _parse_devnest_worker_enabled(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @field_validator("devnest_worker_poll_interval_seconds", mode="before")
+    @classmethod
+    def _coerce_worker_poll_interval(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 5
+        return max(1, min(n, 3600))
+
+    @field_validator("devnest_worker_batch_size", mode="before")
+    @classmethod
+    def _coerce_worker_batch_size(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 5
+        return max(1, min(n, 50))
 
     @field_validator("devnest_autoscaler_enabled", "devnest_autoscaler_provision_on_no_capacity", mode="before")
     @classmethod
@@ -189,6 +231,38 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 0
         return max(0, min(n, 512))
+
+    @field_validator("devnest_require_secrets", mode="before")
+    @classmethod
+    def _parse_devnest_require_secrets(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @model_validator(mode="after")
+    def _validate_jwt_secret(self) -> Self:
+        """Warn (always) or abort (when DEVNEST_REQUIRE_SECRETS=true) if the JWT secret is insecure."""
+        import logging  # noqa: PLC0415
+
+        _DEFAULT = "change-me-in-production"
+        if self.jwt_secret_key == _DEFAULT:
+            logging.getLogger(__name__).warning(
+                "SECURITY WARNING: jwt_secret_key is set to the default placeholder value "
+                "'change-me-in-production'. This is insecure. Set the JWT_SECRET_KEY "
+                "environment variable to a strong, random value before deploying to production."
+            )
+            if self.devnest_require_secrets:
+                raise ValueError(
+                    "Insecure startup rejected: jwt_secret_key must not be the default value "
+                    "'change-me-in-production'. "
+                    "Set the JWT_SECRET_KEY environment variable to a cryptographically strong "
+                    "random string (e.g. `openssl rand -hex 32`). "
+                    "To disable this guard in non-production environments, set "
+                    "DEVNEST_REQUIRE_SECRETS=false."
+                )
+        return self
 
     @model_validator(mode="after")
     def _validate_internal_api_secret_lengths(self) -> Self:
