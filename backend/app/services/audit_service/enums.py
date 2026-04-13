@@ -76,3 +76,7 @@ class AuditAction(str, Enum):
     USER_LOGOUT = "auth.user.logout"
     USER_DELETED = "auth.user.deleted"
     PASSWORD_CHANGED = "auth.password.changed"
+
+    # ---- Policy and quota enforcement ----
+    POLICY_DENIED = "policy.denied"
+    QUOTA_EXCEEDED = "quota.exceeded"

@@ -48,6 +48,16 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
+from app.services.policy_service.service import (
+    evaluate_session_creation,
+    evaluate_workspace_creation,
+    evaluate_workspace_start,
+)
+from app.services.quota_service.service import (
+    check_running_workspace_quota,
+    check_session_quota,
+    check_workspace_quota,
+)
 
 # Stable mapping from job type to audit action name; defined at module level to avoid
 # re-creating the dict on every intent request.
@@ -312,6 +322,23 @@ def request_attach_workspace(
         )
     assert rt is not None
     issues = _access_issues_for_runtime(rt)
+
+    # Quota + policy checks before creating the session
+    _cid_attach = _effective_correlation_id(correlation_id)
+    check_session_quota(
+        session,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        current_session_count=int(ws.active_sessions_count or 0),
+        correlation_id=_cid_attach,
+    )
+    evaluate_session_creation(
+        session,
+        owner_user_id=owner_user_id,
+        workspace_id=workspace_id,
+        correlation_id=_cid_attach,
+    )
+
     plain_token, row = create_workspace_session(
         session,
         workspace_id=workspace_id,
@@ -363,6 +390,9 @@ def request_attach_workspace(
     )
 
 
+_START_JOB_TYPES = frozenset({WorkspaceJobType.START.value, WorkspaceJobType.RESTART.value})
+
+
 def _persist_intent(
     session: Session,
     ws: Workspace,
@@ -373,6 +403,22 @@ def _persist_intent(
     requested_config_version: int,
     correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
+    # Quota + policy checks before any state mutation
+    cid_pre = _effective_correlation_id(correlation_id)
+    if job_type in _START_JOB_TYPES:
+        check_running_workspace_quota(
+            session,
+            owner_user_id=int(ws.owner_user_id),
+            workspace_id=ws.workspace_id,
+            correlation_id=cid_pre,
+        )
+        evaluate_workspace_start(
+            session,
+            owner_user_id=int(ws.owner_user_id),
+            workspace_id=int(ws.workspace_id),
+            correlation_id=cid_pre,
+        )
+
     now = datetime.now(timezone.utc)
     ws.status = new_status
     ws.updated_at = now
@@ -756,6 +802,17 @@ def create_workspace(
     body: CreateWorkspaceRequest,
     correlation_id: str | None = None,
 ) -> CreateWorkspaceResult:
+    # --- Policy and quota checks (before any DB writes) ---
+    cid_pre = _effective_correlation_id(correlation_id)
+    check_workspace_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
+    evaluate_workspace_creation(
+        session,
+        owner_user_id=owner_user_id,
+        image=body.runtime.image if body.runtime else None,
+        is_private=body.is_private if body.is_private is not None else True,
+        correlation_id=cid_pre,
+    )
+
     now = datetime.now(timezone.utc)
     config_json = body.runtime.to_config_dict()
 
