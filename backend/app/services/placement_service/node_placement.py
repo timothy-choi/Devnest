@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 
 from .capacity import (
+    active_workload_count_subquery,
     effective_free_cpu_expr,
     effective_free_memory_mb_expr,
     max_effective_free_resources_across_schedulable,
@@ -133,6 +134,7 @@ def select_node_for_workspace(
 
     free_cpu_e = effective_free_cpu_expr()
     free_mem_e = effective_free_memory_mb_expr()
+    active_wl_e = active_workload_count_subquery()
     preds = [
         *_schedulable_base_predicates(),
         free_cpu_e >= req_cpu,
@@ -142,8 +144,13 @@ def select_node_for_workspace(
         select(ExecutionNode)
         .where(and_(*preds))
         .order_by(
+            # Primary: most effective free CPU (capacity-first to avoid fragmentation).
             free_cpu_e.desc(),
+            # Secondary: most effective free memory.
             free_mem_e.desc(),
+            # Tertiary: fewer active workloads (spread / anti-concentration fairness).
+            active_wl_e.asc(),
+            # Stable tiebreak.
             ExecutionNode.node_key.asc(),
         )
     )

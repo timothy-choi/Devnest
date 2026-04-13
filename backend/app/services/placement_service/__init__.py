@@ -1,7 +1,7 @@
 """Execution node registry and V1 placement selection."""
 
 from .bootstrap import ensure_default_local_execution_node
-from .capacity import total_reserved_on_node_key
+from .capacity import count_active_workloads_on_node_key, total_reserved_on_node_key
 from .errors import (
     ExecutionNodeNotFoundError,
     InvalidPlacementParametersError,
@@ -33,6 +33,7 @@ __all__ = [
     "InvalidPlacementParametersError",
     "NoSchedulableNodeError",
     "PlacementError",
+    "count_active_workloads_on_node_key",
     "ensure_default_local_execution_node",
     "get_node",
     "list_schedulable_nodes",

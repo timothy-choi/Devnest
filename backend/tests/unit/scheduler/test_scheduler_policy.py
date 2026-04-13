@@ -134,3 +134,169 @@ def test_rank_excludes_node_when_reservations_consume_capacity(policy_session: S
     req2 = WorkspaceComputeRequest(requested_cpu=0.25, requested_memory_mb=256)
     out2 = rank_candidate_nodes(policy_session, [n], req2)
     assert len(out2) == 1 and out2[0].node_key == "hot"
+
+
+# ---------------------------------------------------------------------------
+# Spread / fairness tests (new scheduling_sort_key_spread behaviour)
+# ---------------------------------------------------------------------------
+
+def _seed_active_workload(
+    session: Session,
+    *,
+    node_key: str,
+    cpu: float = 0.1,
+    mem: int = 64,
+) -> None:
+    """Seed a RUNNING workspace pinned to node_key (counts toward active workload count)."""
+    from datetime import datetime, timezone
+
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    import uuid
+
+    u = UserAuth(
+        username=f"u_{uuid.uuid4().hex[:8]}",
+        email=f"{uuid.uuid4().hex[:8]}@spread.test",
+        password_hash="x",
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(u)
+    session.flush()
+    ws = Workspace(
+        name=f"ws_{uuid.uuid4().hex[:6]}",
+        owner_user_id=u.user_auth_id,
+        status=WorkspaceStatus.RUNNING.value,
+        is_private=True,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.add(ws)
+    session.flush()
+    rt = WorkspaceRuntime(
+        workspace_id=ws.workspace_id,
+        node_id=node_key,
+        reserved_cpu=cpu,
+        reserved_memory_mb=mem,
+    )
+    session.add(rt)
+    session.commit()
+
+
+def _seed_stopped_workload(session: Session, *, node_key: str) -> None:
+    """Seed a STOPPED workspace — should NOT count toward active workload spread."""
+    from datetime import datetime, timezone
+
+    import uuid
+
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    u = UserAuth(
+        username=f"u_{uuid.uuid4().hex[:8]}",
+        email=f"{uuid.uuid4().hex[:8]}@spread.test",
+        password_hash="x",
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(u)
+    session.flush()
+    ws = Workspace(
+        name=f"ws_{uuid.uuid4().hex[:6]}",
+        owner_user_id=u.user_auth_id,
+        status=WorkspaceStatus.STOPPED.value,
+        is_private=True,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.add(ws)
+    session.flush()
+    rt = WorkspaceRuntime(
+        workspace_id=ws.workspace_id,
+        node_id=node_key,
+        reserved_cpu=0.0,
+        reserved_memory_mb=0,
+    )
+    session.add(rt)
+    session.commit()
+
+
+def test_equal_capacity_fewer_workloads_wins(policy_session: Session) -> None:
+    """With equal free capacity, the node with fewer active workloads ranks first (anti-concentration)."""
+    n_busy = _node(key="busy", alloc_cpu=4.0, alloc_mem=4096)
+    n_idle = _node(key="idle", alloc_cpu=4.0, alloc_mem=4096)
+    policy_session.add(n_busy)
+    policy_session.add(n_idle)
+    policy_session.commit()
+
+    # Two active workloads on 'busy', zero on 'idle'
+    _seed_active_workload(policy_session, node_key="busy", cpu=0.1, mem=64)
+    _seed_active_workload(policy_session, node_key="busy", cpu=0.1, mem=64)
+
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    ranked = rank_candidate_nodes(policy_session, [n_busy, n_idle], req)
+
+    assert len(ranked) == 2
+    assert ranked[0].node_key == "idle", "idle node (fewer workloads) should rank first"
+    assert ranked[1].node_key == "busy"
+
+
+def test_capacity_primary_over_workload_spread(policy_session: Session) -> None:
+    """Capacity-first: a node with much more free CPU beats one with fewer workloads."""
+    n_large = _node(key="large", alloc_cpu=8.0, alloc_mem=8192)
+    n_small = _node(key="small", alloc_cpu=4.0, alloc_mem=4096)
+    policy_session.add(n_large)
+    policy_session.add(n_small)
+    policy_session.commit()
+
+    # 3 workloads on large (still has 6.5 CPU free), 0 on small (4.0 CPU free)
+    for _ in range(3):
+        _seed_active_workload(policy_session, node_key="large", cpu=0.5, mem=512)
+
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    ranked = rank_candidate_nodes(policy_session, [n_large, n_small], req)
+
+    assert len(ranked) == 2
+    # large has 6.5 CPU free vs small's 4.0 — capacity wins even though large has more workloads
+    assert ranked[0].node_key == "large"
+
+
+def test_stopped_workloads_not_counted_for_spread(policy_session: Session) -> None:
+    """STOPPED workspaces must not influence the active-workload spread ordering."""
+    n1 = _node(key="n1", alloc_cpu=4.0, alloc_mem=4096)
+    n2 = _node(key="n2", alloc_cpu=4.0, alloc_mem=4096)
+    policy_session.add(n1)
+    policy_session.add(n2)
+    policy_session.commit()
+
+    # 5 stopped workloads on n1 — these must not count
+    for _ in range(5):
+        _seed_stopped_workload(policy_session, node_key="n1")
+
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    ranked = rank_candidate_nodes(policy_session, [n1, n2], req)
+
+    assert len(ranked) == 2
+    # Both have 0 active workloads; n1 < n2 lexicographically → n1 first
+    assert ranked[0].node_key == "n1"
+
+
+def test_scheduling_sort_key_spread_deterministic() -> None:
+    """scheduling_sort_key_spread produces a stable, deterministic tuple."""
+    from app.services.scheduler_service.policy import scheduling_sort_key_spread
+
+    k1 = scheduling_sort_key_spread(4.0, 4096, 2, "node-a")
+    k2 = scheduling_sort_key_spread(4.0, 4096, 1, "node-b")
+    # node-b has fewer workloads → smaller tuple → ranks first (sorts before node-a)
+    assert k2 < k1
+
+
+def test_scheduling_sort_key_spread_capacity_beats_workload_count() -> None:
+    """Higher effective CPU is primary even when workload_count is larger."""
+    from app.services.scheduler_service.policy import scheduling_sort_key_spread
+
+    k_capacity = scheduling_sort_key_spread(8.0, 8192, 5, "node-heavy")
+    k_spread = scheduling_sort_key_spread(2.0, 2048, 0, "node-light")
+    # node-heavy has more free CPU → should sort before node-light despite 5 workloads
+    assert k_capacity < k_spread

@@ -9,6 +9,7 @@ class ScaleUpEvaluationResponse(BaseModel):
     should_provision: bool
     reason: str
     provisioning_in_flight: int
+    idle_ec2_node_count: int = 0
 
 
 class ScaleDownEvaluationResponse(BaseModel):

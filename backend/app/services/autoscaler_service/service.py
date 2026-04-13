@@ -94,6 +94,31 @@ def _workload_counts_by_node_keys(session: Session, node_keys: list[str]) -> dic
     return out
 
 
+def _count_idle_ec2_nodes(session: Session) -> int:
+    """Count READY+schedulable EC2 nodes that have zero active workload placements.
+
+    Used for cost-aware scale-up suppression: if idle nodes already exist there is no
+    reason to provision more capacity.  "Idle" = zero non-deleted workspace_runtime
+    placements (same cohort the autoscaler uses for scale-down candidate selection).
+    """
+    stmt = (
+        select(ExecutionNode)
+        .where(
+            and_(
+                ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+                ExecutionNode.status == ExecutionNodeStatus.READY.value,
+                ExecutionNode.schedulable == True,  # noqa: E712
+            ),
+        )
+    )
+    nodes = list(session.exec(stmt).all())
+    if not nodes:
+        return 0
+    keys = [n.node_key for n in nodes]
+    counts = _workload_counts_by_node_keys(session, keys)
+    return sum(1 for n in nodes if counts.get((n.node_key or "").strip(), 0) == 0)
+
+
 def count_ec2_ready_schedulable(session: Session) -> int:
     stmt = (
         select(func.count())
@@ -172,6 +197,26 @@ def evaluate_scale_up(
             should_provision=False,
             reason="devnest_node_provider is local-only; EC2 autoscale skipped",
             provisioning_in_flight=in_flight,
+        )
+    # --- Cost-aware suppression: prefer reusing idle nodes before provisioning new ones ---
+    n_idle = _count_idle_ec2_nodes(session)
+    if n_idle > 0:
+        reason = (
+            f"scale-up suppressed: {n_idle} idle EC2 node(s) with zero active workloads exist; "
+            "prefer reusing existing capacity before provisioning"
+        )
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_UP_SUPPRESSED,
+            idle_ec2_node_count=n_idle,
+            provisioning_in_flight=in_flight,
+            detail=reason,
+        )
+        return ScaleUpEvaluation(
+            should_provision=False,
+            reason=reason,
+            provisioning_in_flight=in_flight,
+            idle_ec2_node_count=n_idle,
         )
     if in_flight >= int(settings.devnest_autoscaler_max_concurrent_provisioning):
         return ScaleUpEvaluation(
@@ -293,16 +338,34 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
     counts = _workload_counts_by_node_keys(session, keys)
     idle = [r for r in rows if counts.get((r.node_key or "").strip(), 0) == 0]
     if not idle:
+        reason = "no idle EC2 nodes (all have workspace_runtime placements for non-deleted workspaces)"
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_DOWN_SUPPRESSED,
+            idle_ec2_ready_nodes=n_ready,
+            detail=reason,
+        )
         return ScaleDownEvaluation(
             node_key=None,
-            reason="no idle EC2 nodes (all have workspace_runtime placements for non-deleted workspaces)",
+            reason=reason,
             idle_ec2_ready_nodes=n_ready,
         )
+    # Cost-aware: reclaim the node with the smallest allocatable capacity first.
+    # This preserves larger-capacity nodes for future workloads requiring more resources.
+    # Tiebreak by allocatable_memory_mb, then node_key for stability.
+    idle.sort(
+        key=lambda n: (
+            float(n.allocatable_cpu or 0.0),
+            int(n.allocatable_memory_mb or 0),
+            (n.node_key or ""),
+        )
+    )
     pick = idle[0]
     return ScaleDownEvaluation(
         node_key=pick.node_key,
         reason=(
-            f"idle EC2 node with lowest node_key among zero-workload nodes; "
+            f"idle EC2 node selected for reclaim (smallest allocatable_cpu={pick.allocatable_cpu} "
+            f"allocatable_memory_mb={pick.allocatable_memory_mb}; preserves higher-capacity nodes); "
             f"{n_ready} READY+schedulable EC2 node(s) (minimum before reclaim={min_ready_required})"
         ),
         idle_ec2_ready_nodes=n_ready,
