@@ -37,10 +37,13 @@ def _create_workspace(client, token, *, name="ws_term"):
 
 
 def test_terminal_websocket_rejects_missing_token(client):
-    """WebSocket without ?token= parameter returns 422 (required query param)."""
+    """WebSocket without ?token= parameter is rejected.
+
+    A plain HTTP GET to a WebSocket-only route returns 404 (no HTTP handler
+    registered) or 400/422 depending on framework version.
+    """
     resp = client.get("/workspaces/1/terminal")
-    # HTTP fallback for a WebSocket-only route returns 400 or 422.
-    assert resp.status_code in (400, 422)
+    assert resp.status_code in (400, 404, 422)
 
 
 def test_terminal_websocket_invalid_jwt_closes_with_policy_violation(client):
