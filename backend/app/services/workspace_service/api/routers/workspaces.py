@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from app.libs.db.database import get_db, get_engine
+from app.libs.security.rate_limit import sse_rate_limit
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.api.schemas import (
@@ -331,15 +332,17 @@ def post_workspace_attach(
     summary="Stream workspace control-plane events (SSE)",
     description=(
         "Server-Sent Events stream of persisted control-plane events for this workspace. "
-        "Replays stored events (``after_id`` cursor) then polls the database on an interval (V1; no broker). "
-        "Use this to observe transactional status and asynchronous job outcomes alongside "
-        "POST /workspaces/start/{id} and related intents."
+        "Supply ``last_event_id`` to resume from a known cursor and avoid replaying history. "
+        "The stream uses an in-process push-notification bus when available, falling back to "
+        "periodic DB polling (``EVENT_BUS_WAIT_TIMEOUT_SEC`` cadence) for multi-process deployments."
     ),
+    dependencies=[Depends(sse_rate_limit)],
 )
 async def stream_workspace_events(
     workspace_id: int,
     request: Request,
     current: UserAuth = Depends(get_current_user),
+    last_event_id: int = Query(0, ge=0, description="Resume cursor: only return events with id > this value"),
 ) -> StreamingResponse:
     assert current.user_auth_id is not None
     uid = current.user_auth_id
@@ -354,34 +357,51 @@ async def stream_workspace_events(
     except WorkspaceNotFoundError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from None
 
+    # Register with the in-process event bus to receive push notifications.
+    from app.libs.events.workspace_event_bus import get_event_bus, EVENT_BUS_WAIT_TIMEOUT_SEC  # noqa: PLC0415
+    bus = get_event_bus()
+    notification_event = bus.subscribe(workspace_id)
+
     async def event_stream() -> AsyncIterator[str]:
-        last_id = 0
-        while True:
-            if await request.is_disconnected():
-                break
+        nonlocal last_event_id
+        last_id = last_event_id
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
 
-            def _fetch_page() -> list:
-                with Session(engine) as session:
-                    return list_workspace_events(
-                        session,
-                        workspace_id=workspace_id,
-                        owner_user_id=uid,
-                        after_id=last_id,
-                        limit=EVENT_PAGE_LIMIT,
-                    )
+                # Wait for a push notification OR the fallback timeout.
+                # notification_event is an asyncio.Event — await it with a timeout.
+                try:
+                    await asyncio.wait_for(notification_event.wait(), timeout=EVENT_BUS_WAIT_TIMEOUT_SEC)
+                except asyncio.TimeoutError:
+                    pass  # Fallback poll — no notification received within timeout.
 
-            try:
-                events = await asyncio.to_thread(_fetch_page)
-            except WorkspaceNotFoundError:
-                yield f"data: {json.dumps({'error': 'workspace_not_found'})}\n\n"
-                break
+                # Reset so next iteration blocks again.
+                notification_event.clear()
 
-            for ev in events:
-                eid = ev.workspace_event_id or 0
-                last_id = max(last_id, eid)
-                yield format_sse_data_line(ev)
+                def _fetch_page() -> list:
+                    with Session(engine) as session:
+                        return list_workspace_events(
+                            session,
+                            workspace_id=workspace_id,
+                            owner_user_id=uid,
+                            after_id=last_id,
+                            limit=EVENT_PAGE_LIMIT,
+                        )
 
-            await asyncio.sleep(SSE_POLL_INTERVAL_SEC)
+                try:
+                    events = await asyncio.to_thread(_fetch_page)
+                except WorkspaceNotFoundError:
+                    yield f"data: {json.dumps({'error': 'workspace_not_found'})}\n\n"
+                    break
+
+                for ev in events:
+                    eid = ev.workspace_event_id or 0
+                    last_id = max(last_id, eid)
+                    yield format_sse_data_line(ev)
+        finally:
+            bus.unsubscribe(workspace_id, notification_event)
 
     return StreamingResponse(
         event_stream(),

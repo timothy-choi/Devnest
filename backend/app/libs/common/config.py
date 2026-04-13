@@ -95,7 +95,13 @@ class Settings(BaseSettings):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
-    @field_validator("devnest_gateway_enabled", "devnest_gateway_auth_enabled", mode="before")
+    @field_validator(
+        "devnest_gateway_enabled",
+        "devnest_gateway_auth_enabled",
+        "devnest_reconcile_enabled",
+        "devnest_rate_limit_enabled",
+        mode="before",
+    )
     @classmethod
     def _parse_devnest_gateway_enabled(cls, v):  # noqa: ANN001
         if isinstance(v, bool):
@@ -103,6 +109,51 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
+
+    @field_validator("devnest_reconcile_interval_seconds", mode="before")
+    @classmethod
+    def _coerce_reconcile_interval(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 30
+        return max(10, min(n, 3600))
+
+    @field_validator("devnest_reconcile_batch_size", mode="before")
+    @classmethod
+    def _coerce_reconcile_batch_size(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 10
+        return max(1, min(n, 100))
+
+    @field_validator("devnest_reconcile_lease_ttl_seconds", mode="before")
+    @classmethod
+    def _coerce_reconcile_lease_ttl(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 120
+        return max(30, min(n, 3600))
+
+    @field_validator("workspace_job_stuck_timeout_seconds", mode="before")
+    @classmethod
+    def _coerce_stuck_timeout(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 300
+        return max(0, min(n, 86400))
+
+    @field_validator("devnest_rate_limit_auth_per_minute", "devnest_rate_limit_sse_per_minute", mode="before")
+    @classmethod
+    def _coerce_rate_limit(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 20
+        return max(1, min(n, 10000))
 
     # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
     aws_region: str = ""
@@ -169,6 +220,34 @@ class Settings(BaseSettings):
     devnest_worker_poll_interval_seconds: int = 5
     # Max workspace jobs to dequeue and process per tick.
     devnest_worker_batch_size: int = 5
+
+    # ── Automated reconcile loop ─────────────────────────────────────────────
+    # When true, the FastAPI process runs a background reconcile tick that enqueues
+    # RECONCILE_RUNTIME jobs for workspaces in the target statuses.
+    devnest_reconcile_enabled: bool = False
+    # Seconds between reconcile ticks. Values below 10 are coerced to 10.
+    devnest_reconcile_interval_seconds: int = 30
+    # Max workspaces to reconcile per tick.
+    devnest_reconcile_batch_size: int = 10
+    # Comma-separated workspace statuses to target for reconcile (default: RUNNING,ERROR).
+    devnest_reconcile_target_statuses: str = "RUNNING,ERROR"
+    # If a RECONCILE_RUNTIME job has been RUNNING longer than this many seconds it is
+    # considered stale (crashed worker) and a new reconcile may be enqueued. Default 120s.
+    devnest_reconcile_lease_ttl_seconds: int = 120
+
+    # ── Worker stuck-job reclaim ──────────────────────────────────────────────
+    # If a job has been in RUNNING state longer than this many seconds it is presumed
+    # orphaned by a crashed worker and is reclaimed (retry or terminal failure).
+    # Set to 0 to disable reclaim. Default 300s (5 min).
+    workspace_job_stuck_timeout_seconds: int = 300
+
+    # ── Rate limiting ─────────────────────────────────────────────────────────
+    # Globally enable / disable in-process rate limiting. Default true.
+    devnest_rate_limit_enabled: bool = True
+    # Max requests per minute per IP for auth endpoints (login, register, forgot-password).
+    devnest_rate_limit_auth_per_minute: int = 20
+    # Max requests per minute per IP for the SSE event-stream endpoint.
+    devnest_rate_limit_sse_per_minute: int = 30
 
     # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
     devnest_autoscaler_enabled: bool = False

@@ -1697,6 +1697,112 @@ def load_next_queued_workspace_job(session: Session) -> WorkspaceJob | None:
     return session.exec(stmt).first()
 
 
+def reclaim_stuck_running_jobs(engine: "Engine") -> int:
+    """Reclaim jobs that have been in ``RUNNING`` state beyond the stuck-timeout threshold.
+
+    A job is considered stuck when ``started_at`` is older than
+    ``workspace_job_stuck_timeout_seconds`` (default 300s). This handles worker crashes that
+    left jobs permanently in ``RUNNING`` state.
+
+    For each stuck job:
+    - If retry attempts remain: re-schedule as ``QUEUED`` (backoff applied).
+    - Otherwise: mark ``FAILED`` terminal and move workspace to ``ERROR`` if it is a lifecycle
+      job type (not reconcile, not snapshot).
+
+    Returns the number of jobs reclaimed.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    settings = get_settings()
+    timeout_seconds = int(getattr(settings, "workspace_job_stuck_timeout_seconds", 300))
+    if timeout_seconds <= 0:
+        return 0
+
+    cutoff = _now() - timedelta(seconds=timeout_seconds)
+    reclaimed = 0
+
+    sm = _worker_sessionmaker(engine)
+    with sm() as session:
+        stuck_jobs = session.exec(
+            select(WorkspaceJob)
+            .where(
+                WorkspaceJob.status == WorkspaceJobStatus.RUNNING.value,
+                WorkspaceJob.started_at <= cutoff,
+            )
+            .limit(20)  # Safety cap per tick.
+        ).all()
+
+        if not stuck_jobs:
+            return 0
+
+        for job in stuck_jobs:
+            wid = int(job.workspace_id)
+            ws = session.get(Workspace, wid)
+            message = (
+                f"stuck_running_reclaimed:job_id={job.workspace_job_id},"
+                f"started_at={job.started_at}"
+            )
+            retried = try_schedule_workspace_job_retry(
+                session,
+                job,
+                message=message,
+                stage=FailureStage.UNKNOWN,
+                failure_code="STUCK_RUNNING_RECLAIMED",
+                truncate_message=_truncate,
+            )
+            if retried:
+                log_event(
+                    logger,
+                    LogEvent.WORKER_STUCK_JOB_RETRY_SCHEDULED,
+                    workspace_id=wid,
+                    workspace_job_id=job.workspace_job_id,
+                    job_type=job.job_type,
+                )
+                if ws is not None:
+                    _touch_workspace(session, ws)
+            else:
+                # Retry exhausted — mark terminal.
+                _mark_job_failed(
+                    session,
+                    job,
+                    message,
+                    failure_stage=FailureStage.UNKNOWN.value,
+                    failure_code="STUCK_RUNNING_TERMINAL",
+                )
+                # For lifecycle jobs (not reconcile / snapshots), move workspace to ERROR.
+                _lifecycle_job_types = {
+                    WorkspaceJobType.CREATE.value,
+                    WorkspaceJobType.START.value,
+                    WorkspaceJobType.STOP.value,
+                    WorkspaceJobType.RESTART.value,
+                    WorkspaceJobType.UPDATE.value,
+                    WorkspaceJobType.DELETE.value,
+                }
+                if ws is not None and job.job_type in _lifecycle_job_types:
+                    ws.status = WorkspaceStatus.ERROR.value
+                    _workspace_set_error(ws, "STUCK_RUNNING_TERMINAL", message)
+                    _touch_workspace(session, ws)
+                log_event(
+                    logger,
+                    LogEvent.WORKER_STUCK_JOB_TERMINAL,
+                    workspace_id=wid,
+                    workspace_job_id=job.workspace_job_id,
+                    job_type=job.job_type,
+                )
+            reclaimed += 1
+
+        if reclaimed:
+            session.commit()
+            log_event(
+                logger,
+                LogEvent.WORKER_STUCK_JOB_RECLAIMED,
+                reclaimed_count=reclaimed,
+                stuck_timeout_seconds=timeout_seconds,
+            )
+
+    return reclaimed
+
+
 def run_pending_jobs(
     session: Session,
     *,

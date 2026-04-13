@@ -38,6 +38,22 @@ DEVNEST_WORKER_ENABLED=true              # in-process worker
 DEVNEST_WORKER_POLL_INTERVAL_SECONDS=5
 DEVNEST_WORKER_BATCH_SIZE=5
 
+# Stuck-job reclaim (worker lifecycle hardening)
+# Jobs stuck in RUNNING longer than this many seconds are retried or failed-terminal.
+WORKSPACE_JOB_STUCK_TIMEOUT_SECONDS=300  # 0 = disable
+
+# Automated reconcile loop
+DEVNEST_RECONCILE_ENABLED=true
+DEVNEST_RECONCILE_INTERVAL_SECONDS=30
+DEVNEST_RECONCILE_BATCH_SIZE=10
+DEVNEST_RECONCILE_TARGET_STATUSES=RUNNING,ERROR
+DEVNEST_RECONCILE_LEASE_TTL_SECONDS=120  # seconds before a RUNNING reconcile is stale
+
+# Rate limiting (in-process sliding window; set false to disable)
+DEVNEST_RATE_LIMIT_ENABLED=true
+DEVNEST_RATE_LIMIT_AUTH_PER_MINUTE=20   # /auth/login, /auth/register, /auth/forgot-password
+DEVNEST_RATE_LIMIT_SSE_PER_MINUTE=30    # /workspaces/{id}/events SSE endpoint
+
 # Gateway (optional; enable after Traefik sidecar is running)
 DEVNEST_GATEWAY_ENABLED=true
 DEVNEST_GATEWAY_URL=http://route-admin:9080
@@ -98,6 +114,25 @@ gunicorn app.main:app \
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+### 3b. Production Docker
+
+A production-like stack is available in `docker-compose.prod.yml`:
+
+```bash
+# Build backend image
+docker build -t devnest-backend:latest ./backend
+
+# Run migrations
+docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
+
+# Start all services
+docker compose -f docker-compose.prod.yml up -d
+```
+
+The `docker-compose.prod.yml` includes:
+- `postgres` (PostgreSQL 15) with healthcheck
+- `api` (FastAPI + in-process worker + reconcile loop)
+
 ### 4. Worker Configuration
 
 Choose the job worker mode that fits your deployment:
@@ -108,7 +143,7 @@ Choose the job worker mode that fits your deployment:
 DEVNEST_WORKER_ENABLED=true
 ```
 
-The worker starts automatically with the FastAPI process and shuts down gracefully with it.
+The worker starts automatically with the FastAPI process, runs stuck-job reclaim on every tick, and shuts down gracefully with it.
 
 #### Option B: Standalone worker process (recommended for production)
 
@@ -133,6 +168,41 @@ For minimal deployments where workspace operations are infrequent:
 curl -X POST http://api-host:8000/internal/workspace-jobs/process \
   -H "X-Internal-API-Key: ${INTERNAL_API_KEY_WORKSPACE_JOBS}" \
   -d '{"limit": 10}'
+```
+
+### 5. Automated Reconcile Loop
+
+The reconcile loop runs as a background task inside the FastAPI process alongside the
+in-process worker. It enqueues `RECONCILE_RUNTIME` jobs for workspaces in the target
+statuses on a configurable cadence.
+
+Enable with:
+
+```bash
+DEVNEST_RECONCILE_ENABLED=true
+DEVNEST_RECONCILE_INTERVAL_SECONDS=30
+```
+
+The reconcile lease (`DEVNEST_RECONCILE_LEASE_TTL_SECONDS=120`) prevents duplicate
+reconcile jobs: if a reconcile job is already QUEUED or recently RUNNING for a workspace,
+the new enqueue is skipped silently. A RUNNING reconcile older than the TTL is considered
+stale (crashed worker) and a new one is allowed.
+
+### 6. Rate Limiting
+
+The in-process rate limiter (`DEVNEST_RATE_LIMIT_ENABLED=true`) applies sliding-window
+per-IP limits:
+
+| Endpoint | Limit |
+|---|---|
+| All routes (global default) | 300 req/min per IP |
+| `/auth/login`, `/auth/register`, `/auth/forgot-password` | 20 req/min per IP |
+| `/workspaces/{id}/events` (SSE) | 30 req/min per IP |
+
+Responses exceeding the limit receive HTTP 429 with `Retry-After`. To disable in dev:
+
+```bash
+DEVNEST_RATE_LIMIT_ENABLED=false
 ```
 
 ---

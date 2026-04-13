@@ -709,6 +709,82 @@ def request_update_workspace(
     )
 
 
+def _check_reconcile_lease(session: Session, workspace_id: int) -> None:
+    """Raise ``WorkspaceBusyError`` when a non-stale reconcile job is already pending.
+
+    Logic:
+    - If a QUEUED RECONCILE_RUNTIME job exists → lease held, skip.
+    - If a RUNNING RECONCILE_RUNTIME job exists AND its ``started_at`` is within the
+      configured TTL → lease held, skip.
+    - If a RUNNING RECONCILE_RUNTIME job exists BUT ``started_at`` is older than the TTL →
+      log as stale (crashed worker) and allow re-enqueue so the reconcile isn't blocked forever.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+    from app.libs.common.config import get_settings  # noqa: PLC0415
+    from app.libs.observability.log_events import LogEvent, log_event  # noqa: PLC0415
+
+    _lease_logger = logging.getLogger(__name__)
+
+    existing = session.exec(
+        select(WorkspaceJob).where(
+            WorkspaceJob.workspace_id == workspace_id,
+            WorkspaceJob.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value,
+            WorkspaceJob.status.in_([  # type: ignore[attr-defined]
+                WorkspaceJobStatus.QUEUED.value,
+                WorkspaceJobStatus.RUNNING.value,
+            ]),
+        )
+    ).first()
+
+    if existing is None:
+        return  # No pending reconcile — proceed.
+
+    if existing.status == WorkspaceJobStatus.QUEUED.value:
+        log_event(
+            _lease_logger,
+            LogEvent.RECONCILE_LEASE_HELD,
+            workspace_id=workspace_id,
+            existing_job_id=existing.workspace_job_id,
+            existing_status=existing.status,
+        )
+        raise WorkspaceBusyError(
+            f"A RECONCILE_RUNTIME job is already queued (job_id={existing.workspace_job_id}). "
+            "Skip or wait until it completes."
+        )
+
+    # RUNNING: check for staleness.
+    lease_ttl = int(getattr(get_settings(), "devnest_reconcile_lease_ttl_seconds", 120))
+    now_utc = datetime.now(timezone.utc)
+    started = existing.started_at
+    if started is not None:
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        age_seconds = (now_utc - started).total_seconds()
+        if age_seconds < lease_ttl:
+            log_event(
+                _lease_logger,
+                LogEvent.RECONCILE_LEASE_HELD,
+                workspace_id=workspace_id,
+                existing_job_id=existing.workspace_job_id,
+                existing_status=existing.status,
+                age_seconds=int(age_seconds),
+                lease_ttl=lease_ttl,
+            )
+            raise WorkspaceBusyError(
+                f"A RECONCILE_RUNTIME job is already running (job_id={existing.workspace_job_id}, "
+                f"age={int(age_seconds)}s < lease_ttl={lease_ttl}s)."
+            )
+        # Stale: allow re-enqueue.
+        log_event(
+            _lease_logger,
+            LogEvent.RECONCILE_LEASE_STALE,
+            workspace_id=workspace_id,
+            existing_job_id=existing.workspace_job_id,
+            age_seconds=int(age_seconds),
+            lease_ttl=lease_ttl,
+        )
+
+
 def enqueue_reconcile_runtime_job(
     session: Session,
     *,
@@ -719,6 +795,11 @@ def enqueue_reconcile_runtime_job(
     Queue a RECONCILE_RUNTIME job without changing ``Workspace.status``.
 
     Internal / operator use: compare desired (persisted status) to actual (orchestrator + gateway).
+
+    Duplicate prevention (reconcile lease):
+        Before inserting, :func:`_check_reconcile_lease` verifies no active RECONCILE_RUNTIME
+        job exists for the workspace (QUEUED, or RUNNING within the lease TTL). This is the
+        DB-level lock/lease mechanism — raises ``WorkspaceBusyError`` when the lease is held.
     """
     ws = session.get(Workspace, workspace_id)
     if ws is None:
@@ -733,6 +814,8 @@ def enqueue_reconcile_runtime_job(
         raise WorkspaceInvalidStateError(
             f"Reconcile is only allowed when running, stopped, error, or deleted (current={ws.status})",
         )
+    # Check reconcile lease before inserting (Task 2: reconcile lock/lease hardening).
+    _check_reconcile_lease(session, workspace_id)
     cfg_v = _intent_config_version(session, workspace_id)
     assert ws.workspace_id is not None
     owner_id = int(ws.owner_user_id)
