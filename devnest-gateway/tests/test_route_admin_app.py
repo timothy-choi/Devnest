@@ -100,3 +100,91 @@ def test_persist_writes_traefik_shape(route_admin_module) -> None:
     assert cfg["http"]["services"][f"{rname}-upstream"]["loadBalancer"]["servers"][0]["url"] == (
         "http://10.9.9.9:8080"
     )
+
+
+def test_forward_auth_middleware_attached_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When _GATEWAY_AUTH_ENABLED=True the router YAML includes the forwardAuth middleware."""
+    import route_admin_app as ra
+
+    monkeypatch.setattr(ra, "ROUTES_FILE", tmp_path / "100-workspaces.yml")
+    monkeypatch.setattr(ra, "_GATEWAY_AUTH_ENABLED", True)
+    monkeypatch.setattr(ra, "_TLS_ENABLED", False)
+    with ra._lock:
+        ra._routes.clear()
+
+    c = TestClient(ra.app)
+    c.post(
+        "/routes",
+        json={
+            "workspace_id": "55",
+            "public_host": "ws-55.app.devnest.local",
+            "target": "http://10.0.0.55:8080",
+        },
+    )
+    text = (tmp_path / "100-workspaces.yml").read_text(encoding="utf-8")
+    cfg = yaml.safe_load(text)
+    router_cfg = cfg["http"]["routers"]["devnest-reg-55"]
+    assert "devnest-workspace-auth@file" in router_cfg.get("middlewares", [])
+    # Without TLS: entrypoint must be web
+    assert router_cfg["entryPoints"] == ["web"]
+    assert "tls" not in router_cfg
+
+    with ra._lock:
+        ra._routes.clear()
+
+
+def test_forward_auth_middleware_absent_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When _GATEWAY_AUTH_ENABLED=False, no middleware is attached to the router."""
+    import route_admin_app as ra
+
+    monkeypatch.setattr(ra, "ROUTES_FILE", tmp_path / "100-workspaces.yml")
+    monkeypatch.setattr(ra, "_GATEWAY_AUTH_ENABLED", False)
+    monkeypatch.setattr(ra, "_TLS_ENABLED", False)
+    with ra._lock:
+        ra._routes.clear()
+
+    c = TestClient(ra.app)
+    c.post(
+        "/routes",
+        json={
+            "workspace_id": "56",
+            "public_host": "ws-56.app.devnest.local",
+            "target": "http://10.0.0.56:8080",
+        },
+    )
+    text = (tmp_path / "100-workspaces.yml").read_text(encoding="utf-8")
+    cfg = yaml.safe_load(text)
+    router_cfg = cfg["http"]["routers"]["devnest-reg-56"]
+    assert "middlewares" not in router_cfg
+
+    with ra._lock:
+        ra._routes.clear()
+
+
+def test_tls_enabled_uses_websecure_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When _TLS_ENABLED=True, routers use the websecure entrypoint and tls: {}."""
+    import route_admin_app as ra
+
+    monkeypatch.setattr(ra, "ROUTES_FILE", tmp_path / "100-workspaces.yml")
+    monkeypatch.setattr(ra, "_GATEWAY_AUTH_ENABLED", False)
+    monkeypatch.setattr(ra, "_TLS_ENABLED", True)
+    with ra._lock:
+        ra._routes.clear()
+
+    c = TestClient(ra.app)
+    c.post(
+        "/routes",
+        json={
+            "workspace_id": "57",
+            "public_host": "ws-57.app.devnest.local",
+            "target": "http://10.0.0.57:8080",
+        },
+    )
+    text = (tmp_path / "100-workspaces.yml").read_text(encoding="utf-8")
+    cfg = yaml.safe_load(text)
+    router_cfg = cfg["http"]["routers"]["devnest-reg-57"]
+    assert router_cfg["entryPoints"] == ["websecure"]
+    assert "tls" in router_cfg
+
+    with ra._lock:
+        ra._routes.clear()

@@ -42,6 +42,18 @@ DEVNEST_WORKER_BATCH_SIZE=5
 DEVNEST_GATEWAY_ENABLED=true
 DEVNEST_GATEWAY_URL=http://route-admin:9080
 DEVNEST_BASE_DOMAIN=app.yourdomain.com
+
+# Gateway ForwardAuth (enable once TLS and session flows are tested)
+DEVNEST_GATEWAY_AUTH_ENABLED=true
+
+# Snapshot storage (S3 for production; local for dev)
+DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3
+DEVNEST_S3_SNAPSHOT_BUCKET=your-devnest-snapshots-bucket
+DEVNEST_S3_SNAPSHOT_PREFIX=devnest-snapshots
+# Leave AWS keys empty to use IAM instance profile (recommended)
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
 ```
 
 ### 2. Database Migration
@@ -122,6 +134,72 @@ curl -X POST http://api-host:8000/internal/workspace-jobs/process \
   -H "X-Internal-API-Key: ${INTERNAL_API_KEY_WORKSPACE_JOBS}" \
   -d '{"limit": 10}'
 ```
+
+---
+
+## Gateway: TLS and ForwardAuth
+
+### TLS / HTTPS
+
+TLS is handled at the Traefik gateway layer.
+
+**Local / dev (self-signed):**
+
+```bash
+# devnest-gateway/.env
+DEVNEST_TLS_ENABLED=true
+DEVNEST_GATEWAY_TLS_PORT=443
+```
+
+Traefik automatically generates a self-signed certificate for the `websecure` (`:443`) entrypoint. No additional config is needed. Your browser will show a cert warning — accept it.
+
+**Production (Let's Encrypt):**
+
+1. Ensure port 443 is publicly reachable on your domain.
+2. Uncomment and configure `certificatesResolvers` in `devnest-gateway/traefik/traefik.yml`:
+
+```yaml
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "you@example.com"
+      storage: /etc/traefik/acme/acme.json
+      httpChallenge:
+        entryPoint: web
+```
+
+3. Mount the acme volume in `docker-compose.yml` (uncomment the relevant line).
+4. Set `DEVNEST_TLS_ENABLED=true` and `DEVNEST_ACME_EMAIL=you@example.com` in `.env`.
+5. Update workspace routers to use `tls.certResolver: letsencrypt`.
+
+### Gateway ForwardAuth
+
+ForwardAuth enforces workspace session validation at the Traefik edge. Enable it after your TLS and session flows are tested in staging.
+
+**Steps:**
+
+1. **Backend**: Set `DEVNEST_GATEWAY_AUTH_ENABLED=true` in the backend `.env`.
+2. **Route-admin**: Set `DEVNEST_GATEWAY_AUTH_ENABLED=true` in the gateway `.env`.
+3. **Auth URL**: Set `DEVNEST_BACKEND_AUTH_URL=https://api.yourdomain.com/internal/gateway/auth` so Traefik can reach the backend ForwardAuth endpoint.
+4. The `devnest-workspace-auth` middleware is defined in `traefik/dynamic/000-base.yml` and is automatically attached to all workspace routes registered by route-admin.
+
+**How it works:**
+
+```
+Client → Traefik (websecure :443)
+           ↓
+     ForwardAuth: GET /internal/gateway/auth
+           ↓ (sends original headers including X-Forwarded-Host + X-DevNest-Workspace-Session)
+     Backend validates:
+       - workspace_id from X-Forwarded-Host (ws-{id}.{base_domain})
+       - session token from X-DevNest-Workspace-Session
+       - session ACTIVE + not expired
+       - workspace RUNNING
+           ↓ 200 → Traefik proxies to workspace upstream
+             401 → Traefik returns 401 to client
+```
+
+**Local dev bypass**: `DEVNEST_GATEWAY_AUTH_ENABLED=false` (default) makes the endpoint return 200 unconditionally, so local stacks work without session tokens.
 
 ---
 
@@ -208,6 +286,12 @@ DevNest emits structured logs with a `devnest_event` field. Recommended queries:
 
 # Loki: policy denials
 {job="devnest"} |= "devnest_event" | json | devnest_event = "audit.policy.denied"
+
+# Loki: gateway auth denials (session enforcement)
+{job="devnest"} |= "devnest_event" | json | devnest_event = "gateway.auth.denied"
+
+# Loki: S3 snapshot upload failures
+{job="devnest"} |= "devnest_event" | json | devnest_event = "snapshot.storage.upload.failed"
 ```
 
 ### Metrics
@@ -246,7 +330,31 @@ pg_restore -d devnest devnest_<timestamp>.dump
 
 ### Workspace Snapshots
 
-Workspace snapshots are stored at `DEVNEST_SNAPSHOT_STORAGE_ROOT`. Back up this directory with your standard object storage or file backup tooling.
+**Local provider** (default / dev):
+
+Snapshots are stored at `DEVNEST_SNAPSHOT_STORAGE_ROOT`. Back up this directory with your standard file backup tooling.
+
+**S3 provider** (production):
+
+```bash
+DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3
+DEVNEST_S3_SNAPSHOT_BUCKET=your-devnest-snapshots-bucket
+DEVNEST_S3_SNAPSHOT_PREFIX=devnest-snapshots
+AWS_REGION=us-east-1
+```
+
+S3 versioning on the bucket is recommended for durability. The IAM role/instance profile used by the backend needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:HeadObject` on `arn:aws:s3:::your-bucket/*`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:HeadObject"],
+    "Resource": "arn:aws:s3:::your-devnest-snapshots-bucket/*"
+  }]
+}
+```
 
 ---
 

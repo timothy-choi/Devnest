@@ -1,13 +1,48 @@
-# DevNest gateway — static example routes (not managed by route-admin).
-# Workspace routes from the control plane are written to 100-workspaces.yml by route-admin.
+# DevNest gateway — base dynamic routes (not managed by route-admin).
+# Workspace routes are written to 100-workspaces.yml by route-admin.
+#
+# ForwardAuth middleware (devnest-workspace-auth):
+#   Traefik calls the backend /internal/gateway/auth before proxying each workspace request.
+#   The backend validates the workspace session token and confirms the workspace is RUNNING.
+#   Set DEVNEST_BACKEND_AUTH_URL to the control-plane auth endpoint (host-reachable from Traefik container).
+#   Default: http://host.docker.internal:8000/internal/gateway/auth
+#
+#   When DEVNEST_GATEWAY_AUTH_ENABLED=false (default for local dev), the backend returns 200
+#   unconditionally and no session is required for gateway access.
+#
+# TLS:
+#   See traefik.yml for entrypoints.
+#   When DEVNEST_TLS_ENABLED=true, routers automatically get tls: {} and redirect middleware.
+#   For local/dev: Traefik generates a self-signed certificate for the websecure entrypoint.
+#   For production: configure ACME via traefik.yml certificatesResolvers.
 
 http:
+  middlewares:
+    devnest-workspace-auth:
+      forwardAuth:
+        address: "${DEVNEST_BACKEND_AUTH_URL:-http://host.docker.internal:8000/internal/gateway/auth}"
+        # Forward all original headers so the backend can read X-DevNest-Workspace-Session
+        # and X-Forwarded-Host. Do not trust any headers injected by untrusted upstreams.
+        trustForwardHeader: true
+        # Headers the backend is allowed to copy back into the proxied request after auth.
+        # The backend does not set response headers today; list kept for future expansion.
+        authResponseHeaders: []
+
+    # HTTP → HTTPS redirect (only active on the `web` entrypoint when TLS is enabled).
+    devnest-https-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
   routers:
     devnest-ws-123:
       rule: "Host(`ws-123.app.devnest.local`)"
       entryPoints:
         - web
       service: devnest-ws-123-upstream
+      # To protect example routes: uncomment middlewares once auth is enabled.
+      # middlewares:
+      #   - devnest-workspace-auth
 
     devnest-smoke-whoami:
       rule: "Host(`whoami.app.devnest.local`)"

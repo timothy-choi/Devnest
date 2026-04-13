@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     workspace_projects_base: str = ""
     # Root directory for snapshot archives (local filesystem provider). Empty → system temp / devnest-snapshots.
     devnest_snapshot_storage_root: str = ""
+    # Snapshot storage backend: "local" (default) or "s3".
+    devnest_snapshot_storage_provider: str = "local"
+    # S3 provider settings (only used when devnest_snapshot_storage_provider=s3).
+    devnest_s3_snapshot_bucket: str = ""
+    devnest_s3_snapshot_prefix: str = "devnest-snapshots"
+    # Temp directory for staging S3 snapshot archives locally. Empty → system temp.
+    devnest_snapshot_temp_dir: str = ""
 
     # Standalone gateway route-admin (data plane): register/deregister workspace routes after orchestration.
     # DEVNEST_GATEWAY_URL is the route-admin HTTP base (not Traefik's public :80). Default matches compose
@@ -67,6 +74,9 @@ class Settings(BaseSettings):
     devnest_gateway_enabled: bool = False
     # Used for gateway_url hint on attach/access when route registration is enabled (no TLS in V1).
     devnest_gateway_public_scheme: str = "http"
+    # When true, GET /internal/gateway/auth enforces workspace session validation for Traefik ForwardAuth.
+    # Set false in local/dev mode (default) to skip session requirement during development.
+    devnest_gateway_auth_enabled: bool = False
 
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""
@@ -85,7 +95,7 @@ class Settings(BaseSettings):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
-    @field_validator("devnest_gateway_enabled", mode="before")
+    @field_validator("devnest_gateway_enabled", "devnest_gateway_auth_enabled", mode="before")
     @classmethod
     def _parse_devnest_gateway_enabled(cls, v):  # noqa: ANN001
         if isinstance(v, bool):

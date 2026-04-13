@@ -1,6 +1,14 @@
-# DevNest gateway — static Traefik configuration (V1).
-# TODO: Enable TLS entrypoint and certificate resolver when DNS + ACME are in scope.
-# TODO: Secure or disable dashboard in production; restrict API/dashboard bind addresses.
+# DevNest gateway — static Traefik configuration.
+#
+# TLS / HTTPS:
+#   - Local/dev:    DEVNEST_TLS_ENABLED=false (default). Only port 80 is active.
+#   - Dev with TLS: DEVNEST_TLS_ENABLED=true, DEVNEST_TLS_RESOLVER=none.
+#                   Traefik generates a self-signed certificate for the websecure entrypoint.
+#   - Production:   DEVNEST_TLS_ENABLED=true, DEVNEST_TLS_RESOLVER=letsencrypt (or cloudflare).
+#                   Set DEVNEST_ACME_EMAIL and ensure port 443 is publicly reachable.
+#
+# See docs/DEPLOYMENT.md for full TLS setup instructions.
+# TODO: Restrict dashboard/API in production (disable insecure dashboard or add BasicAuth/IP allow-list).
 
 global:
   checkNewVersion: false
@@ -13,9 +21,15 @@ api:
 entryPoints:
   web:
     address: ":80"
-    # TODO(websecure): add entryPoints.websecure on :443 + tls when TLS automation exists.
-    # forwardedHeaders:
-    #   insecure: true  # only if behind another trusted L7 proxy
+    # HTTP → HTTPS redirect is applied per-router via the devnest-https-redirect middleware
+    # (defined in traefik/dynamic/000-base.yml) when TLS is enabled. Not wired globally here
+    # so local/dev traffic on port 80 is unaffected.
+
+  websecure:
+    address: ":443"
+    # TLS is negotiated per-router (tls: {} on the router). When no certificatesResolver is set
+    # on the router, Traefik uses its built-in self-signed fallback certificate (dev/local).
+    # In production set tls.certResolver on each router or via the defaultGeneratedCert option.
 
 providers:
   file:
@@ -24,6 +38,24 @@ providers:
     watch: true
   # TODO: Add providers.http pointing at control-plane route registry when implemented.
   # TODO: Add providers.redis or Kubernetes CRD for multi-replica dynamic state.
+
+# ACME / Let's Encrypt certificate resolver (production).
+# Uncomment and configure when DEVNEST_TLS_ENABLED=true with a public domain.
+#
+# certificatesResolvers:
+#   letsencrypt:
+#     acme:
+#       email: "${DEVNEST_ACME_EMAIL}"
+#       storage: /etc/traefik/acme/acme.json
+#       httpChallenge:
+#         entryPoint: web
+#   # Alternative: DNS challenge via Cloudflare (set CF_API_EMAIL + CF_DNS_API_TOKEN env vars).
+#   # cloudflare:
+#   #   acme:
+#   #     email: "${DEVNEST_ACME_EMAIL}"
+#   #     storage: /etc/traefik/acme/acme.json
+#   #     dnsChallenge:
+#   #       provider: cloudflare
 
 log:
   level: INFO

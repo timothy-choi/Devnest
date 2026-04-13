@@ -21,6 +21,7 @@ from app.services.quota_service.api.routers import router as quota_router
 from app.services.quota_service.errors import QuotaExceededError
 from app.services.usage_service.api.routers import router as usage_router
 from app.services.workspace_service.api.routers import (
+    internal_gateway_auth_router,
     internal_workspace_jobs_router,
     internal_workspace_reconcile_router,
     snapshots_router,
@@ -84,3 +85,4 @@ app.include_router(audit_router)
 app.include_router(usage_router)
 app.include_router(policy_router)
 app.include_router(quota_router)
+app.include_router(internal_gateway_auth_router)

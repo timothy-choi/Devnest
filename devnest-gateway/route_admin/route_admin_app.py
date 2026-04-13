@@ -2,7 +2,13 @@
 Route registration API (control plane → data plane, V1).
 
 Persists Traefik file-provider fragments to ROUTES_FILE (merged with static routes in the same
-directory). TODO: auth, TLS, HA / leader election, reconcile with backend truth.
+directory). TODO: HA / leader election, reconcile with backend truth.
+
+ForwardAuth middleware:
+  When DEVNEST_GATEWAY_AUTH_ENABLED=true (default: false), each workspace router gets
+  the ``devnest-workspace-auth@file`` middleware attached so Traefik validates workspace
+  session tokens via the backend's ``GET /internal/gateway/auth`` endpoint before proxying.
+  The middleware is defined in traefik/dynamic/000-base.yml.
 """
 
 from __future__ import annotations
@@ -24,6 +30,17 @@ logger = logging.getLogger(__name__)
 
 # Container default: shared volume with Traefik. Override in tests via monkeypatch.
 ROUTES_FILE = Path(os.environ.get("ROUTES_FILE", "/etc/traefik/dynamic/100-workspaces.yml"))
+
+# When true, attach devnest-workspace-auth@file middleware to every workspace router.
+# Must match DEVNEST_GATEWAY_AUTH_ENABLED in the backend config.
+_GATEWAY_AUTH_ENABLED: bool = os.environ.get("DEVNEST_GATEWAY_AUTH_ENABLED", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+# When true, generated routers use the ``websecure`` entrypoint instead of ``web``.
+_TLS_ENABLED: bool = os.environ.get("DEVNEST_TLS_ENABLED", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 _lock = threading.Lock()
 _routes: dict[str, dict[str, str]] = {}
@@ -79,13 +96,19 @@ def _persist_locked() -> None:
 
     routers: dict[str, Any] = {}
     services: dict[str, Any] = {}
+    entrypoint = "websecure" if _TLS_ENABLED else "web"
     for wid, row in sorted(_routes.items(), key=lambda kv: kv[0]):
         rname = _router_name(wid)
-        routers[rname] = {
+        router_def: dict[str, Any] = {
             "rule": f"Host(`{row['public_host']}`)",
-            "entryPoints": ["web"],
+            "entryPoints": [entrypoint],
             "service": f"{rname}-upstream",
         }
+        if _GATEWAY_AUTH_ENABLED:
+            router_def["middlewares"] = ["devnest-workspace-auth@file"]
+        if _TLS_ENABLED:
+            router_def["tls"] = {}
+        routers[rname] = router_def
         services[f"{rname}-upstream"] = {
             "loadBalancer": {"servers": [{"url": row["target"]}]},
         }

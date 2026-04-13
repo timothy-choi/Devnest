@@ -935,6 +935,45 @@ def _execute_snapshot_create_job(
     )
 
     if res.success:
+        # For object-storage providers (e.g. S3), upload the local staging archive to remote
+        # storage after the orchestrator writes it.  Local providers are a no-op here.
+        if hasattr(storage, "upload_archive"):
+            try:
+                log_event(
+                    logger,
+                    LogEvent.SNAPSHOT_STORAGE_UPLOAD_STARTED,
+                    correlation_id=job.correlation_id,
+                    workspace_id=wid,
+                    workspace_snapshot_id=sid,
+                )
+                storage.upload_archive(workspace_id=wid, snapshot_id=sid)
+                log_event(
+                    logger,
+                    LogEvent.SNAPSHOT_STORAGE_UPLOAD_SUCCEEDED,
+                    correlation_id=job.correlation_id,
+                    workspace_id=wid,
+                    workspace_snapshot_id=sid,
+                )
+            except Exception as upload_exc:
+                log_event(
+                    logger,
+                    LogEvent.SNAPSHOT_STORAGE_UPLOAD_FAILED,
+                    correlation_id=job.correlation_id,
+                    workspace_id=wid,
+                    workspace_snapshot_id=sid,
+                )
+                snap.status = WorkspaceSnapshotStatus.FAILED.value
+                session.add(snap)
+                _mark_job_failed(
+                    session,
+                    job,
+                    f"snapshot:create:upload_failed:{upload_exc}",
+                    failure_stage=FailureStage.STORAGE.value,
+                    failure_code="SNAPSHOT_CREATE_UPLOAD_FAILED",
+                )
+                _touch_workspace(session, ws)
+                return
+
         snap.storage_uri = storage.storage_uri(workspace_id=wid, snapshot_id=sid)
         snap.size_bytes = int(res.size_bytes or 0)
         snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
@@ -1077,6 +1116,46 @@ def _execute_snapshot_restore_job(
 
     storage = get_snapshot_storage_provider()
     archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
+
+    # For object-storage providers (e.g. S3), download the archive to the local staging path
+    # before the orchestrator reads it.  Local providers are a no-op here.
+    if hasattr(storage, "download_archive"):
+        try:
+            log_event(
+                logger,
+                LogEvent.SNAPSHOT_STORAGE_DOWNLOAD_STARTED,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_snapshot_id=sid,
+            )
+            storage.download_archive(workspace_id=wid, snapshot_id=sid)
+            log_event(
+                logger,
+                LogEvent.SNAPSHOT_STORAGE_DOWNLOAD_SUCCEEDED,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_snapshot_id=sid,
+            )
+        except Exception as dl_exc:
+            log_event(
+                logger,
+                LogEvent.SNAPSHOT_STORAGE_DOWNLOAD_FAILED,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_snapshot_id=sid,
+            )
+            snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
+            session.add(snap)
+            _mark_job_failed(
+                session,
+                job,
+                f"snapshot:restore:download_failed:{dl_exc}",
+                failure_stage=FailureStage.STORAGE.value,
+                failure_code="SNAPSHOT_RESTORE_DOWNLOAD_FAILED",
+            )
+            _touch_workspace(session, ws)
+            return
+
     if not storage.has_nonempty_archive(workspace_id=wid, snapshot_id=sid):
         msg = f"snapshot:restore:archive_missing_or_empty:{archive_path}"
         snap.status = WorkspaceSnapshotStatus.AVAILABLE.value

@@ -1,5 +1,16 @@
 # DevNest data-plane: Traefik + route-admin (registration API) + mock upstream for local smoke tests.
 # Control plane (DevNest backend) is NOT started here — run it separately.
+#
+# TLS / HTTPS:
+#   - Local (default):   DEVNEST_TLS_ENABLED=false — only port 80 is published.
+#   - Local with TLS:    DEVNEST_TLS_ENABLED=true — port 443 published; Traefik uses self-signed cert.
+#   - Production ACME:   DEVNEST_TLS_ENABLED=true — uncomment the acme volume mount in traefik service,
+#                        configure certificatesResolvers in traefik.yml and set DEVNEST_ACME_EMAIL.
+#
+# Gateway ForwardAuth:
+#   DEVNEST_GATEWAY_AUTH_ENABLED=true enables session enforcement on workspace routes.
+#   Must match the backend DEVNEST_GATEWAY_AUTH_ENABLED setting.
+#   DEVNEST_BACKEND_AUTH_URL must point to the backend's /internal/gateway/auth endpoint.
 
 services:
   traefik:
@@ -10,10 +21,13 @@ services:
       - "--configFile=/etc/traefik/traefik.yml"
     ports:
       - "${DEVNEST_GATEWAY_PORT:-80}:80"
+      - "${DEVNEST_GATEWAY_TLS_PORT:-443}:443"
       - "${DEVNEST_DASHBOARD_PORT:-8080}:8080"
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      # Uncomment to persist ACME certificates across restarts (production only).
+      # - ./traefik/acme:/etc/traefik/acme
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -33,6 +47,10 @@ services:
       - ./traefik/dynamic:/etc/traefik/dynamic
     environment:
       ROUTES_FILE: /etc/traefik/dynamic/100-workspaces.yml
+      # ForwardAuth: attach devnest-workspace-auth middleware to workspace routes when enabled.
+      DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
+      # TLS: route-admin uses websecure entrypoint for workspace routes when enabled.
+      DEVNEST_TLS_ENABLED: "${DEVNEST_TLS_ENABLED:-false}"
     networks:
       - devnest-gateway
 
