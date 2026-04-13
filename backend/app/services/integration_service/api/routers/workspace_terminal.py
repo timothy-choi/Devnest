@@ -27,16 +27,23 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 from app.libs.db.database import get_db
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
 from app.services.auth_service.services.auth_token import decode_access_user_id
 from app.services.auth_service.services.auth_profile_service import get_user_auth_entry
 from app.services.integration_service.terminal_service import TerminalError, relay_terminal
 from app.services.node_execution_service.factory import resolve_node_execution_bundle
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.service import record_usage
 from app.services.workspace_service.errors import WorkspaceAccessDeniedError
 from app.services.workspace_service.models import Workspace, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceStatus
 from app.services.workspace_service.services.workspace_session_service import (
     resolve_workspace_session_for_access,
 )
+
+# Starlette WebSocketState values: 0=CONNECTING 1=CONNECTED 2=DISCONNECTED
+_WS_STATE_DISCONNECTED = 2
 
 _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspaces", tags=["workspace-terminal"])
@@ -133,6 +140,24 @@ async def workspace_terminal(
         "terminal_connect",
         extra={"workspace_id": workspace_id, "user_id": resolved_user_id, "container_id": runtime.container_id},
     )
+    record_audit(
+        db,
+        action=AuditAction.INTEGRATION_TERMINAL_SESSION_STARTED.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        actor_user_id=resolved_user_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=workspace_id,
+        metadata={"container_id": runtime.container_id, "shell": shell},
+    )
+    record_usage(
+        db,
+        event_type=UsageEventType.TERMINAL_SESSION.value,
+        workspace_id=workspace_id,
+        owner_user_id=resolved_user_id,
+    )
+    db.commit()
 
     try:
         await relay_terminal(
@@ -145,7 +170,7 @@ async def workspace_terminal(
         )
     except TerminalError as exc:
         _logger.warning("terminal_setup_error", extra={"workspace_id": workspace_id, "error": str(exc)})
-        if not websocket.client_state.value >= 2:  # not already closed
+        if websocket.client_state.value < _WS_STATE_DISCONNECTED:
             try:
                 await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
                 await websocket.close(code=_CLOSE_INTERNAL_ERROR)

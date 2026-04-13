@@ -57,7 +57,13 @@ class GitHubClient:
         resp = httpx.post(
             url, headers=self._headers(), json=body, timeout=_TIMEOUT_SECONDS
         )
-        return resp.status_code, (resp.json() if resp.content else {})
+        if not resp.content:
+            return resp.status_code, {}
+        try:
+            return resp.status_code, resp.json()
+        except Exception:
+            # GitHub occasionally returns HTML error pages; surface as raw text.
+            return resp.status_code, {"raw": resp.text[:512]}
 
     # ── Public methods ────────────────────────────────────────────────────────
 

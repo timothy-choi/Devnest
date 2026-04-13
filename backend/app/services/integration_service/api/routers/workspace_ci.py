@@ -20,12 +20,17 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlmodel import Session, select
 
 from app.libs.db.database import get_db
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.integration_service.api.routers.provider_tokens import resolve_provider_token
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.service import record_usage
 from app.services.integration_service.api.schemas import (
     CIConfigRequest,
     CIConfigResponse,
@@ -101,7 +106,7 @@ def upsert_ci_config(
     body: CIConfigRequest,
     current: UserAuth = Depends(get_current_user),
     session: Session = Depends(get_db),
-) -> CIConfigResponse:
+) -> Response:
     assert current.user_auth_id is not None
     _get_workspace_owned(session, workspace_id, current.user_auth_id)
 
@@ -118,7 +123,14 @@ def upsert_ci_config(
         session.add(existing)
         session.commit()
         session.refresh(existing)
-        return _ci_config_response(existing)
+        # Return 200 for update (201 is reserved for resource creation).
+        from fastapi.encoders import jsonable_encoder  # noqa: PLC0415
+        import json  # noqa: PLC0415
+        return Response(
+            content=json.dumps(jsonable_encoder(_ci_config_response(existing))),
+            status_code=status.HTTP_200_OK,
+            media_type="application/json",
+        )
 
     cfg = WorkspaceCIConfig(
         workspace_id=workspace_id,
@@ -197,10 +209,12 @@ def trigger_ci(
         )
 
     ref = body.ref or cfg.default_branch
-    client_payload = {
+    # Keep trusted fields in top-level payload; user inputs are nested under "inputs"
+    # to prevent callers from overwriting workspace_id or ref.
+    client_payload: dict = {
         "workspace_id": workspace_id,
         "ref": ref,
-        **(body.inputs or {}),
+        "inputs": body.inputs or {},
     }
 
     now = datetime.now(timezone.utc)
@@ -235,6 +249,17 @@ def trigger_ci(
         record.status = "failed"
         record.error_msg = str(exc)[:512]
         session.add(record)
+        record_audit(
+            session,
+            action=AuditAction.INTEGRATION_CI_TRIGGER_FAILED.value,
+            resource_type="workspace",
+            resource_id=workspace_id,
+            actor_user_id=current.user_auth_id,
+            actor_type=AuditActorType.USER.value,
+            outcome=AuditOutcome.FAILURE.value,
+            workspace_id=workspace_id,
+            reason=str(exc)[:256],
+        )
         session.commit()
         session.refresh(record)
         raise HTTPException(
@@ -242,9 +267,28 @@ def trigger_ci(
             detail=f"GitHub dispatch failed: {exc}",
         ) from exc
 
+    record.status = "succeeded"
     session.add(record)
+    record_audit(
+        session,
+        action=AuditAction.INTEGRATION_CI_TRIGGERED.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        actor_user_id=current.user_auth_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=workspace_id,
+        metadata={"event_type": body.event_type, "ref": ref, "repo": f"{cfg.repo_owner}/{cfg.repo_name}"},
+    )
+    record_usage(
+        session,
+        event_type=UsageEventType.CI_TRIGGERED.value,
+        workspace_id=workspace_id,
+        owner_user_id=current.user_auth_id,
+    )
     session.commit()
     session.refresh(record)
+
     return CITriggerResponse(
         trigger_id=int(record.trigger_id),
         workspace_id=workspace_id,

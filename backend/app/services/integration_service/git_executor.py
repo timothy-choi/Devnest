@@ -24,7 +24,7 @@ responses and audit logs.  The token is never included in ``GitResult.output``.
 from __future__ import annotations
 
 import logging
-import shlex
+import subprocess
 from dataclasses import dataclass
 
 _logger = logging.getLogger(__name__)
@@ -151,9 +151,16 @@ def _run_via_command_runner(
         raw_output = runner.run(docker_args)
         output = _mask_token(raw_output or "", token)
         return GitResult(exit_code=0, output=output)
+    except subprocess.CalledProcessError as exc:
+        # Preserve the real exit code from the subprocess for accurate reporting.
+        exit_code = exc.returncode
+        raw = (exc.output or b"").decode(errors="replace") if isinstance(exc.output, bytes) else str(exc.output or "")
+        raw = raw or str(exc)
+        output = _mask_token(raw, token)
+        _logger.warning("git_exec_command_runner_error", extra={"exit_code": exit_code, "error": output[:256]})
+        return GitResult(exit_code=exit_code, output=output)
     except Exception as exc:
         raw = str(exc)
         output = _mask_token(raw, token)
-        # CommandRunner.run() raises on non-zero exit via subprocess.check; exit_code 1 is conservative.
-        _logger.warning("git_exec_command_runner_error", extra={"error": output[:256]})
+        _logger.warning("git_exec_command_runner_error", extra={"exit_code": 1, "error": output[:256]})
         return GitResult(exit_code=1, output=output)

@@ -81,3 +81,14 @@ class AuditAction(str, Enum):
     # ---- Policy and quota enforcement ----
     POLICY_DENIED = "policy.denied"
     QUOTA_EXCEEDED = "quota.exceeded"
+
+    # ---- Product integrations ----
+    INTEGRATION_PROVIDER_TOKEN_CONNECTED = "integration.provider_token.connected"
+    INTEGRATION_PROVIDER_TOKEN_REVOKED = "integration.provider_token.revoked"
+    INTEGRATION_REPO_IMPORTED = "integration.repo.imported"
+    INTEGRATION_REPO_IMPORT_FAILED = "integration.repo.import_failed"
+    INTEGRATION_GIT_PULL = "integration.git.pull"
+    INTEGRATION_GIT_PUSH = "integration.git.push"
+    INTEGRATION_CI_TRIGGERED = "integration.ci.triggered"
+    INTEGRATION_CI_TRIGGER_FAILED = "integration.ci.trigger_failed"
+    INTEGRATION_TERMINAL_SESSION_STARTED = "integration.terminal.session_started"

@@ -23,6 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 
 from app.libs.db.database import get_db
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.oauth_client import (
@@ -206,6 +208,19 @@ def provider_connect_callback(
     try:
         if provider == "github":
             access_token, scopes = _exchange_github_connect_code(code=code)
+            # Verify the granted scopes include the required "repo" scope for workspace
+            # operations.  A user may approve fewer scopes than requested if their org
+            # has restrictions; surface this as a clear error rather than silent failure.
+            granted = {s.strip() for s in scopes.split(",") if s.strip()}
+            if "repo" not in granted:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "GitHub OAuth token does not include the required 'repo' scope. "
+                        f"Granted scopes: {scopes or '(none)'}. "
+                        "Re-authorize and ensure you approve repository access."
+                    ),
+                )
             profile = fetch_github_profile(access_token=access_token)
         else:
             raise HTTPException(400, detail=f"Provider {provider} not yet implemented")
@@ -224,6 +239,16 @@ def provider_connect_callback(
         existing.provider_username = profile.username
         existing.updated_at = now
         session.add(existing)
+        record_audit(
+            session,
+            action=AuditAction.INTEGRATION_PROVIDER_TOKEN_CONNECTED.value,
+            resource_type="user",
+            resource_id=current.user_auth_id,
+            actor_user_id=current.user_auth_id,
+            actor_type=AuditActorType.USER.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            metadata={"provider": provider, "scopes": scopes, "update": True},
+        )
         session.commit()
         session.refresh(existing)
         _logger.info("provider_token_updated", extra={"user_id": current.user_auth_id, "provider": provider})
@@ -240,6 +265,16 @@ def provider_connect_callback(
         updated_at=now,
     )
     session.add(row)
+    record_audit(
+        session,
+        action=AuditAction.INTEGRATION_PROVIDER_TOKEN_CONNECTED.value,
+        resource_type="user",
+        resource_id=current.user_auth_id,
+        actor_user_id=current.user_auth_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        metadata={"provider": provider, "scopes": scopes, "update": False},
+    )
     session.commit()
     session.refresh(row)
     return _token_to_response(row)
@@ -260,7 +295,18 @@ def delete_provider_token(
     row = session.get(UserProviderToken, token_id)
     if row is None or row.user_id != current.user_auth_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider token not found")
+    provider = row.provider
     session.delete(row)
+    record_audit(
+        session,
+        action=AuditAction.INTEGRATION_PROVIDER_TOKEN_REVOKED.value,
+        resource_type="user",
+        resource_id=current.user_auth_id,
+        actor_user_id=current.user_auth_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        metadata={"provider": provider, "token_id": token_id},
+    )
     session.commit()
 
 

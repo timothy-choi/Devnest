@@ -24,10 +24,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
 
 from app.libs.db.database import get_db
-from app.libs.observability.correlation import get_correlation_id
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.service import record_audit
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.integration_service.api.routers.provider_tokens import resolve_provider_token
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.service import record_usage
 from app.services.integration_service.api.schemas import (
     GitOperationResponse,
     GitPullRequest,
@@ -145,8 +148,6 @@ def import_repo(
         created_at=now,
         updated_at=now,
     )
-    if body.use_provider:
-        repo.provider = body.use_provider
 
     # Derive provider_repo_name from GitHub URL if possible.
     url = body.repo_url
@@ -162,6 +163,17 @@ def import_repo(
     job_id = _enqueue_repo_import_job(session, repo)
     repo.last_job_id = job_id
     session.add(repo)
+    record_audit(
+        session,
+        action=AuditAction.INTEGRATION_REPO_IMPORTED.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        actor_user_id=current.user_auth_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=workspace_id,
+        metadata={"repo_url": body.repo_url, "branch": body.branch, "clone_dir": body.clone_dir},
+    )
     session.commit()
     session.refresh(repo)
 
@@ -277,12 +289,30 @@ async def git_pull(
     except GitExecutionError as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
+    now = datetime.now(timezone.utc)
+    audit_outcome = AuditOutcome.SUCCESS.value if result.success else AuditOutcome.FAILURE.value
     if result.success:
-        now = datetime.now(timezone.utc)
         repo.last_synced_at = now
         repo.updated_at = now
         session.add(repo)
-        session.commit()
+        record_usage(
+            session,
+            event_type=UsageEventType.GIT_PULL.value,
+            workspace_id=workspace_id,
+            owner_user_id=current.user_auth_id,
+        )
+    record_audit(
+        session,
+        action=AuditAction.INTEGRATION_GIT_PULL.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        actor_user_id=current.user_auth_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=audit_outcome,
+        workspace_id=workspace_id,
+        metadata={"repo_url": repo.repo_url, "exit_code": result.exit_code},
+    )
+    session.commit()
 
     return GitOperationResponse(
         success=result.success,
@@ -345,6 +375,27 @@ async def git_push(
         raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="git push timed out") from None
     except GitExecutionError as exc:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    audit_outcome = AuditOutcome.SUCCESS.value if result.success else AuditOutcome.FAILURE.value
+    if result.success:
+        record_usage(
+            session,
+            event_type=UsageEventType.GIT_PUSH.value,
+            workspace_id=workspace_id,
+            owner_user_id=current.user_auth_id,
+        )
+    record_audit(
+        session,
+        action=AuditAction.INTEGRATION_GIT_PUSH.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        actor_user_id=current.user_auth_id,
+        actor_type=AuditActorType.USER.value,
+        outcome=audit_outcome,
+        workspace_id=workspace_id,
+        metadata={"repo_url": repo.repo_url, "exit_code": result.exit_code, "force": body.force},
+    )
+    session.commit()
 
     return GitOperationResponse(
         success=result.success,

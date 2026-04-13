@@ -146,6 +146,53 @@ def test_delete_repo_association(client):
     assert resp.status_code == status.HTTP_404_NOT_FOUND
 
 
+def test_import_repo_rejects_non_https_url(client):
+    """Malicious / non-HTTPS repo_url is rejected with 422 before hitting the DB."""
+    token = _register_and_login(client, username="malurl", email="malurl@example.com")
+    ws_id = _create_workspace(client, token, name="ws_malurl")
+
+    for bad_url in (
+        "http://github.com/alice/repo.git",
+        "file:///etc/passwd",
+        "git@github.com:alice/repo.git",
+    ):
+        resp = client.post(
+            f"/workspaces/{ws_id}/import-repo",
+            json={"repo_url": bad_url},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY, (
+            f"Expected 422 for {bad_url!r}, got {resp.status_code}"
+        )
+
+
+def test_import_repo_rejects_private_ip_url(client):
+    """Private IP repo_url is rejected."""
+    token = _register_and_login(client, username="privip", email="privip@example.com")
+    ws_id = _create_workspace(client, token, name="ws_privip")
+    resp = client.post(
+        f"/workspaces/{ws_id}/import-repo",
+        json={"repo_url": "https://192.168.1.10/evil/repo.git"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
+def test_import_repo_rejects_path_traversal_clone_dir(client):
+    """clone_dir with '..' components is rejected with 422."""
+    token = _register_and_login(client, username="travdot", email="travdot@example.com")
+    ws_id = _create_workspace(client, token, name="ws_travdot")
+    resp = client.post(
+        f"/workspaces/{ws_id}/import-repo",
+        json={
+            "repo_url": "https://github.com/alice/repo.git",
+            "clone_dir": "/workspace/../etc/passwd",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+
 def test_git_pull_requires_cloned_repo(client):
     """Pull on a workspace with no repo returns 404; on a pending repo returns 409."""
     token = _register_and_login(client, username="pulltest", email="pulltest@example.com")

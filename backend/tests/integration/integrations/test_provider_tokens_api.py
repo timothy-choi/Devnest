@@ -69,6 +69,43 @@ def test_delete_nonexistent_token_returns_404(client):
     assert resp.status_code == status.HTTP_404_NOT_FOUND
 
 
+def test_callback_rejects_insufficient_scopes(client, monkeypatch):
+    """If GitHub grants scopes that don't include 'repo', the callback returns 400."""
+    from app.services.auth_service.services.oauth_state import create_oauth_state
+
+    token = _register_and_login(client, username="scopetest", email="scopetest@example.com")
+
+    # Build a valid state token.
+    state = create_oauth_state(provider="github")
+
+    # Monkey-patch the token exchange so GitHub returns only "read:user" (no "repo").
+    def mock_exchange(url, **kwargs):
+        return httpx.Response(
+            200,
+            json={"access_token": "ghp_noscope", "scope": "read:user", "token_type": "bearer"},
+        )
+
+    monkeypatch.setattr(httpx, "post", mock_exchange)
+
+    # Also patch fetch_github_profile so it doesn't hit the network.
+    def mock_fetch_profile(*, access_token):
+        from app.services.auth_service.services.oauth_client import OAuthProfile
+        return OAuthProfile(provider_user_id="123", username="scopetest", email=None)
+
+    monkeypatch.setattr(
+        "app.services.auth_service.services.oauth_client.fetch_github_profile",
+        mock_fetch_profile,
+    )
+
+    resp = client.get(
+        "/auth/provider-tokens/github/callback",
+        params={"code": "fake-code", "state": state},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    assert "repo" in resp.json()["detail"].lower()
+
+
 def test_delete_other_users_token_returns_404(client, db_session, monkeypatch):
     """A user cannot delete another user's token."""
     from datetime import datetime, timezone

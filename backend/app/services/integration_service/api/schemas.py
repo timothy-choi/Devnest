@@ -2,10 +2,40 @@
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+
+
+def _validate_clone_url(v: str) -> str:
+    """Reject non-HTTPS schemes and RFC-1918 / loopback targets."""
+    parsed = urlparse(v)
+    if parsed.scheme not in ("https", "git+https"):
+        raise ValueError("repo_url must use https:// or git+https:// scheme")
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError("repo_url must include a valid hostname")
+    try:
+        addr = ipaddress.ip_address(host)
+        if addr.is_private or addr.is_loopback or addr.is_link_local:
+            raise ValueError("repo_url hostname must not be a private/loopback address")
+    except ValueError as exc:
+        if "repo_url" in str(exc):
+            raise
+        # hostname is a domain name — allowed; IP parsing failed because it's DNS
+    return v
+
+
+def _validate_clone_dir(v: str) -> str:
+    """Reject path traversal attempts."""
+    if ".." in v.split("/"):
+        raise ValueError("clone_dir must not contain '..' components")
+    if not v.startswith("/"):
+        raise ValueError("clone_dir must be an absolute path")
+    return v
 
 
 # ── Provider token (OAuth connect) ───────────────────────────────────────────
@@ -39,6 +69,16 @@ class ImportRepoRequest(BaseModel):
         default=None, max_length=32,
         description="Provider name whose stored token to use for private repos",
     )
+
+    @field_validator("repo_url")
+    @classmethod
+    def validate_repo_url(cls, v: str) -> str:
+        return _validate_clone_url(v)
+
+    @field_validator("clone_dir")
+    @classmethod
+    def validate_clone_dir(cls, v: str) -> str:
+        return _validate_clone_dir(v)
 
 
 class ImportRepoResponse(BaseModel):

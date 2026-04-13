@@ -101,3 +101,54 @@ def test_docker_sdk_exception_raises_git_execution_error():
 
     with pytest.raises(GitExecutionError, match="docker_exec_failed"):
         run_git_in_container(bundle, "missing_cid", ["status"])
+
+
+def test_ssm_called_process_error_preserves_exit_code():
+    """When command_runner raises CalledProcessError the real exit code is returned."""
+    import subprocess
+    from app.services.integration_service.git_executor import run_git_in_container
+
+    bundle = _make_bundle("ssm_docker")
+    err = subprocess.CalledProcessError(
+        returncode=128,
+        cmd=["docker", "exec", "cid", "git", "pull"],
+        output=b"fatal: not a git repository",
+    )
+    bundle.topology_command_runner.run.side_effect = err
+
+    result = run_git_in_container(bundle, "cid", ["pull", "origin", "main"])
+    assert not result.success
+    assert result.exit_code == 128
+    assert "fatal" in result.output
+
+
+def test_ssm_generic_exception_returns_exit_code_1():
+    """Non-subprocess exceptions on command_runner still surface exit_code 1."""
+    from app.services.integration_service.git_executor import run_git_in_container
+
+    bundle = _make_bundle("ssm_docker")
+    bundle.topology_command_runner.run.side_effect = RuntimeError("SSM timeout")
+
+    result = run_git_in_container(bundle, "cid", ["clone", "https://github.com/a/b.git", "/w"])
+    assert not result.success
+    assert result.exit_code == 1
+    assert "SSM timeout" in result.output
+
+
+def test_token_never_in_exception_output():
+    """Tokens appearing in an exception message are masked in the returned output."""
+    import subprocess
+    from app.services.integration_service.git_executor import run_git_in_container
+
+    secret = "ghp_exceptiontoken"
+    bundle = _make_bundle("ssm_docker")
+    err = subprocess.CalledProcessError(
+        returncode=1,
+        cmd=["docker", "exec"],
+        output=f"error: {secret} is invalid".encode(),
+    )
+    bundle.topology_command_runner.run.side_effect = err
+
+    result = run_git_in_container(bundle, "cid", ["push"], provider_token=secret)
+    assert secret not in result.output
+    assert "***" in result.output
