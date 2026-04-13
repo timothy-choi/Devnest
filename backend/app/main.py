@@ -1,13 +1,17 @@
 """Application entrypoint. Run: ``uvicorn app.main:app`` from the ``backend`` directory."""
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.libs.db.database import init_db
+from app.libs.events.workspace_event_bus import get_event_bus
 from app.libs.observability.middleware import CorrelationIdMiddleware
+from app.libs.security.rate_limit import RateLimitMiddleware
 from app.workers.lifespan_worker import start_background_worker, stop_background_worker
+from app.workers.lifespan_reconcile import start_reconcile_loop, stop_reconcile_loop
 from app.libs.observability.routes import router as observability_router
 from app.services.audit_service.api.routers import router as audit_router
 from app.services.auth_service.api.routers.auth import router as auth_router
@@ -33,14 +37,22 @@ from app.services.workspace_service.api.routers import (
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    # Attach the event loop to the in-process SSE event bus so worker threads can
+    # signal SSE generators via call_soon_threadsafe.
+    get_event_bus().attach_event_loop(asyncio.get_event_loop())
     start_background_worker()
+    start_reconcile_loop()
     try:
         yield
     finally:
+        await stop_reconcile_loop()
         await stop_background_worker()
 
 
 app = FastAPI(title="DevNest API", lifespan=lifespan)
+# Rate limiting middleware (global default: 300 req/min per IP; tighter per-route limits below).
+# RateLimitMiddleware respects DEVNEST_RATE_LIMIT_ENABLED; set to false to disable.
+app.add_middleware(RateLimitMiddleware, default_calls=300, default_period=60)
 app.add_middleware(CorrelationIdMiddleware)
 
 

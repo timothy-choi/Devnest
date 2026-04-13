@@ -45,8 +45,18 @@ async def _run_one_tick(*, batch_size: int) -> int:
         from app.workers.workspace_job_runner import (  # noqa: PLC0415
             execute_workspace_job_tick_with_default_orchestrator,
         )
+        from app.workers.workspace_job_worker.worker import reclaim_stuck_running_jobs  # noqa: PLC0415
 
         engine = get_engine()
+
+        # Reclaim jobs orphaned by a previous crashed worker before claiming new ones.
+        try:
+            reclaimed = reclaim_stuck_running_jobs(engine)
+            if reclaimed:
+                _logger.info("lifespan_worker_reclaimed_stuck_jobs", extra={"count": reclaimed})
+        except Exception:
+            _logger.warning("lifespan_worker_reclaim_error", exc_info=True)
+
         with Session(engine) as session:
             result = execute_workspace_job_tick_with_default_orchestrator(
                 session,

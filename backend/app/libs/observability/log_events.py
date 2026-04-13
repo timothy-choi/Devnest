@@ -139,6 +139,20 @@ class LogEvent:
     GATEWAY_AUTH_ALLOWED = "gateway.auth.allowed"
     GATEWAY_AUTH_DENIED = "gateway.auth.denied"
 
+    RECONCILE_LOOP_STARTED = "reconcile.loop.started"
+    RECONCILE_LOOP_STOPPED = "reconcile.loop.stopped"
+    RECONCILE_LOOP_TICK = "reconcile.loop.tick"
+    RECONCILE_LOOP_ENQUEUE_SKIPPED = "reconcile.loop.enqueue_skipped"
+    RECONCILE_LOOP_TICK_ERROR = "reconcile.loop.tick_error"
+    RECONCILE_LEASE_HELD = "reconcile.lease.held"
+    RECONCILE_LEASE_STALE = "reconcile.lease.stale"
+
+    WORKER_STUCK_JOB_RECLAIMED = "worker.stuck_job.reclaimed"
+    WORKER_STUCK_JOB_RETRY_SCHEDULED = "worker.stuck_job.retry_scheduled"
+    WORKER_STUCK_JOB_TERMINAL = "worker.stuck_job.terminal"
+
+    SSE_EVENT_BUS_NOTIFIED = "sse.event_bus.notified"
+
     SNAPSHOT_STORAGE_UPLOAD_STARTED = "snapshot.storage.upload.started"
     SNAPSHOT_STORAGE_UPLOAD_SUCCEEDED = "snapshot.storage.upload.succeeded"
     SNAPSHOT_STORAGE_UPLOAD_FAILED = "snapshot.storage.upload.failed"

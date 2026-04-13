@@ -81,6 +81,51 @@ Three execution modes (can coexist safely):
 
 All modes share the same dequeue semantics (`FOR UPDATE SKIP LOCKED`; per-job commit).
 
+**Stuck-job reclaim**: The in-process worker detects jobs that have been in `RUNNING`
+state longer than `WORKSPACE_JOB_STUCK_TIMEOUT_SECONDS` (default 300s) and either
+retries them (if attempts remain) or marks them `FAILED` terminal. Lifecycle jobs
+(`START`, `STOP`, etc.) also move the workspace to `ERROR` on terminal reclaim.
+Reconcile and snapshot jobs do not move the workspace to `ERROR`.
+
+### Automated Reconcile Loop
+
+`app/workers/lifespan_reconcile.py` runs as a FastAPI lifespan background task
+(when `DEVNEST_RECONCILE_ENABLED=true`). On each tick it queries workspaces in the
+target statuses (default: `RUNNING,ERROR`) and calls `enqueue_reconcile_runtime_job`
+for each. The loop is idempotent — the **reconcile lease** mechanism ensures no
+duplicate jobs are enqueued:
+
+- **QUEUED** reconcile job exists → `WorkspaceBusyError` raised; loop silently skips.
+- **RUNNING** reconcile job within `DEVNEST_RECONCILE_LEASE_TTL_SECONDS` → skipped.
+- **RUNNING** reconcile job older than TTL → stale (crashed worker); allow re-enqueue.
+
+Configuration:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEVNEST_RECONCILE_ENABLED` | `false` | Enable background loop |
+| `DEVNEST_RECONCILE_INTERVAL_SECONDS` | `30` | Tick cadence (floor 10s) |
+| `DEVNEST_RECONCILE_BATCH_SIZE` | `10` | Max workspaces per tick |
+| `DEVNEST_RECONCILE_TARGET_STATUSES` | `RUNNING,ERROR` | Comma-separated statuses |
+| `DEVNEST_RECONCILE_LEASE_TTL_SECONDS` | `120` | Stale-running threshold |
+
+### SSE / Event Delivery
+
+Events are persisted as append-only `WorkspaceEvent` rows and streamed via
+Server-Sent Events on `GET /workspaces/{id}/events`.
+
+**Push-notification bus** (`app/libs/events/workspace_event_bus.py`): When
+`record_workspace_event` commits a row it calls `notify_workspace_event(workspace_id)`,
+which signals an `asyncio.Event` for every SSE generator subscribed to that workspace.
+Generators wake immediately instead of waiting for the next poll interval.
+
+- Single-process: push notification fires within milliseconds of the commit.
+- Multi-process: generators in other processes fall back to periodic polling
+  (every `EVENT_BUS_WAIT_TIMEOUT_SEC` = 2s).
+
+**Resume cursor**: SSE accepts `?last_event_id=N` to replay only events after a known
+cursor, avoiding full-history replay on reconnect.
+
 ### Scheduler and Placement
 
 - `placement_service`: SQL-level node selection (capacity-first, spread-aware).
@@ -124,6 +169,24 @@ All modes share the same dequeue semantics (`FOR UPDATE SKIP LOCKED`; per-job co
 - **ORM**: SQLModel (SQLAlchemy + Pydantic).
 - **Migrations**: Alembic (`backend/alembic/`). See `backend/README.md`.
 - **Session management**: Per-request FastAPI dependency (`get_db`); per-job sessions in the worker.
+
+---
+
+### Rate Limiting
+
+`app/libs/security/rate_limit.py` implements a thread-safe in-memory sliding-window
+rate limiter with no external dependencies:
+
+| Layer | Scope | Default |
+|---|---|---|
+| `RateLimitMiddleware` (global) | per-IP, all routes | 300 req/min |
+| `auth_rate_limit` dependency | per-IP, auth endpoints | 20 req/min |
+| `sse_rate_limit` dependency | per-IP, SSE endpoint | 30 req/min |
+
+- Disable globally: `DEVNEST_RATE_LIMIT_ENABLED=false`.
+- Blocked requests receive HTTP 429 with a `Retry-After` header.
+- Multi-process note: each process has its own window; for production with many workers,
+  replace with a Redis-backed limiter.
 
 ---
 

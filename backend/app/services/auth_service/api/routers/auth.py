@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from sqlmodel import Session
 
 from app.libs.common.config import get_settings
+from app.libs.security.rate_limit import auth_rate_limit
 from app.services.auth_service.models import UserAuth
 from app.services.auth_service.services.login_service import InvalidCredentialsError, login_user
 from app.services.auth_service.services.logout_service import UnknownRefreshTokenError, logout_refresh_token
@@ -127,8 +128,9 @@ def oauth_callback(
     response_model=RegisterResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Register a new user",
+    dependencies=[Depends(auth_rate_limit)],
 )
-def register(body: RegisterRequest, session: Session = Depends(get_db)) -> RegisterResponse:
+def register(body: RegisterRequest, request: Request, session: Session = Depends(get_db)) -> RegisterResponse:
     try:
         user = register_user(
             session,
@@ -164,8 +166,9 @@ def register(body: RegisterRequest, session: Session = Depends(get_db)) -> Regis
     response_model=LoginResponse,
     status_code=status.HTTP_200_OK,
     summary="Log in and receive access + refresh tokens",
+    dependencies=[Depends(auth_rate_limit)],
 )
-def login(body: LoginRequest, session: Session = Depends(get_db)) -> LoginResponse:
+def login(body: LoginRequest, request: Request, session: Session = Depends(get_db)) -> LoginResponse:
     try:
         tokens = login_user(session, username=body.username, password=body.password)
     except InvalidCredentialsError:
@@ -201,8 +204,9 @@ def logout(body: LogoutRequest, session: Session = Depends(get_db)) -> LogoutRes
     response_model=ForgotPasswordResponse,
     status_code=status.HTTP_200_OK,
     summary="Request password reset (same response whether or not the email is registered)",
+    dependencies=[Depends(auth_rate_limit)],
 )
-def forgot_password(body: ForgotPasswordRequest, session: Session = Depends(get_db)) -> ForgotPasswordResponse:
+def forgot_password(body: ForgotPasswordRequest, request: Request, session: Session = Depends(get_db)) -> ForgotPasswordResponse:
     raw = request_password_reset(session, email=str(body.email))
     s = get_settings()
     if s.password_reset_return_token and raw is not None:

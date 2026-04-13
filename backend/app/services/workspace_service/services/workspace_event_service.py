@@ -1,8 +1,9 @@
-"""Persist and stream workspace control-plane events (V1: DB append + polling SSE)."""
+"""Persist and stream workspace control-plane events (V1: DB append + push-notification SSE)."""
 
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +11,8 @@ from sqlmodel import Session, select
 
 from app.services.workspace_service.errors import WorkspaceNotFoundError
 from app.services.workspace_service.models import Workspace, WorkspaceEvent
+
+_logger = logging.getLogger(__name__)
 
 
 class WorkspaceStreamEventType:
@@ -61,7 +64,18 @@ def record_workspace_event(
     session.add(row)
     session.flush()
     assert row.workspace_event_id is not None
-    return row.workspace_event_id
+    eid = row.workspace_event_id
+
+    # Push-notify in-process SSE listeners so they wake immediately instead of
+    # waiting for the next poll interval.  This is a best-effort signal: failures
+    # here must never surface to callers.
+    try:
+        from app.libs.events.workspace_event_bus import notify_workspace_event  # noqa: PLC0415
+        notify_workspace_event(int(workspace_id))
+    except Exception:  # noqa: BLE001
+        _logger.debug("event_bus_notify_failed", exc_info=True)
+
+    return eid
 
 
 def list_workspace_events(

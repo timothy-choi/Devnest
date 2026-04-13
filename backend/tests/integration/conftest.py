@@ -30,11 +30,23 @@ TEST_DB_PASSWORD = "test"
 
 @pytest.fixture(autouse=True)
 def _integration_internal_api_key(monkeypatch):
-    """Internal notification routes require X-Internal-API-Key."""
+    """Internal notification routes require X-Internal-API-Key.
+
+    Also disables in-process rate limiting so integration tests are not throttled
+    (all test requests come from 127.0.0.1 and would quickly exhaust per-IP windows).
+    """
     monkeypatch.setenv("INTERNAL_API_KEY", "integration-test-internal-key")
+    monkeypatch.setenv("DEVNEST_RATE_LIMIT_ENABLED", "false")
     get_settings.cache_clear()
+
+    # Reset any accumulated window state from previous tests in this session.
+    from app.libs.security.rate_limit import reset_all_limiters  # noqa: PLC0415
+    reset_all_limiters()
+
     yield
+
     get_settings.cache_clear()
+    reset_all_limiters()
 
 
 @pytest.fixture(scope="session")
