@@ -35,6 +35,12 @@ from ...services.audit_service.models import AuditLog  # noqa: F401 — register
 from ...services.usage_service.models import WorkspaceUsageRecord  # noqa: F401 — register metadata
 from ...services.policy_service.models import Policy  # noqa: F401 — register metadata
 from ...services.quota_service.models import Quota  # noqa: F401 — register metadata
+from ...services.integration_service.models import (  # noqa: F401 — register metadata
+    CITriggerRecord,
+    UserProviderToken,
+    WorkspaceCIConfig,
+    WorkspaceRepository,
+)
 
 _engine = None
 _session_factory = None

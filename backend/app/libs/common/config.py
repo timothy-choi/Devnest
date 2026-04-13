@@ -66,7 +66,20 @@ class Settings(BaseSettings):
     # Temp directory for staging S3 snapshot archives locally. Empty → system temp.
     devnest_snapshot_temp_dir: str = ""
 
-    # Standalone gateway route-admin (data plane): register/deregister workspace routes after orchestration.
+    # ── Integration / provider token encryption ──────────────────────────────
+    # Key used to Fernet-encrypt stored OAuth provider tokens (GitHub, Google).
+    # If empty, the JWT secret key is used as the derivation input (not recommended for production).
+    # Set to a strong random value in production: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    devnest_token_encryption_key: str = ""
+
+    # Terminal WebSocket: shell to launch in workspace containers (default /bin/bash, fallback /bin/sh).
+    devnest_workspace_shell: str = "/bin/bash"
+    # Terminal WebSocket: default PTY dimensions.
+    devnest_terminal_default_cols: int = 200
+    devnest_terminal_default_rows: int = 50
+
+    # ── Standalone gateway route-admin (data plane) ───────────────────────────
+    # register/deregister workspace routes after orchestration.
     # DEVNEST_GATEWAY_URL is the route-admin HTTP base (not Traefik's public :80). Default matches compose
     # DEVNEST_ROUTE_ADMIN_PORT=9080.
     devnest_gateway_url: str = "http://127.0.0.1:9080"

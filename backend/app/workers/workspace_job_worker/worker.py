@@ -1076,6 +1076,93 @@ def _execute_snapshot_create_job(
     )
 
 
+def _execute_repo_import_job(
+    session: Session,
+    ws: Workspace,
+    job: WorkspaceJob,
+) -> None:
+    """Clone a repository into the workspace container (workspace must be RUNNING).
+
+    Reads ``repo_id`` from ``job.config_json``, resolves the ``WorkspaceRepository`` row,
+    fetches the decrypted provider token (if any), and runs ``git clone`` inside the
+    container via the node execution bundle.  Updates ``WorkspaceRepository.clone_status``
+    on success or failure.
+    """
+    from app.services.integration_service.git_executor import GitExecutionError, run_git_in_container  # noqa: PLC0415
+    from app.services.integration_service.models import WorkspaceRepository  # noqa: PLC0415
+    from app.services.integration_service.api.routers.provider_tokens import resolve_provider_token  # noqa: PLC0415
+    from app.services.node_execution_service.factory import resolve_node_execution_bundle  # noqa: PLC0415
+
+    wid = int(ws.workspace_id)
+    # Find the workspace's repo in pending/cloning state.
+    repo = session.exec(
+        select(WorkspaceRepository).where(
+            WorkspaceRepository.workspace_id == wid,
+            WorkspaceRepository.clone_status.in_(["pending", "cloning"]),
+        ).order_by(WorkspaceRepository.repo_id.desc())
+    ).first()
+    if repo is None:
+        _mark_job_failed(session, job, f"No pending WorkspaceRepository for workspace {wid}", failure_stage=FailureStage.ORCHESTRATION.value, failure_code="REPO_IMPORT_NOT_FOUND")
+        return
+
+    repo.clone_status = "cloning"
+    repo.updated_at = datetime.now(timezone.utc)
+    session.add(repo)
+    session.flush()
+
+    # Resolve execution bundle for the running workspace container.
+    runtime = session.exec(
+        select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)
+    ).first()
+    if runtime is None or not runtime.container_id:
+        repo.clone_status = "failed"
+        repo.error_msg = "Workspace runtime container not available"
+        repo.updated_at = datetime.now(timezone.utc)
+        session.add(repo)
+        _mark_job_failed(session, job, repo.error_msg, failure_stage=FailureStage.ORCHESTRATION.value, failure_code="REPO_IMPORT_NO_RUNTIME")
+        return
+
+    provider_token: str | None = None
+    if repo.provider and repo.owner_user_id:
+        provider_token = resolve_provider_token(session, int(repo.owner_user_id), repo.provider)
+
+    try:
+        bundle = resolve_node_execution_bundle(session, runtime.node_id)
+        git_result = run_git_in_container(
+            bundle,
+            runtime.container_id,
+            ["clone", "--branch", repo.branch, repo.repo_url, repo.clone_dir],
+            workdir="/",
+            provider_token=provider_token,
+            timeout_seconds=300,
+        )
+    except (GitExecutionError, Exception) as exc:
+        msg = str(exc)[:512]
+        repo.clone_status = "failed"
+        repo.error_msg = msg
+        repo.updated_at = datetime.now(timezone.utc)
+        session.add(repo)
+        _mark_job_failed(session, job, msg, failure_stage=FailureStage.ORCHESTRATION.value, failure_code="REPO_IMPORT_EXEC_ERROR")
+        return
+
+    if not git_result.success:
+        repo.clone_status = "failed"
+        repo.error_msg = git_result.output[:512]
+        repo.updated_at = datetime.now(timezone.utc)
+        session.add(repo)
+        _mark_job_failed(session, job, git_result.output[:256], failure_stage=FailureStage.ORCHESTRATION.value, failure_code="REPO_IMPORT_GIT_ERROR")
+        return
+
+    now = datetime.now(timezone.utc)
+    repo.clone_status = "cloned"
+    repo.last_synced_at = now
+    repo.error_msg = None
+    repo.updated_at = now
+    session.add(repo)
+    _mark_job_succeeded(session, job)
+    log_event(logger, LogEvent.WORKSPACE_JOB_SUCCEEDED, workspace_id=wid, workspace_job_id=job.workspace_job_id, job_type=job.job_type)
+
+
 def _execute_snapshot_restore_job(
     session: Session,
     orchestrator: OrchestratorService,
@@ -1328,6 +1415,10 @@ def _execute_job_body(
 
     if jt == WorkspaceJobType.SNAPSHOT_RESTORE.value:
         _execute_snapshot_restore_job(session, orchestrator, ws, job)
+        return
+
+    if jt == WorkspaceJobType.REPO_IMPORT.value:
+        _execute_repo_import_job(session, ws, job)
         return
 
     raise UnsupportedWorkspaceJobTypeError(f"Unsupported WorkspaceJob.type={jt!r}")

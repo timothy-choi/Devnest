@@ -32,6 +32,12 @@ from app.services.workspace_service.api.routers import (
     workspace_snapshots_router,
     workspaces_router,
 )
+from app.services.integration_service.api.routers import (
+    provider_tokens_router,
+    workspace_ci_router,
+    workspace_repos_router,
+    workspace_terminal_router,
+)
 
 
 @asynccontextmanager
@@ -98,3 +104,8 @@ app.include_router(usage_router)
 app.include_router(policy_router)
 app.include_router(quota_router)
 app.include_router(internal_gateway_auth_router)
+# Integration routes (Task 1-5: OAuth, repo import, git sync, CI/CD, terminal)
+app.include_router(provider_tokens_router)
+app.include_router(workspace_repos_router)
+app.include_router(workspace_ci_router)
+app.include_router(workspace_terminal_router)
