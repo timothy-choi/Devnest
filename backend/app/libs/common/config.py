@@ -16,8 +16,13 @@ class Settings(BaseSettings):
     database_url: str
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
-    # When true, startup aborts if jwt_secret_key is the default placeholder value.
-    # Set DEVNEST_REQUIRE_SECRETS=true in staging and production environments.
+    # Active runtime environment. Accepted values: "development", "staging", "production".
+    # When set to any value other than "development", startup aborts if jwt_secret_key is the
+    # default placeholder. This provides automatic enforcement without requiring
+    # DEVNEST_REQUIRE_SECRETS=true to be set manually in every non-dev environment.
+    devnest_env: str = "development"
+    # When true, startup aborts if jwt_secret_key is the default placeholder value regardless of
+    # DEVNEST_ENV. Set DEVNEST_REQUIRE_SECRETS=true in staging and production environments.
     # A loud WARNING is always emitted when the default secret is detected regardless of this flag.
     devnest_require_secrets: bool = False
     access_token_expire_minutes: int = 30
@@ -113,6 +118,7 @@ class Settings(BaseSettings):
         "devnest_gateway_auth_enabled",
         "devnest_reconcile_enabled",
         "devnest_rate_limit_enabled",
+        "devnest_metrics_auth_enabled",
         mode="before",
     )
     @classmethod
@@ -254,6 +260,13 @@ class Settings(BaseSettings):
     # Set to 0 to disable reclaim. Default 300s (5 min).
     workspace_job_stuck_timeout_seconds: int = 300
 
+    # ── Metrics endpoint protection ──────────────────────────────────────────────
+    # When true, GET /metrics requires the X-Internal-API-Key header validated against
+    # the INFRASTRUCTURE scope key (or legacy INTERNAL_API_KEY fallback).
+    # Default false to preserve backward compatibility (protect at ingress in dev/local).
+    # Set true in production when Prometheus scraper can supply the key.
+    devnest_metrics_auth_enabled: bool = False
+
     # ── Rate limiting ─────────────────────────────────────────────────────────
     # Globally enable / disable in-process rate limiting. Default true.
     devnest_rate_limit_enabled: bool = True
@@ -334,6 +347,18 @@ class Settings(BaseSettings):
             return 0
         return max(0, min(n, 512))
 
+    @field_validator("devnest_env", mode="before")
+    @classmethod
+    def _normalize_devnest_env(cls, v):  # noqa: ANN001
+        s = str(v or "development").strip().lower()
+        if s in ("development", "dev", "local", "test"):
+            return "development"
+        if s in ("staging", "stage"):
+            return "staging"
+        if s in ("production", "prod"):
+            return "production"
+        return s
+
     @field_validator("devnest_require_secrets", mode="before")
     @classmethod
     def _parse_devnest_require_secrets(cls, v):  # noqa: ANN001
@@ -345,25 +370,41 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_jwt_secret(self) -> Self:
-        """Warn (always) or abort (when DEVNEST_REQUIRE_SECRETS=true) if the JWT secret is insecure."""
+        """Warn (always) or abort (when insecure secret is detected in non-dev env) if JWT secret is insecure.
+
+        Abort conditions (raise ``RuntimeError`` to surface clearly at startup):
+          1. ``DEVNEST_REQUIRE_SECRETS=true`` — explicit opt-in regardless of environment.
+          2. ``DEVNEST_ENV`` is set to a value other than ``"development"`` — automatic enforcement
+             for staging and production environments without requiring a separate flag.
+        """
         import logging  # noqa: PLC0415
 
         _DEFAULT = "change-me-in-production"
-        if self.jwt_secret_key == _DEFAULT:
-            logging.getLogger(__name__).warning(
-                "SECURITY WARNING: jwt_secret_key is set to the default placeholder value "
-                "'change-me-in-production'. This is insecure. Set the JWT_SECRET_KEY "
-                "environment variable to a strong, random value before deploying to production."
+        if self.jwt_secret_key != _DEFAULT:
+            return self
+
+        logging.getLogger(__name__).warning(
+            "SECURITY WARNING: jwt_secret_key is set to the default placeholder value "
+            "'change-me-in-production'. This is insecure. Set the JWT_SECRET_KEY "
+            "environment variable to a strong, random value before deploying to production."
+        )
+
+        env = str(self.devnest_env or "development").strip().lower()
+        is_non_dev_env = env != "development"
+        if self.devnest_require_secrets or is_non_dev_env:
+            context = (
+                f"DEVNEST_ENV={env!r}"
+                if is_non_dev_env and not self.devnest_require_secrets
+                else "DEVNEST_REQUIRE_SECRETS=true"
             )
-            if self.devnest_require_secrets:
-                raise ValueError(
-                    "Insecure startup rejected: jwt_secret_key must not be the default value "
-                    "'change-me-in-production'. "
-                    "Set the JWT_SECRET_KEY environment variable to a cryptographically strong "
-                    "random string (e.g. `openssl rand -hex 32`). "
-                    "To disable this guard in non-production environments, set "
-                    "DEVNEST_REQUIRE_SECRETS=false."
-                )
+            raise RuntimeError(
+                f"Insecure startup rejected ({context}): jwt_secret_key must not be the default "
+                "value 'change-me-in-production'. "
+                "Set the JWT_SECRET_KEY environment variable to a cryptographically strong "
+                "random string (e.g. `openssl rand -hex 32`). "
+                "To allow the default secret in a non-production environment, set "
+                "DEVNEST_ENV=development and DEVNEST_REQUIRE_SECRETS=false."
+            )
         return self
 
     @model_validator(mode="after")

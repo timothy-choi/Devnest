@@ -115,7 +115,7 @@ class TestRestartHappyPath:
                     requested_config_version=99,
                 )
 
-        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_by="operator-1")
+        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by="operator-1")
         m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=99)
 
         assert out.success is True
@@ -297,7 +297,7 @@ class TestRestartPassthrough:
                     workspace_id=WORKSPACE_ID,
                     requested_config_version=42,
                 )
-        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_by=None)
+        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by=None)
         m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=42)
 
     def test_requested_config_version_none_passthrough(
@@ -328,7 +328,7 @@ class TestRestartPassthrough:
                     requested_by="audit-subject",
                     requested_config_version=3,
                 )
-        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_by="audit-subject")
+        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by="audit-subject")
         m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=3)
 
 

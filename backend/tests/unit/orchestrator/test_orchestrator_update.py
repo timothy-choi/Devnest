@@ -227,7 +227,7 @@ class TestUpdateRestartHappyPath:
                     requested_by="update-op",
                 )
 
-        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_by="update-op")
+        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by="update-op")
         m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=2)
 
         assert out.success is True
@@ -419,7 +419,7 @@ class TestUpdatePassthrough:
                     requested_config_version=3,
                     requested_by="audit-subject",
                 )
-        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_by="audit-subject")
+        m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by="audit-subject")
         m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=3)
 
 
@@ -476,6 +476,7 @@ class TestUpdateRestartDelegationShortcut:
 
         m_r.assert_called_once_with(
             workspace_id=WORKSPACE_ID,
+            container_id=None,
             requested_by=None,
             requested_config_version=2,
         )

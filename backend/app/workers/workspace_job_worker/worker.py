@@ -319,6 +319,14 @@ def _health_from_probe(probe: bool | None) -> str:
     return WorkspaceRuntimeHealthStatus.UNKNOWN.value
 
 
+def _get_persisted_container_id(session: Session, workspace_id: int) -> str | None:
+    """Return ``WorkspaceRuntime.container_id`` for the given workspace if available."""
+    rt = session.exec(
+        select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
+    ).first()
+    return rt.container_id if rt is not None else None
+
+
 def _get_or_create_runtime(session: Session, workspace_id: int) -> WorkspaceRuntime:
     """Return existing ``WorkspaceRuntime`` for ``workspace_id`` or insert a stub row."""
     row = session.exec(
@@ -1376,18 +1384,30 @@ def _execute_job_body(
         return
 
     if jt == WorkspaceJobType.STOP.value:
-        result = orchestrator.stop_workspace_runtime(workspace_id=wid_str, requested_by=requested_by)
+        persisted_container_id = _get_persisted_container_id(session, wid)
+        result = orchestrator.stop_workspace_runtime(
+            workspace_id=wid_str,
+            container_id=persisted_container_id,
+            requested_by=requested_by,
+        )
         _finalize_stop_result(session, ws, job, result)
         return
 
     if jt == WorkspaceJobType.DELETE.value:
-        result = orchestrator.delete_workspace_runtime(workspace_id=wid_str, requested_by=requested_by)
+        persisted_container_id = _get_persisted_container_id(session, wid)
+        result = orchestrator.delete_workspace_runtime(
+            workspace_id=wid_str,
+            container_id=persisted_container_id,
+            requested_by=requested_by,
+        )
         _finalize_delete_result(session, ws, job, result)
         return
 
     if jt == WorkspaceJobType.RESTART.value:
+        persisted_container_id = _get_persisted_container_id(session, wid)
         result = orchestrator.restart_workspace_runtime(
             workspace_id=wid_str,
+            container_id=persisted_container_id,
             requested_by=requested_by,
             requested_config_version=cfg_v,
         )
@@ -1395,8 +1415,10 @@ def _execute_job_body(
         return
 
     if jt == WorkspaceJobType.UPDATE.value:
+        persisted_container_id = _get_persisted_container_id(session, wid)
         result = orchestrator.update_workspace_runtime(
             workspace_id=wid_str,
+            container_id=persisted_container_id,
             requested_config_version=cfg_v,
             requested_by=requested_by,
         )

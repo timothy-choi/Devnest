@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import boto3 as _boto3_type
 
+from .errors import SnapshotStorageError
+
 _logger = logging.getLogger(__name__)
 
 
@@ -96,22 +98,31 @@ class S3SnapshotStorageProvider:
         return f"s3://{self._bucket}/{key}"
 
     def has_nonempty_archive(self, *, workspace_id: int, snapshot_id: int) -> bool:
-        """True when the S3 object exists with size > 0 (restore preflight)."""
+        """True when the S3 object exists with size > 0 (restore preflight).
+
+        Returns ``False`` only for 404/NoSuchKey responses (object absent).
+        Raises :class:`~app.services.storage.errors.SnapshotStorageError` for all other
+        ``ClientError`` conditions (transient failures, permission errors, etc.) so callers
+        can distinguish a missing snapshot from a storage system error.
+        """
         key = self._s3_key(workspace_id=workspace_id, snapshot_id=snapshot_id)
         try:
             resp = self._client().head_object(Bucket=self._bucket, Key=key)
             return int(resp.get("ContentLength", 0)) > 0
         except Exception as exc:
-            # botocore.exceptions.ClientError 404 → object missing
+            # botocore.exceptions.ClientError: distinguish 404/NoSuchKey (absent) from real errors.
             code = getattr(getattr(exc, "response", None), "get", lambda *a: None)("Error", {}).get("Code", "")
             if code in ("404", "NoSuchKey"):
                 return False
-            _logger.warning(
+            _logger.error(
                 "s3_storage.has_nonempty_archive_error",
-                extra={"bucket": self._bucket, "key": key},
+                extra={"bucket": self._bucket, "key": key, "error_code": code},
                 exc_info=True,
             )
-            return False
+            raise SnapshotStorageError(
+                f"S3 error checking snapshot ws={workspace_id} snap={snapshot_id} "
+                f"bucket={self._bucket!r} key={key!r}: {exc}"
+            ) from exc
 
     def delete_archive(self, *, workspace_id: int, snapshot_id: int) -> None:
         """Delete the S3 object; no-op when missing."""

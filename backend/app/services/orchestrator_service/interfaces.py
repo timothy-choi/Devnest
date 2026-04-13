@@ -29,42 +29,71 @@ class OrchestratorService(ABC):
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_by: str | None = None,
     ) -> WorkspaceStopResult:
-        """Detach topology and stop the workspace container."""
+        """Detach topology and stop the workspace container.
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available. Falls back to deterministic name derivation when ``None``.
+        """
 
     @abstractmethod
     def delete_workspace_runtime(
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_by: str | None = None,
     ) -> WorkspaceDeleteResult:
-        """Detach topology, delete the workspace container, optionally remove node topology if safe."""
+        """Detach topology, delete the workspace container, optionally remove node topology if safe.
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available. Falls back to deterministic name derivation when ``None``.
+        """
 
     @abstractmethod
     def restart_workspace_runtime(
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_by: str | None = None,
         requested_config_version: int | None = None,
     ) -> WorkspaceRestartResult:
-        """Stop then bring the workspace runtime back up (controlled restart cycle)."""
+        """Stop then bring the workspace runtime back up (controlled restart cycle).
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available; it is used for the stop phase only (the bring-up phase allocates a new ID).
+        """
 
     @abstractmethod
     def update_workspace_runtime(
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_config_version: int,
         requested_by: str | None = None,
     ) -> WorkspaceUpdateResult:
-        """Apply ``requested_config_version`` (no-op when already current, else restart-based V1)."""
+        """Apply ``requested_config_version`` (no-op when already current, else restart-based V1).
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available.
+        """
 
     @abstractmethod
-    def check_workspace_runtime_health(self, *, workspace_id: str) -> WorkspaceBringUpResult:
-        """Read-only probe roll-up for an existing workspace runtime (no repair, no topology mutation)."""
+    def check_workspace_runtime_health(
+        self,
+        *,
+        workspace_id: str,
+        container_id: str | None = None,
+    ) -> WorkspaceBringUpResult:
+        """Read-only probe roll-up for an existing workspace runtime (no repair, no topology mutation).
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available. Falls back to deterministic name derivation when ``None``.
+        """
 
     @abstractmethod
     def export_workspace_filesystem_snapshot(

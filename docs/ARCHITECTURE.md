@@ -69,6 +69,13 @@ DevNest is a cloud-hosted coding environment platform — a "Google Drive for co
 - Abstracts over local Docker and EC2-hosted Docker nodes.
 - Returns structured `OrchestratorResult` objects for worker processing.
 
+**Container ID handling**: All lifecycle operations (`stop`, `delete`, `restart`, `update`,
+`check_health`) accept an optional `container_id` parameter. When provided (sourced from
+`WorkspaceRuntime.container_id` by the worker), operations target the exact engine container
+rather than deriving a deterministic name. Falls back to `devnest-ws-{workspace_id}` when
+`container_id` is `None` for backward compatibility. The worker now looks up
+`WorkspaceRuntime.container_id` before calling any lifecycle orchestrator method.
+
 ### Worker Layer
 
 Three execution modes (can coexist safely):
@@ -157,6 +164,11 @@ cursor, avoiding full-history replay on reconnect.
 - **S3 provider** (`S3SnapshotStorageProvider`): stores archives in S3 under `s3://{bucket}/{prefix}/ws-{id}/snapshot-{id}.tar.gz`. Archives are staged locally before upload / after download. Worker calls `upload_archive()` after export and `download_archive()` before restore.
 - Provider is selected via `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=local|s3`. Credentials use the boto3 credential chain.
 
+**S3 error handling**: `has_nonempty_archive()` returns `False` only for 404/NoSuchKey responses
+(object absent). For all other `ClientError` conditions (transient failures, permission errors,
+network issues) it raises `SnapshotStorageError` so callers can distinguish a missing snapshot
+from a storage system failure and mark the operation as failed rather than silently ignoring it.
+
 ### Networking (`libs/topology`)
 
 - Models network topologies (bridges, veth pairs, IP allocations).
@@ -194,9 +206,17 @@ rate limiter with no external dependencies:
 
 - **User auth**: JWT access tokens + opaque refresh tokens. Passwords hashed with bcrypt.
 - **Internal auth**: `X-Internal-API-Key` header with per-scope keys; validated by `InternalApiScope`.
-- **JWT secret enforcement**: Warning on default key; startup abort when `DEVNEST_REQUIRE_SECRETS=true`.
+- **JWT secret enforcement**: Warning on default key; startup abort when `DEVNEST_REQUIRE_SECRETS=true`
+  OR `DEVNEST_ENV` is set to a non-development value (e.g. `staging`, `production`). This provides
+  automatic enforcement without needing an explicit flag in every non-dev environment.
 - **Workspace sessions**: HMAC-SHA256 session tokens; short-lived with TTL.
-- **Gateway ForwardAuth**: Workspace data-plane traffic is protected by session validation at the Traefik edge. Only users with a valid, non-expired ACTIVE session for a RUNNING workspace are allowed through. Enable in production with `DEVNEST_GATEWAY_AUTH_ENABLED=true` on both the backend and route-admin.
+- **Gateway ForwardAuth**: Workspace data-plane traffic is protected by session validation at the
+  Traefik edge. Only users with a valid, non-expired ACTIVE session for a RUNNING workspace are
+  allowed through. Enable in production with `DEVNEST_GATEWAY_AUTH_ENABLED=true` on both the
+  backend and route-admin.
+- **Metrics endpoint**: `GET /metrics` is optionally protected by `X-Internal-API-Key` (INFRASTRUCTURE
+  scope) when `DEVNEST_METRICS_AUTH_ENABLED=true`. Default is open; restrict at ingress in production
+  or enable the in-process key check when Prometheus can supply the header.
 
 ---
 
@@ -205,7 +225,8 @@ rate limiter with no external dependencies:
 - **Structured logging**: `log_event()` with `devnest_event` field for Loki/CloudWatch queries.
 - **Correlation IDs**: `CorrelationIdMiddleware` injects a UUID per request; propagated through async worker ticks.
 - **Audit logs**: Durable per-action records in `audit_log` table.
-- **Metrics**: `prometheus-client` endpoint at `/metrics`.
+- **Metrics**: `prometheus-client` endpoint at `/metrics`. Optionally protected by
+  `X-Internal-API-Key` when `DEVNEST_METRICS_AUTH_ENABLED=true`.
 
 ---
 
