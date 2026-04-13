@@ -205,22 +205,32 @@ def provider_connect_callback(
     except OAuthStateError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    # Step 1: exchange code for token (may raise OAuthProviderError → 502).
     try:
         if provider == "github":
             access_token, scopes = _exchange_github_connect_code(code=code)
-            # Verify the granted scopes include the required "repo" scope for workspace
-            # operations.  A user may approve fewer scopes than requested if their org
-            # has restrictions; surface this as a clear error rather than silent failure.
-            granted = {s.strip() for s in scopes.split(",") if s.strip()}
-            if "repo" not in granted:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        "GitHub OAuth token does not include the required 'repo' scope. "
-                        f"Granted scopes: {scopes or '(none)'}. "
-                        "Re-authorize and ensure you approve repository access."
-                    ),
-                )
+        else:
+            raise HTTPException(400, detail=f"Provider {provider} not yet implemented")
+    except OAuthProviderError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    # Step 2: validate scopes — outside the OAuthProviderError catcher so the 400
+    # is never accidentally swallowed and re-raised as 502.
+    if provider == "github":
+        granted = {s.strip() for s in scopes.split(",") if s.strip()}
+        if "repo" not in granted:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "GitHub OAuth token does not include the required 'repo' scope. "
+                    f"Granted scopes: {scopes or '(none)'}. "
+                    "Re-authorize and ensure you approve repository access."
+                ),
+            )
+
+    # Step 3: fetch provider profile (may raise OAuthProviderError → 502).
+    try:
+        if provider == "github":
             profile = fetch_github_profile(access_token=access_token)
         else:
             raise HTTPException(400, detail=f"Provider {provider} not yet implemented")

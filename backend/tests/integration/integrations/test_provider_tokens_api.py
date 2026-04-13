@@ -87,13 +87,14 @@ def test_callback_rejects_insufficient_scopes(client, monkeypatch):
 
     monkeypatch.setattr(httpx, "post", mock_exchange)
 
-    # Also patch fetch_github_profile so it doesn't hit the network.
+    # Patch fetch_github_profile on the routers module's own reference (the scope
+    # check now raises before this is reached, but guard the network call anyway).
     def mock_fetch_profile(*, access_token):
         from app.services.auth_service.services.oauth_client import OAuthProfile
         return OAuthProfile(provider_user_id="123", username="scopetest", email=None)
 
     monkeypatch.setattr(
-        "app.services.auth_service.services.oauth_client.fetch_github_profile",
+        "app.services.integration_service.api.routers.provider_tokens.fetch_github_profile",
         mock_fetch_profile,
     )
 

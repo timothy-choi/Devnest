@@ -176,7 +176,7 @@ def test_trigger_ci_with_github_token_calls_api(client, db_session, monkeypatch)
     )
     assert resp.status_code == status.HTTP_201_CREATED
     data = resp.json()
-    assert data["status"] == "triggered"
+    assert data["status"] == "succeeded"
     assert any("myorg/myrepo" in url for url in dispatch_called)
 
     invalidate_cache()
