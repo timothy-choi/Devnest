@@ -31,3 +31,10 @@ class UsageEventType(str, Enum):
     AUTOSCALER_SCALE_UP = "autoscaler.scale_up"
     AUTOSCALER_SCALE_UP_SUPPRESSED = "autoscaler.scale_up_suppressed"
     AUTOSCALER_SCALE_DOWN = "autoscaler.scale_down"
+
+    # Product integrations
+    REPO_IMPORTED = "repo.imported"
+    GIT_PULL = "git.pull"
+    GIT_PUSH = "git.push"
+    CI_TRIGGERED = "ci.triggered"
+    TERMINAL_SESSION = "terminal.session"

@@ -142,7 +142,7 @@ def patch_policy(
     return _to_response(p)
 
 
-@router.delete("/{policy_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{policy_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_policy(
     policy_id: int,
     session: Session = Depends(get_db),

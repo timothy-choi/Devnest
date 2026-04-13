@@ -209,6 +209,66 @@ rate limiter with no external dependencies:
 
 ---
 
+---
+
+## Product Integrations
+
+### GitHub / Google OAuth — Provider Token Storage (Task 1)
+
+DevNest supports two OAuth flows:
+
+1. **Sign-in flow** (`POST /auth/oauth/{provider}` → `GET /auth/oauth/{provider}/callback`): Existing flow for account creation / login. GitHub scopes: `read:user user:email`. Google scopes: `openid email profile`. Provider tokens are **not** persisted by this flow.
+
+2. **Repository access connect flow** (`POST /auth/provider-tokens/github/connect` → `GET /auth/provider-tokens/github/callback`): Authenticated users connect their GitHub account with extended scopes (`repo`). The returned access token is encrypted with `DEVNEST_TOKEN_ENCRYPTION_KEY` (Fernet/AES-256) and stored in `user_provider_token`. This token is used for private repo operations and CI/CD triggers.
+
+Token management routes:
+- `GET /auth/provider-tokens` — list connected providers
+- `POST /auth/provider-tokens/{provider}/connect` — start OAuth with extended scopes
+- `GET /auth/provider-tokens/{provider}/callback` — exchange code, store token
+- `DELETE /auth/provider-tokens/{token_id}` — revoke token
+
+### Workspace Repository Import (Task 2)
+
+`POST /workspaces/{id}/import-repo` creates a `WorkspaceRepository` record and enqueues a `REPO_IMPORT` worker job (202 Accepted). The worker runs `git clone` inside the running container via the `NodeExecutionBundle`. For private repos, the stored provider token is injected via `GITHUB_TOKEN` environment variable (never in command-line args).
+
+Status tracked in `WorkspaceRepository.clone_status`: `pending` → `cloning` → `cloned` | `failed`.
+
+Routes:
+- `GET /workspaces/{id}/repo` — get repo status
+- `DELETE /workspaces/{id}/repo` — remove repo association (does not delete container files)
+
+### Workspace-Scoped Git Sync (Task 3)
+
+`POST /workspaces/{id}/git/pull` and `POST /workspaces/{id}/git/push` run git operations **inside the container** synchronously (60-second timeout). The workspace must be RUNNING. Operations use the same `NodeExecutionBundle` execution path as lifecycle jobs — no additional infrastructure required.
+
+Token masking: `GitResult.output` never contains provider tokens. The `_mask_token()` function replaces them with `***` before returning output to callers.
+
+### Workspace CI/CD Trigger (Task 4)
+
+GitHub Actions workflows are triggered via `repository_dispatch` events. Configuration is stored per workspace in `WorkspaceCIConfig`. A `CITriggerRecord` is created for every trigger attempt (success or failure) for audit trail.
+
+Routes:
+- `GET/POST/DELETE /workspaces/{id}/ci/config` — manage CI configuration
+- `POST /workspaces/{id}/ci/trigger` — dispatch a GitHub Actions workflow
+- `GET /workspaces/{id}/ci/triggers` — list trigger history
+
+Requires a stored GitHub provider token with `repo` scope.
+
+### Workspace Terminal WebSocket (Task 5)
+
+`WS /workspaces/{id}/terminal?token=<jwt_or_session_token>` provides an interactive PTY session inside the running container.
+
+**Authentication**: The `token` query parameter accepts either a DevNest JWT (auth header equivalent) or a workspace session token (`dnws_...` from `POST /workspaces/{id}/attach`). The workspace must be RUNNING.
+
+**Relay**: For `local_docker` and `ssh_docker` modes, uses Docker SDK `exec_create` + `exec_start(socket=True, tty=True)` for bidirectional raw socket relay. For `ssm_docker` mode, interactive terminals are not supported (SSM Session Manager must be used directly).
+
+**Protocol**:
+- Client → Server binary: raw stdin bytes
+- Client → Server text JSON `{"type":"resize","cols":N,"rows":N}`: PTY resize
+- Server → Client binary: stdout/stderr bytes
+
+---
+
 ## Known Gaps and Deferred Items
 
 | Area | Status | Notes |
@@ -217,11 +277,22 @@ rate limiter with no external dependencies:
 | Billing engine | Deferred | Usage events are the foundation; invoicing not implemented |
 | Kubernetes/EKS | Deferred | Docker-based orchestration only in V1 |
 | Self-managed networking | Partial | Topology models exist; production should use managed VPC |
-| GitHub/AI/CI integration | Deferred | Planned product features |
+| GitLab/Bitbucket integration | Deferred | GitHub only in V1 |
+| AI/ChatGPT integration | Deferred | Planned product feature |
 | Monitoring/alerting | Partial | Prometheus metrics endpoint; no alerting rules yet |
 | Multi-region | Deferred | Single-region only in V1 |
 | Gateway auth (ForwardAuth) | Implemented | `GET /internal/gateway/auth`; enable with `DEVNEST_GATEWAY_AUTH_ENABLED=true` |
 | TLS / HTTPS | Implemented | Traefik `websecure` entrypoint; local self-signed; production ACME configured in `traefik.yml` |
 | S3 snapshot storage | Implemented | `S3SnapshotStorageProvider`; select with `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` |
+| GitHub OAuth (sign-in) | Implemented | `POST /auth/oauth/github` flow |
+| GitHub provider token (repo access) | Implemented | `POST /auth/provider-tokens/github/connect` flow with `repo` scope |
+| Google OAuth (sign-in) | Implemented | `POST /auth/oauth/google` flow |
+| Google provider token (repo access) | Deferred | Google is a sign-in provider only; GitHub is the primary Git provider |
+| Workspace repo import | Implemented | `POST /workspaces/{id}/import-repo` → async REPO_IMPORT worker job |
+| Workspace git pull/push | Implemented | `POST /workspaces/{id}/git/pull|push` — synchronous exec in container |
+| Workspace CI/CD trigger | Implemented | GitHub Actions `repository_dispatch` via `POST /workspaces/{id}/ci/trigger` |
+| Workspace terminal (TTY) | Implemented | `WS /workspaces/{id}/terminal` — Docker exec PTY relay |
+| SSM interactive terminal | Deferred | SSM mode requires AWS Session Manager; V1 returns informative error |
 | Route53 DNS automation | Deferred | Manual DNS setup required for production domains |
 | Advanced cert rotation | Deferred | ACME handles renewal; multi-domain cert management deferred |
+| Pair programming / shared terminals | Deferred | Single-user terminal per workspace in V1 |

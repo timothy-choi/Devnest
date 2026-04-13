@@ -36,6 +36,7 @@ class WorkspaceJobType(str, Enum):
     RECONCILE_RUNTIME = "RECONCILE_RUNTIME"
     SNAPSHOT_CREATE = "SNAPSHOT_CREATE"
     SNAPSHOT_RESTORE = "SNAPSHOT_RESTORE"
+    REPO_IMPORT = "REPO_IMPORT"
 
 
 class WorkspaceSnapshotStatus(str, Enum):
