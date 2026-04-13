@@ -159,7 +159,7 @@ def test_git_pull_requires_cloned_repo(client):
     )
     assert resp.status_code == status.HTTP_404_NOT_FOUND
 
-    # Import but don't clone → 409 (not RUNNING for runtime check first)
+    # Import (status=pending) but not yet cloned → 409 (clone_status != "cloned")
     client.post(
         f"/workspaces/{ws_id}/import-repo",
         json={"repo_url": "https://github.com/a/b.git"},
@@ -170,5 +170,4 @@ def test_git_pull_requires_cloned_repo(client):
         json={},
         headers={"Authorization": f"Bearer {token}"},
     )
-    # Workspace is not RUNNING → 409
     assert resp.status_code == status.HTTP_409_CONFLICT

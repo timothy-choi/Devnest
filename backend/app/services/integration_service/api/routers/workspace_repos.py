@@ -239,7 +239,7 @@ async def git_pull(
 ) -> GitOperationResponse:
     assert current.user_auth_id is not None
     _get_workspace_owned(session, workspace_id, current.user_auth_id)
-    runtime = _get_running_runtime(session, workspace_id)
+    # Check repo existence first — gives 404 even if workspace is not yet RUNNING.
     repo = _get_repo(session, workspace_id)
     if repo is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No repository associated; call import-repo first")
@@ -248,6 +248,8 @@ async def git_pull(
             status.HTTP_409_CONFLICT,
             detail=f"Repository is not yet cloned (status={repo.clone_status})",
         )
+    # Runtime check comes after: workspace must be RUNNING to exec git inside the container.
+    runtime = _get_running_runtime(session, workspace_id)
 
     provider_token = None
     provider = body.use_provider or repo.provider
@@ -304,7 +306,7 @@ async def git_push(
 ) -> GitOperationResponse:
     assert current.user_auth_id is not None
     _get_workspace_owned(session, workspace_id, current.user_auth_id)
-    runtime = _get_running_runtime(session, workspace_id)
+    # Check repo existence first — gives 404 even if workspace is not yet RUNNING.
     repo = _get_repo(session, workspace_id)
     if repo is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="No repository associated; call import-repo first")
@@ -313,6 +315,8 @@ async def git_push(
             status.HTTP_409_CONFLICT,
             detail=f"Repository is not yet cloned (status={repo.clone_status})",
         )
+    # Runtime check comes after: workspace must be RUNNING to exec git inside the container.
+    runtime = _get_running_runtime(session, workspace_id)
 
     provider_token = None
     provider = body.use_provider or repo.provider
