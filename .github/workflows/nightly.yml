@@ -76,6 +76,9 @@ jobs:
             sleep 1
           done
 
+      - name: Run Alembic migrations
+        run: alembic upgrade head
+
       # Privileged topology tests run under sudo next (topology_linux suite + topology_linux_core).
       - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
         run: |
