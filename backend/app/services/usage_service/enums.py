@@ -29,4 +29,5 @@ class UsageEventType(str, Enum):
 
     # Autoscaler
     AUTOSCALER_SCALE_UP = "autoscaler.scale_up"
+    AUTOSCALER_SCALE_UP_SUPPRESSED = "autoscaler.scale_up_suppressed"
     AUTOSCALER_SCALE_DOWN = "autoscaler.scale_down"

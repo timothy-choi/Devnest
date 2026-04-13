@@ -96,8 +96,13 @@ class LogEvent:
 
     PLACEMENT_NO_SCHEDULABLE_NODE = "placement.no_schedulable_node"
 
+    SCHEDULER_NODE_SELECTED = "scheduler.node.selected"
+    SCHEDULER_FAIRNESS_SPREAD_APPLIED = "scheduler.fairness_spread_applied"
+
     AUTOSCALER_SCALE_UP_TRIGGERED = "autoscaler.scale_up.triggered"
+    AUTOSCALER_SCALE_UP_SUPPRESSED = "autoscaler.scale_up.suppressed"
     AUTOSCALER_SCALE_DOWN_TRIGGERED = "autoscaler.scale_down.triggered"
+    AUTOSCALER_SCALE_DOWN_SUPPRESSED = "autoscaler.scale_down.suppressed"
 
     EC2_NODE_PROVISIONED = "ec2.node.provisioned"
     EC2_NODE_TERMINATED = "ec2.node.terminated"

@@ -150,6 +150,46 @@ def max_effective_free_resources_across_schedulable(
     return (best_cpu, best_mem)
 
 
+def active_workload_count_subquery():
+    """Correlated scalar subquery: count of active (capacity-consuming) workloads pinned to this node.
+
+    Uses the same cohort as :func:`reserved_cpu_sum_subquery` (excludes STOPPED / DELETED / ERROR),
+    so SQL-level spread-aware placement ordering stays consistent with capacity accounting.
+    """
+    return (
+        select(func.count())
+        .select_from(WorkspaceRuntime)
+        .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
+        .where(
+            _runtime_pin_predicates_for_subquery(),
+            Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
+        )
+        .correlate(ExecutionNode)
+    ).scalar_subquery()
+
+
+def count_active_workloads_on_node_key(session: Session, node_key: str) -> int:
+    """Count active (capacity-consuming) workloads pinned to ``node_key``.
+
+    Mirrors the cohort used by :func:`total_reserved_on_node_key` — STOPPED, DELETED, and ERROR
+    workspaces are excluded because they release scheduler capacity.
+    """
+    key = (node_key or "").strip()
+    if not key:
+        return 0
+    stmt = (
+        select(func.count())
+        .select_from(WorkspaceRuntime)
+        .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
+        .where(
+            _runtime_pin_predicates_for_node_key(key),
+            Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
 def max_effective_free_cpu_across_schedulable(session: Session, *, base_predicates: list) -> float:
     """
     Best-effort max effective free CPU among nodes matching ``base_predicates`` (for diagnostics).

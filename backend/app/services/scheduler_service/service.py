@@ -10,7 +10,10 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
-from app.services.placement_service.capacity import total_reserved_on_node_key
+from app.services.placement_service.capacity import (
+    count_active_workloads_on_node_key,
+    total_reserved_on_node_key,
+)
 from app.services.placement_service.errors import InvalidPlacementParametersError, NoSchedulableNodeError
 from app.services.placement_service.models import ExecutionNode
 from app.libs.observability.log_events import LogEvent, log_event
@@ -38,6 +41,14 @@ def schedule_workspace(
         node = reserve_node_for_workspace(
             session,
             workspace_id=workspace_id,
+            requested_cpu=requested_cpu,
+            requested_memory_mb=requested_memory_mb,
+        )
+        log_event(
+            logger,
+            LogEvent.SCHEDULER_NODE_SELECTED,
+            workspace_id=workspace_id,
+            node_key=node.node_key,
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
         )
@@ -89,19 +100,22 @@ def explain_placement_decision(
     req = WorkspaceComputeRequest(requested_cpu=float(requested_cpu), requested_memory_mb=int(requested_memory_mb))
     pool = list_schedulable_nodes(session)
     ranked = rank_candidate_nodes(session, pool, req)
-    used_c, used_m = total_reserved_on_node_key(session, (chosen.node_key or "").strip())
+    k = (chosen.node_key or "").strip()
+    used_c, used_m = total_reserved_on_node_key(session, k)
     free_c = max(0.0, float(chosen.allocatable_cpu or 0.0) - used_c)
     free_m = max(0, int(chosen.allocatable_memory_mb or 0) - used_m)
+    wcount = count_active_workloads_on_node_key(session, k)
     lines: list[str] = [
-        f"selected node_key={chosen.node_key!r} allocatable_cpu={chosen.allocatable_cpu} "
-        f"allocatable_memory_mb={chosen.allocatable_memory_mb}",
-        f"effective_free_cpu≈{free_c:.4f} effective_free_memory_mb≈{free_m} "
-        f"(after workspace_runtime reservations on this node_key; "
-        f"STOPPED/DELETED/ERROR workspaces excluded from the sum)",
-        f"policy: maximize effective_free_cpu, then effective_free_memory_mb, then node_key ascending",
+        f"selected node_key={chosen.node_key!r} "
+        f"allocatable_cpu={chosen.allocatable_cpu} allocatable_memory_mb={chosen.allocatable_memory_mb}",
+        f"effective_free_cpu={free_c:.4f} effective_free_memory_mb={free_m} "
+        f"active_workload_count={wcount} "
+        f"(reservations from workspace_runtime; STOPPED/DELETED/ERROR workspaces excluded)",
+        f"sort_policy: capacity-first (effective_free_cpu desc, effective_free_memory_mb desc), "
+        f"then active_workload_count asc (spread/anti-concentration), then node_key asc (stable tiebreak)",
         f"READY+schedulable pool size (after devnest_node_provider filter): {len(pool)}",
-        f"pool nodes satisfying effective capacity for cpu>={req.requested_cpu} "
-        f"and memory_mb>={req.requested_memory_mb}: {len(ranked)}",
+        f"pool nodes satisfying effective capacity for "
+        f"cpu>={req.requested_cpu} and memory_mb>={req.requested_memory_mb}: {len(ranked)}",
     ]
     if ranked:
         first = ranked[0]

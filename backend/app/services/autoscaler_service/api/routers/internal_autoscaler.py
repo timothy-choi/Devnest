@@ -51,6 +51,7 @@ def _up(ev: ScaleUpEvaluation) -> ScaleUpEvaluationResponse:
         should_provision=ev.should_provision,
         reason=ev.reason,
         provisioning_in_flight=ev.provisioning_in_flight,
+        idle_ec2_node_count=ev.idle_ec2_node_count,
     )
 
 
@@ -83,6 +84,24 @@ def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> Provisi
     evaluate_node_provisioning(session)
     ev = evaluate_scale_up(session, insufficient_capacity=True)
     if not ev.should_provision:
+        if ev.idle_ec2_node_count > 0:
+            record_audit(
+                session,
+                action=AuditAction.AUTOSCALER_SCALE_UP_SUPPRESSED.value,
+                resource_type="node",
+                actor_type=AuditActorType.INTERNAL_SERVICE.value,
+                outcome=AuditOutcome.SUCCESS.value,
+                metadata={
+                    "reason": ev.reason,
+                    "idle_ec2_node_count": ev.idle_ec2_node_count,
+                    "provisioning_in_flight": ev.provisioning_in_flight,
+                },
+            )
+            record_usage(
+                session,
+                event_type=UsageEventType.AUTOSCALER_SCALE_UP_SUPPRESSED.value,
+            )
+            session.commit()
         return ProvisionOneResponse(
             provisioned=False,
             evaluation=_up(ev),

@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 
 from .capacity import (
+    active_workload_count_subquery,
     effective_free_cpu_expr,
     effective_free_memory_mb_expr,
     max_effective_free_resources_across_schedulable,
@@ -106,9 +107,16 @@ def select_node_for_workspace(
     ``allocatable_*`` minus sums of ``WorkspaceRuntime.reserved_*`` for workloads on that ``node_key``
     (workspace not ``STOPPED`` / ``DELETED`` / ``ERROR``).
 
-    Tie-break: highest effective free CPU, then effective free RAM, then ``node_key`` ascending.
+    **Sort policy (4 levels, descending priority):**
 
-    Keep ordering aligned with :func:`app.services.scheduler_service.policy.rank_candidate_nodes`.
+    1. ``effective_free_cpu DESC`` — capacity-first; prevents fragmentation on large requests.
+    2. ``effective_free_memory_mb DESC`` — secondary capacity dimension.
+    3. ``active_workload_count ASC`` — spread/anti-concentration; fewer active workloads preferred
+       when capacity is similar across candidates.
+    4. ``node_key ASC`` — stable tiebreak.
+
+    Must stay aligned with :func:`app.services.scheduler_service.policy.rank_candidate_nodes`
+    and :func:`app.services.scheduler_service.policy.scheduling_sort_key_spread`.
 
     ``workspace_id`` is accepted for future affinity / anti-affinity; unused in V1.
 
@@ -133,6 +141,7 @@ def select_node_for_workspace(
 
     free_cpu_e = effective_free_cpu_expr()
     free_mem_e = effective_free_memory_mb_expr()
+    active_wl_e = active_workload_count_subquery()
     preds = [
         *_schedulable_base_predicates(),
         free_cpu_e >= req_cpu,
@@ -142,8 +151,13 @@ def select_node_for_workspace(
         select(ExecutionNode)
         .where(and_(*preds))
         .order_by(
+            # Primary: most effective free CPU (capacity-first to avoid fragmentation).
             free_cpu_e.desc(),
+            # Secondary: most effective free memory.
             free_mem_e.desc(),
+            # Tertiary: fewer active workloads (spread / anti-concentration fairness).
+            active_wl_e.asc(),
+            # Stable tiebreak.
             ExecutionNode.node_key.asc(),
         )
     )

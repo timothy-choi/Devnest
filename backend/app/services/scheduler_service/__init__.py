@@ -11,6 +11,7 @@ from .policy import (
     rank_candidate_nodes,
     scheduling_sort_key,
     scheduling_sort_key_effective,
+    scheduling_sort_key_spread,
 )
 from .service import explain_placement_decision, schedule_workspace
 
@@ -24,4 +25,5 @@ __all__ = [
     "schedule_workspace",
     "scheduling_sort_key",
     "scheduling_sort_key_effective",
+    "scheduling_sort_key_spread",
 ]
