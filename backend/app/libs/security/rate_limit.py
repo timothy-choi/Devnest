@@ -213,3 +213,16 @@ def _get_or_create_limiter(name: str, *, calls: int, period: int = 60) -> Slidin
         if name not in _named_limiters:
             _named_limiters[name] = SlidingWindowRateLimiter(calls=calls, period=period)
         return _named_limiters[name]
+
+
+def reset_all_limiters() -> None:
+    """Clear all in-memory rate-limit windows.
+
+    Intended for use in test teardown / setup to prevent window state from one test
+    bleeding into another.  Not safe to call in production under concurrent load.
+    """
+    with _named_limiters_lock:
+        for limiter in _named_limiters.values():
+            with limiter._lock:
+                limiter._windows.clear()
+        _named_limiters.clear()
