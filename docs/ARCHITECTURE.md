@@ -102,6 +102,15 @@ All modes share the same dequeue semantics (`FOR UPDATE SKIP LOCKED`; per-job co
 
 - `gateway_client`: Registers/deregisters per-workspace routes with the Traefik sidecar.
 - Routes use subdomain format: `{workspace-id}.{DEVNEST_BASE_DOMAIN}`.
+- **ForwardAuth** (`GET /internal/gateway/auth`): Traefik calls this endpoint before proxying workspace traffic. The backend validates the workspace session token (`X-DevNest-Workspace-Session`), confirms the session is ACTIVE and unexpired, and confirms the workspace is RUNNING. Returns 200 to allow or 401 to deny.
+- **TLS**: Traefik's `websecure` entrypoint is configured on `:443`. Local/dev uses Traefik's built-in self-signed certificate. Production uses Let's Encrypt ACME (configured in `traefik.yml` via `certificatesResolvers`).
+
+### Snapshot Storage
+
+- **Interface**: `SnapshotStorageProvider` protocol (`app/services/storage/interfaces.py`).
+- **Local provider** (`LocalFilesystemSnapshotStorage`): default; stores archives under `{root}/ws-{id}/snapshot-{snap_id}.tar.gz`. Suitable for single-node / dev.
+- **S3 provider** (`S3SnapshotStorageProvider`): stores archives in S3 under `s3://{bucket}/{prefix}/ws-{id}/snapshot-{id}.tar.gz`. Archives are staged locally before upload / after download. Worker calls `upload_archive()` after export and `download_archive()` before restore.
+- Provider is selected via `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=local|s3`. Credentials use the boto3 credential chain.
 
 ### Networking (`libs/topology`)
 
@@ -124,6 +133,7 @@ All modes share the same dequeue semantics (`FOR UPDATE SKIP LOCKED`; per-job co
 - **Internal auth**: `X-Internal-API-Key` header with per-scope keys; validated by `InternalApiScope`.
 - **JWT secret enforcement**: Warning on default key; startup abort when `DEVNEST_REQUIRE_SECRETS=true`.
 - **Workspace sessions**: HMAC-SHA256 session tokens; short-lived with TTL.
+- **Gateway ForwardAuth**: Workspace data-plane traffic is protected by session validation at the Traefik edge. Only users with a valid, non-expired ACTIVE session for a RUNNING workspace are allowed through. Enable in production with `DEVNEST_GATEWAY_AUTH_ENABLED=true` on both the backend and route-admin.
 
 ---
 
@@ -147,3 +157,8 @@ All modes share the same dequeue semantics (`FOR UPDATE SKIP LOCKED`; per-job co
 | GitHub/AI/CI integration | Deferred | Planned product features |
 | Monitoring/alerting | Partial | Prometheus metrics endpoint; no alerting rules yet |
 | Multi-region | Deferred | Single-region only in V1 |
+| Gateway auth (ForwardAuth) | Implemented | `GET /internal/gateway/auth`; enable with `DEVNEST_GATEWAY_AUTH_ENABLED=true` |
+| TLS / HTTPS | Implemented | Traefik `websecure` entrypoint; local self-signed; production ACME configured in `traefik.yml` |
+| S3 snapshot storage | Implemented | `S3SnapshotStorageProvider`; select with `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` |
+| Route53 DNS automation | Deferred | Manual DNS setup required for production domains |
+| Advanced cert rotation | Deferred | ACME handles renewal; multi-domain cert management deferred |

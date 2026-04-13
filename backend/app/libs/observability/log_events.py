@@ -136,6 +136,16 @@ class LogEvent:
 
     AUDIT_EVENT_RECORDED = "audit.event.recorded"
 
+    GATEWAY_AUTH_ALLOWED = "gateway.auth.allowed"
+    GATEWAY_AUTH_DENIED = "gateway.auth.denied"
+
+    SNAPSHOT_STORAGE_UPLOAD_STARTED = "snapshot.storage.upload.started"
+    SNAPSHOT_STORAGE_UPLOAD_SUCCEEDED = "snapshot.storage.upload.succeeded"
+    SNAPSHOT_STORAGE_UPLOAD_FAILED = "snapshot.storage.upload.failed"
+    SNAPSHOT_STORAGE_DOWNLOAD_STARTED = "snapshot.storage.download.started"
+    SNAPSHOT_STORAGE_DOWNLOAD_SUCCEEDED = "snapshot.storage.download.succeeded"
+    SNAPSHOT_STORAGE_DOWNLOAD_FAILED = "snapshot.storage.download.failed"
+
 
 def log_event(
     logger: logging.Logger,
