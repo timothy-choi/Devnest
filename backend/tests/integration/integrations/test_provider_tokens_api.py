@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-import httpx
 from fastapi import status
 
 
@@ -78,24 +77,21 @@ def test_callback_rejects_insufficient_scopes(client, monkeypatch):
     # Build a valid state token.
     state = create_oauth_state(provider="github")
 
-    # Monkey-patch the token exchange so GitHub returns only "read:user" (no "repo").
-    def mock_exchange(url, **kwargs):
-        return httpx.Response(
-            200,
-            json={"access_token": "ghp_noscope", "scope": "read:user", "token_type": "bearer"},
-        )
+    # Patch _exchange_github_connect_code directly in the router's namespace so
+    # no real HTTP call is made and we control the returned scopes exactly.
+    monkeypatch.setattr(
+        "app.services.integration_service.api.routers.provider_tokens._exchange_github_connect_code",
+        lambda *, code: ("ghp_noscope", "read:user"),
+    )
 
-    monkeypatch.setattr(httpx, "post", mock_exchange)
-
-    # Patch fetch_github_profile on the routers module's own reference (the scope
-    # check now raises before this is reached, but guard the network call anyway).
-    def mock_fetch_profile(*, access_token):
+    # Scope check raises before fetch_github_profile is reached, but guard anyway.
+    def _mock_profile(*, access_token):
         from app.services.auth_service.services.oauth_client import OAuthProfile
         return OAuthProfile(provider_user_id="123", username="scopetest", email=None)
 
     monkeypatch.setattr(
         "app.services.integration_service.api.routers.provider_tokens.fetch_github_profile",
-        mock_fetch_profile,
+        _mock_profile,
     )
 
     resp = client.get(
