@@ -15,6 +15,11 @@ answers with 2xx/3xx, not merely an open port. On EC2/VM deployments where the c
 not co-located with Docker, TCP/HTTP probes run on the execution node via
 `service_reachability_runner` (SSH/SSM) when `devnest_probe_assume_colocated_engine=false`.
 
+**Staging/production contract:** Startup requires `DEVNEST_REQUIRE_IDE_HTTP_PROBE=true` and HTTP
+probing enabled, so **TCP-only “healthy” is never accepted** in those environments. Development may
+set `DEVNEST_REQUIRE_IDE_HTTP_PROBE=false` (and optionally disable HTTP probes) for tests where
+workspace IPs are not routable from the API host.
+
 ---
 
 ## Overview

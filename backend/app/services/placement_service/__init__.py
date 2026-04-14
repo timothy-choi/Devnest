@@ -3,6 +3,7 @@
 from .bootstrap import ensure_default_local_execution_node
 from .capacity import count_active_workloads_on_node_key, total_reserved_on_node_key
 from .errors import (
+    AuthoritativePlacementError,
     ExecutionNodeNotFoundError,
     InvalidPlacementParametersError,
     NoSchedulableNodeError,
@@ -25,6 +26,7 @@ from .node_placement import (
 from .orchestrator_binding import resolve_orchestrator_placement
 
 __all__ = [
+    "AuthoritativePlacementError",
     "ExecutionNode",
     "ExecutionNodeExecutionMode",
     "ExecutionNodeNotFoundError",

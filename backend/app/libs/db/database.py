@@ -24,6 +24,7 @@ from ...services.user_service.models import UserProfile, UserSettings  # noqa: F
 from ...services.placement_service.models import ExecutionNode  # noqa: F401 — register metadata
 from ...services.workspace_service.models import (  # noqa: F401 — register metadata
     Workspace,
+    WorkspaceCleanupTask,
     WorkspaceConfig,
     WorkspaceEvent,
     WorkspaceJob,

@@ -44,10 +44,14 @@ pip install -r requirements-test.txt
 
 ```bash
 cd backend
+pip install -r requirements.txt   # includes pytest-timeout
+python scripts/verify_pytest_timeout.py
 pytest tests/unit/ -v
 ```
 
 Expected: **~804 tests**, all pass. Runtime: < 60 s on a developer machine.
+
+**CI / strict timeouts:** GitHub Actions sets `DEVNEST_ENFORCE_TEST_TIMEOUTS=1` so `tests/conftest.py` aborts configuration if `pytest-timeout` is not loaded. Locally you can export the same after `pip install -r requirements.txt` to match CI.
 
 ### Integration tests (requires PostgreSQL)
 

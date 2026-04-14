@@ -15,3 +15,11 @@ class ExecutionNodeNotFoundError(PlacementError):
 
 class InvalidPlacementParametersError(PlacementError):
     """Invalid inputs to placement (e.g. non-positive capacity request)."""
+
+
+class AuthoritativePlacementError(PlacementError):
+    """Persisted :class:`~app.services.workspace_service.models.WorkspaceRuntime` is missing or incomplete.
+
+    Raised in production (and in development when env fallback is disabled) so control-plane jobs
+    never target an ambiguous node/topology.
+    """

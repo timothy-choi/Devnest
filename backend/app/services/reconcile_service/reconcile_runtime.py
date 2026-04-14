@@ -39,6 +39,7 @@ from app.workers.workspace_job_worker.failure_handling import (
 )
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
+from app.services.cleanup_service import process_durable_cleanup_tasks_for_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +231,29 @@ def execute_reconcile_runtime_job(
                     extra={"workspace_id": wid},
                     exc_info=True,
                 )
+
+        try:
+            n_cleanup_succeeded = process_durable_cleanup_tasks_for_workspace(
+                session,
+                orchestrator,
+                ws,
+                correlation_id=job.correlation_id,
+            )
+            if n_cleanup_succeeded:
+                logger.info(
+                    "durable_cleanup_tasks_succeeded",
+                    extra={
+                        "workspace_id": wid,
+                        "tasks_succeeded": n_cleanup_succeeded,
+                        "job_id": job.workspace_job_id,
+                    },
+                )
+        except Exception:
+            logger.warning(
+                "durable_cleanup_tasks_failed",
+                extra={"workspace_id": wid},
+                exc_info=True,
+            )
 
         log_event(
             logger,

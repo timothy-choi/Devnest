@@ -187,8 +187,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Verify pytest-timeout
+        run: python scripts/verify_pytest_timeout.py
+
       - name: Install quality tools
-        run: pip install ruff black mypy pytest pytest-cov coverage
+        run: pip install ruff black mypy pytest pytest-cov coverage pytest-timeout
 
       - name: Ruff (lint)
         continue-on-error: true
@@ -204,6 +207,8 @@ jobs:
 
       - name: Pytest with coverage
         continue-on-error: true
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         # Unit tests only; integration/system need Postgres/Docker in downstream jobs.
         run: pytest tests/unit -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
 
@@ -236,10 +241,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Verify pytest-timeout
+        run: python scripts/verify_pytest_timeout.py
+
       - name: Install coverage tools
         run: pip install coverage pytest-cov
 
       - name: Run unit tests
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         run: pytest tests/unit -v -n auto -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
 
       - name: Finalize unit coverage (combine workers if needed, then XML + report)
@@ -298,6 +308,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Verify pytest-timeout
+        run: python scripts/verify_pytest_timeout.py
+
       - name: Install coverage tools
         run: pip install coverage pytest-cov
 
@@ -315,9 +328,13 @@ jobs:
         run: alembic upgrade head
 
       - name: Run integration tests
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         run: pytest tests/integration -v -n 2 -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
 
       - name: Merge-tier stress slice (worker/reconcile/topology janitor)
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         run: |
           pytest tests/unit/workers/test_failure_handling.py \
             tests/unit/topology/test_topology_janitor.py \
@@ -383,6 +400,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Verify pytest-timeout
+        run: python scripts/verify_pytest_timeout.py
+
       - name: Install coverage tools
         run: pip install coverage pytest-cov
 
@@ -402,9 +422,13 @@ jobs:
       # Docker + DB system tests only; excludes privileged topology markers (sudo steps below)
       # and workspace_image (long Dockerfile build). Same marker exclusions as unit/integration.
       - name: Run system tests (merge-time tier, non-sudo)
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         run: pytest tests/system -v -m "not topology_linux and not topology_linux_core and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path and not gateway" --timeout=300 --cov=app --cov-append --cov-report=term-missing
 
       - name: Run Linux topology core happy-path (sudo, CAP_NET_ADMIN)
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         run: sudo -E "$(which python)" -m pytest tests/system/topology/test_runtime_topology_probe_happy_path.py -v -m "topology_linux_core" --timeout=300 --cov=app --cov-append --cov-report=term-missing
 
       - name: Finalize system coverage (XML + report)

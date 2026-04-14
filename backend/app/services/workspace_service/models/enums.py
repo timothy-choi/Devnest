@@ -86,6 +86,13 @@ class FailureStage(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class WorkspaceCleanupTaskStatus(str, Enum):
+    """Durable cleanup queue for compensating rollbacks and partial orchestrator outcomes."""
+
+    PENDING = "PENDING"
+    SUCCEEDED = "SUCCEEDED"
+
+
 class WorkspaceSessionStatus(str, Enum):
     """Lifecycle for :class:`~app.services.workspace_service.models.workspace_session.WorkspaceSession`."""
 

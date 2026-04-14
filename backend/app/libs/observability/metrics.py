@@ -85,6 +85,18 @@ TOPOLOGY_JANITOR_ACTIONS_TOTAL = Counter(
     ["kind"],
 )
 
+CLEANUP_TASK_ENQUEUED_TOTAL = Counter(
+    "devnest_cleanup_task_enqueued_total",
+    "Durable cleanup tasks inserted or refreshed",
+    ["scope"],
+)
+
+CLEANUP_TASK_ATTEMPT_TOTAL = Counter(
+    "devnest_cleanup_task_attempt_total",
+    "Durable cleanup stop attempts",
+    ["scope", "result"],
+)
+
 INTERNAL_AUTH_FAILURES_TOTAL = Counter(
     "devnest_internal_auth_failures",
     "Rejected internal API requests (missing/invalid X-Internal-API-Key)",
@@ -179,6 +191,14 @@ def record_reconcile_lock_acquired() -> None:
 
 def record_topology_janitor_action(*, kind: str) -> None:
     TOPOLOGY_JANITOR_ACTIONS_TOTAL.labels(kind=kind or "unknown").inc()
+
+
+def record_cleanup_task_enqueued(*, scope: str) -> None:
+    CLEANUP_TASK_ENQUEUED_TOTAL.labels(scope=scope or "unknown").inc()
+
+
+def record_cleanup_task_attempt(*, scope: str, result: str) -> None:
+    CLEANUP_TASK_ATTEMPT_TOTAL.labels(scope=scope or "unknown", result=result or "unknown").inc()
 
 
 def record_internal_auth_failure(*, scope: str) -> None:
