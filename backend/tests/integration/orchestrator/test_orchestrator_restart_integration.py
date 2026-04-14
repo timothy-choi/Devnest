@@ -261,7 +261,7 @@ def test_restart_workspace_runtime_bringup_probe_fails_after_stop_without_tcp_pa
     topology_adapter_integration: DbTopologyAdapter,
     tmp_path,
 ) -> None:
-    """Initial bring-up with probe patch; restart without patch → stop OK, bring-up unhealthy roll-up."""
+    """Initial bring-up with probe patch; restart without patch → stop OK, bring-up probe fails; rollback stops new container."""
     tid = _seed_topology(
         db_session,
         spec={
@@ -310,7 +310,8 @@ def test_restart_workspace_runtime_bringup_probe_fails_after_stop_without_tcp_pa
         assert out.container_id
         ins = runtime_adapter_integration.inspect_container(container_id=out.container_id)
         assert ins.exists is True
-        assert (ins.container_state or "").strip().lower() == "running"
+        # Compensating rollback stops the failed bring-up container (no leaked running workload).
+        assert (ins.container_state or "").strip().lower() in ("exited", "stopped")
     finally:
         _remove_container(
             orchestrator_docker_client,
