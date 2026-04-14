@@ -24,24 +24,36 @@ import pytest
 _DEFAULT_SECRET = "change-me-in-production"
 _STRONG_SECRET = "s3cur3-r4ndom-hex-value-at-least-32-chars-long-x"
 
+# Staging/production validators (placement, IDE probe, reconcile DB) run after JWT checks.
+# Tests in this file use SQLite and only care about JWT — disable reconcile DB guard and satisfy
+# the other staging/prod rules. (Root conftest may set DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK=true.)
+_NON_DEV_ENV_KW = {
+    "devnest_allow_runtime_env_fallback": False,
+    "devnest_require_ide_http_probe": True,
+    "devnest_workspace_http_probe_enabled": True,
+    "devnest_require_prod_reconcile_locking": False,
+}
+
 
 def _make_settings(
     *,
     jwt_secret_key: str = _DEFAULT_SECRET,
     devnest_require_secrets: bool = False,
     devnest_env: str = "development",
-) -> None:
+):
     """Instantiate Settings directly (no .env file reading), then clear the lru_cache."""
     from app.libs.common.config import Settings, get_settings
 
     get_settings.cache_clear()
-    # Build directly without reading .env files.
-    return Settings(**{
+    payload: dict = {
         "database_url": "sqlite:///./test.db",
         "jwt_secret_key": jwt_secret_key,
         "devnest_require_secrets": devnest_require_secrets,
         "devnest_env": devnest_env,
-    })
+    }
+    if devnest_env in ("production", "staging"):
+        payload.update(_NON_DEV_ENV_KW)
+    return Settings(**payload)
 
 
 # ---------------------------------------------------------------------------
