@@ -32,6 +32,7 @@ from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
     WorkspaceRestartResult,
     WorkspaceStopResult,
+    WorkspaceUpdateResult,
 )
 
 WORKSPACE_ID = "123"
@@ -122,6 +123,33 @@ def _bringup_ok(*, issues: list[str] | None = None) -> WorkspaceBringUpResult:
         probe_healthy=True,
         issues=issues,
     )
+
+
+class TestUpdateStrictAuthoritativeContainer:
+    def test_missing_container_id_blocked_before_inspect(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with patch(
+            "app.services.orchestrator_service.service.authoritative_container_ref_required",
+            return_value=True,
+        ):
+            out = svc.update_workspace_runtime(
+                workspace_id=WORKSPACE_ID,
+                container_id=None,
+                requested_config_version=5,
+            )
+
+        mock_runtime.inspect_container.assert_not_called()
+        assert isinstance(out, WorkspaceUpdateResult)
+        assert out.success is False
+        assert out.update_strategy == "blocked"
+        assert out.issues
+        assert "authoritative_container_id_required" in out.issues[0]
 
 
 class TestUpdateNoop:

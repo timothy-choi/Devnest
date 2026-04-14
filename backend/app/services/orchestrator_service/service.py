@@ -1024,7 +1024,19 @@ class DefaultOrchestratorService(OrchestratorService):
         except WorkspaceBringUpError as e:
             raise WorkspaceUpdateError(str(e)) from e
 
-        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
+        cid_in = (container_id or "").strip()
+        if authoritative_container_ref_required() and not cid_in:
+            return WorkspaceUpdateResult(
+                workspace_id=wid,
+                success=False,
+                current_config_version=0,
+                requested_config_version=requested_config_version,
+                update_strategy="blocked",
+                no_op=False,
+                issues=_issues_or_none(["runtime:authoritative_container_id_required"]),
+            )
+
+        container_ref = cid_in or _sanitize_container_name(wid)
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)
         except Exception as e:
@@ -1109,15 +1121,28 @@ class DefaultOrchestratorService(OrchestratorService):
     ) -> WorkspaceBringUpResult:
         """Inspect + ``ProbeRunner.check_workspace_health`` only (no start/stop/topology writes).
 
-        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
-        when available. Falls back to deterministic name derivation when ``None``.
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``.
+        In staging/production (strict placement), a non-empty engine id is required; deterministic
+        name fallback is development-only when env fallback is allowed.
         """
         wid = (workspace_id or "").strip()
         if not wid:
             raise WorkspaceBringUpError("workspace_id is empty")
 
         _parse_topology_workspace_id(wid)
-        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
+        cid_in = (container_id or "").strip()
+        if authoritative_container_ref_required() and not cid_in:
+            return WorkspaceBringUpResult(
+                workspace_id=wid,
+                success=False,
+                node_id=self._node_id,
+                topology_id=str(self._topology_id),
+                container_id=None,
+                probe_healthy=False,
+                issues=_issues_or_none(["runtime:authoritative_container_id_required"]),
+            )
+
+        container_ref = cid_in or _sanitize_container_name(wid)
 
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)

@@ -12,9 +12,9 @@ and contribution guidelines.
   for unit/integration/system (with additional system exclusions for `gateway`, `workspace_image`).
   **`pytest-timeout`** is enforced (`--timeout=300`) on unit, integration, system, and quality jobs.
   A small **stress slice** reruns worker/reconcile/janitor-focused tests in the integration job,
-  including **merge production-gate smoke** (`tests/integration/workspace/test_merge_production_gate_smoke.py`):
-  strict `REPO_IMPORT` placement, cleanup drain without reconcile-only coupling, and an EC2-like
-  execution-node row with strict `STOP` placement.
+  including **merge production-gate smoke** (`tests/integration/workspace/test_merge_production_gate_smoke.py`)
+  and **merge EC2 lifecycle** (`tests/integration/workspace/merge_ec2/` — skips without Docker):
+  full create → RUNNING → stop → start → delete on the same stack as the slow EC2 profile test.
 - **Nightly** (`.github/workflows/nightly.yml`): Full tree including heavy markers; pytest  `--timeout=600` for the main pass; privileged `topology_linux` runs under `sudo` in a follow-up step.
 - **Heavy / slow examples:** `tests/integration/workspace/test_workspace_ec2_profile_e2e.py` (marked
   `slow`) — full create/stop/start/delete API path; intended for nightly or explicit local runs.

@@ -341,6 +341,7 @@ jobs:
             tests/unit/reconcile_service/test_reconcile_lock.py \
             tests/integration/workers/test_reconcile_runtime_integration.py \
             tests/integration/workspace/test_merge_production_gate_smoke.py \
+            tests/integration/workspace/merge_ec2/test_merge_ec2_profile_lifecycle.py \
             tests/unit/cleanup_service/test_cleanup_drain.py \
             tests/unit/placement_service/test_orchestrator_binding_strict.py \
             -v --timeout=300

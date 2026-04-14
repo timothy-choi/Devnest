@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -141,3 +141,23 @@ class TestCheckHealth:
         svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
         with pytest.raises(WorkspaceBringUpError, match="empty"):
             svc.check_workspace_runtime_health(workspace_id="  ")
+
+    def test_strict_requires_container_id_before_inspect(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with patch(
+            "app.services.orchestrator_service.service.authoritative_container_ref_required",
+            return_value=True,
+        ):
+            out = svc.check_workspace_runtime_health(workspace_id=WORKSPACE_ID, container_id=None)
+
+        mock_runtime.inspect_container.assert_not_called()
+        mock_probe.check_workspace_health.assert_not_called()
+        assert out.success is False
+        assert out.issues
+        assert "authoritative_container_id_required" in out.issues[0]
