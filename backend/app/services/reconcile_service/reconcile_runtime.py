@@ -8,6 +8,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import LogEvent, log_event
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
@@ -17,6 +18,10 @@ from app.services.orchestrator_service.errors import (
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
 from app.services.reconcile_service.decisions import gateway_route_needs_repair, route_row_for_workspace
+from app.services.reconcile_service.reconcile_lock import (
+    release_workspace_reconcile_lock,
+    try_acquire_workspace_reconcile_lock,
+)
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
@@ -36,8 +41,6 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 
 logger = logging.getLogger(__name__)
-
-# TODO: distributed reconcile lease / leader election when multiple workers enqueue RECONCILE_RUNTIME.
 
 _BUSY_RECONCILE = frozenset(
     {
@@ -184,65 +187,112 @@ def execute_reconcile_runtime_job(
     cfg_v = int(job.requested_config_version)
     requested_by = str(job.requested_by_user_id)
 
-    log_event(
-        logger,
-        LogEvent.RECONCILE_STARTED,
-        correlation_id=job.correlation_id,
-        workspace_id=wid,
-        workspace_job_id=job.workspace_job_id,
-        workspace_status=ws.status,
-    )
+    lock_acquired = False
+    try:
+        if not try_acquire_workspace_reconcile_lock(session, wid):
+            devnest_metrics.record_reconcile_lock_contended()
+            log_event(
+                logger,
+                LogEvent.RECONCILE_FAILED,
+                level=logging.INFO,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_job_id=job.workspace_job_id,
+                message="reconcile:advisory_lock_contended",
+                failure_stage="PLACEMENT",
+                retryable=True,
+            )
+            _fail_reconcile(session, ws, job, "reconcile:advisory_lock_contended")
+            return
+        lock_acquired = True
+        devnest_metrics.record_reconcile_lock_acquired()
 
-    record_workspace_event(
-        session,
-        workspace_id=wid,
-        event_type=WorkspaceStreamEventType.RECONCILE_STARTED,
-        status=ws.status,
-        message="Reconcile started",
-        payload={
-            "job_id": job.workspace_job_id,
-            "job_type": job.job_type,
-        },
-    )
+        settings = get_settings()
+        if settings.devnest_topology_janitor_enabled:
+            try:
+                jr = orchestrator.run_topology_janitor(
+                    stale_attaching_seconds=int(settings.devnest_topology_janitor_stale_seconds),
+                )
+                for _ in range(jr.stale_attachments_cleaned):
+                    devnest_metrics.record_topology_janitor_action(kind="stale_attachment")
+                for _ in range(jr.orphan_ip_leases_released):
+                    devnest_metrics.record_topology_janitor_action(kind="orphan_ip")
+                for _ in range(jr.drift_repairs):
+                    devnest_metrics.record_topology_janitor_action(kind="drift_repair")
+                if jr.issues:
+                    logger.info(
+                        "topology_janitor_issues",
+                        extra={"workspace_id": wid, "issues": list(jr.issues)[:8]},
+                    )
+            except Exception:
+                logger.warning(
+                    "topology_janitor_failed",
+                    extra={"workspace_id": wid},
+                    exc_info=True,
+                )
 
-    record_audit(
-        session,
-        action=AuditAction.RECONCILE_STARTED.value,
-        resource_type="workspace",
-        resource_id=wid,
-        actor_type=AuditActorType.INTERNAL_SERVICE.value,
-        outcome=AuditOutcome.SUCCESS.value,
-        workspace_id=wid,
-        job_id=job.workspace_job_id,
-        correlation_id=job.correlation_id,
-        metadata={"workspace_status": ws.status},
-    )
+        log_event(
+            logger,
+            LogEvent.RECONCILE_STARTED,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=job.workspace_job_id,
+            workspace_status=ws.status,
+        )
 
-    _repair_runtime_capacity_ledger(session, ws)
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.RECONCILE_STARTED,
+            status=ws.status,
+            message="Reconcile started",
+            payload={
+                "job_id": job.workspace_job_id,
+                "job_type": job.job_type,
+            },
+        )
 
-    if ws.status in _BUSY_RECONCILE:
-        _fail_reconcile(session, ws, job, f"reconcile:workspace_busy (status={ws.status})")
-        return
+        record_audit(
+            session,
+            action=AuditAction.RECONCILE_STARTED.value,
+            resource_type="workspace",
+            resource_id=wid,
+            actor_type=AuditActorType.INTERNAL_SERVICE.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            workspace_id=wid,
+            job_id=job.workspace_job_id,
+            correlation_id=job.correlation_id,
+            metadata={"workspace_status": ws.status},
+        )
 
-    if ws.status not in _ALLOWED_RECONCILE:
-        _fail_reconcile(session, ws, job, f"reconcile:unsupported_workspace_status:{ws.status}")
-        return
+        _repair_runtime_capacity_ledger(session, ws)
 
-    if ws.status == WorkspaceStatus.DELETED.value:
-        _reconcile_deleted(session, ws, job)
-        return
+        if ws.status in _BUSY_RECONCILE:
+            _fail_reconcile(session, ws, job, f"reconcile:workspace_busy (status={ws.status})")
+            return
 
-    if ws.status == WorkspaceStatus.ERROR.value:
-        _reconcile_error_cleanup(session, orchestrator, ws, job)
-        return
+        if ws.status not in _ALLOWED_RECONCILE:
+            _fail_reconcile(session, ws, job, f"reconcile:unsupported_workspace_status:{ws.status}")
+            return
 
-    if ws.status == WorkspaceStatus.STOPPED.value:
-        _reconcile_stopped(session, orchestrator, ws, job, requested_by=requested_by)
-        return
+        if ws.status == WorkspaceStatus.DELETED.value:
+            _reconcile_deleted(session, ws, job)
+            return
 
-    if ws.status == WorkspaceStatus.RUNNING.value:
-        _reconcile_running(session, orchestrator, ws, job, config_version=cfg_v)
-        return
+        if ws.status == WorkspaceStatus.ERROR.value:
+            _reconcile_error_cleanup(session, orchestrator, ws, job)
+            return
+
+        if ws.status == WorkspaceStatus.STOPPED.value:
+            _reconcile_stopped(session, orchestrator, ws, job, requested_by=requested_by)
+            return
+
+        if ws.status == WorkspaceStatus.RUNNING.value:
+            _reconcile_running(session, orchestrator, ws, job, config_version=cfg_v)
+            return
+    finally:
+        if lock_acquired:
+            release_workspace_reconcile_lock(session, wid)
 
 
 def _reconcile_deleted(session: Session, ws: Workspace, job: WorkspaceJob) -> None:

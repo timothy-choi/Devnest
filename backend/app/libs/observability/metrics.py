@@ -64,6 +64,27 @@ BRINGUP_ROLLBACK_TOTAL = Counter(
     ["reason"],
 )
 
+BRINGUP_ROLLBACK_FAILED_TOTAL = Counter(
+    "devnest_orchestrator_bringup_rollback_failed_total",
+    "Bring-up rollback where inner stop/detach did not fully succeed after retries",
+)
+
+RECONCILE_LOCK_CONTENDED_TOTAL = Counter(
+    "devnest_reconcile_lock_contended_total",
+    "Reconcile jobs that could not acquire the per-workspace advisory lock",
+)
+
+RECONCILE_LOCK_HELD_TOTAL = Counter(
+    "devnest_reconcile_lock_acquired_total",
+    "Reconcile jobs that acquired the per-workspace advisory lock",
+)
+
+TOPOLOGY_JANITOR_ACTIONS_TOTAL = Counter(
+    "devnest_topology_janitor_actions_total",
+    "Topology janitor repairs",
+    ["kind"],
+)
+
 INTERNAL_AUTH_FAILURES_TOTAL = Counter(
     "devnest_internal_auth_failures",
     "Rejected internal API requests (missing/invalid X-Internal-API-Key)",
@@ -141,6 +162,23 @@ def record_bringup_rollback(*, reason: str) -> None:
     if r not in ("exception", "probe_unhealthy"):
         r = "exception"
     BRINGUP_ROLLBACK_TOTAL.labels(reason=r).inc()
+
+
+def record_bringup_rollback_failed() -> None:
+    """Incremented when rollback stop/detach still fails after bounded retries."""
+    BRINGUP_ROLLBACK_FAILED_TOTAL.inc()
+
+
+def record_reconcile_lock_contended() -> None:
+    RECONCILE_LOCK_CONTENDED_TOTAL.inc()
+
+
+def record_reconcile_lock_acquired() -> None:
+    RECONCILE_LOCK_HELD_TOTAL.inc()
+
+
+def record_topology_janitor_action(*, kind: str) -> None:
+    TOPOLOGY_JANITOR_ACTIONS_TOTAL.labels(kind=kind or "unknown").inc()
 
 
 def record_internal_auth_failure(*, scope: str) -> None:

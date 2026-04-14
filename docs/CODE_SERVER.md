@@ -6,6 +6,17 @@ persistence mounts, readiness probing, and failure semantics.
 
 ---
 
+## Readiness and health checks
+
+When `DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=true` (production default), bring-up and health checks
+perform **TCP** to the workspace IDE port, then **HTTP GET** to a code-server-specific path
+(default **`DEVNEST_WORKSPACE_IDE_HEALTH_PATH=/healthz`**) so `RUNNING` implies the IDE endpoint
+answers with 2xx/3xx, not merely an open port. On EC2/VM deployments where the control plane is
+not co-located with Docker, TCP/HTTP probes run on the execution node via
+`service_reachability_runner` (SSH/SSM) when `devnest_probe_assume_colocated_engine=false`.
+
+---
+
 ## Overview
 
 Every DevNest workspace runs **[code-server](https://github.com/coder/code-server)** — the

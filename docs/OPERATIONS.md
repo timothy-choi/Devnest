@@ -5,6 +5,18 @@ procedures, and monitoring guidance.
 
 ---
 
+## Reconcile, topology janitor, and metrics
+
+- **Advisory lock contention:** `devnest_reconcile_lock_contended_total` increments when a worker skips
+  a reconcile because another holds the per-workspace PostgreSQL advisory lock; jobs retry with
+  backoff (`reconcile:advisory_lock_contended`).
+- **Janitor:** `devnest_topology_janitor_actions_total` labels `stale_attachment`, `orphan_ip`,
+  `drift_repair` count repairs during reconcile (see `ARCHITECTURE.md`).
+- **Rollback failures:** `devnest_orchestrator_bringup_rollback_failed_total` when compensating stop
+  does not succeed after retries.
+
+---
+
 ## Health and Readiness
 
 ### Liveness

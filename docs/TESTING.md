@@ -5,6 +5,19 @@ and contribution guidelines.
 
 ---
 
+## Merge-time vs nightly (CI)
+
+- **Merge-time** (`.github/workflows/tests.yml`): Fast PR signal. Pytest excludes markers
+  `slow`, `topology_heavy`, `concurrency`, `failure_path`, `topology_linux`, `topology_linux_core`
+  for unit/integration/system (with additional system exclusions for `gateway`, `workspace_image`).
+  **`pytest-timeout`** is enforced (`--timeout=300`) on unit, integration, system, and quality jobs.
+  A small **stress slice** reruns worker/reconcile/janitor-focused tests in the integration job.
+- **Nightly** (`.github/workflows/nightly.yml`): Full tree including heavy markers; pytest  `--timeout=600` for the main pass; privileged `topology_linux` runs under `sudo` in a follow-up step.
+- **Heavy / slow examples:** `tests/integration/workspace/test_workspace_ec2_profile_e2e.py` (marked
+  `slow`) — full create/stop/start/delete API path; intended for nightly or explicit local runs.
+
+---
+
 ## Test Tiers
 
 DevNest uses three test tiers:

@@ -11,6 +11,7 @@ from .results import (
     CheckTopologyResult,
     DetachWorkspaceResult,
     EnsureNodeTopologyResult,
+    TopologyJanitorResult,
 )
 
 
@@ -146,3 +147,13 @@ class TopologyAdapter(ABC):
         Raises:
             AttachmentHealthCheckError: Implementation cannot read state (rare).
         """
+
+    def run_topology_janitor(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        stale_attaching_seconds: int = 600,
+    ) -> TopologyJanitorResult:
+        """Repair stuck attachments, leaked IP leases, and simple DB/workspace drift (default: noop)."""
+        return TopologyJanitorResult()

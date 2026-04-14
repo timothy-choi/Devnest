@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from app.libs.topology.results import TopologyJanitorResult
+
 from .results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
@@ -15,6 +17,10 @@ from .results import (
 
 
 class OrchestratorService(ABC):
+    def run_topology_janitor(self, *, stale_attaching_seconds: int = 600) -> TopologyJanitorResult:
+        """Idempotent topology/IP cleanup for the orchestrator's placement (default: noop)."""
+        return TopologyJanitorResult()
+
     @abstractmethod
     def bring_up_workspace_runtime(
         self,

@@ -71,3 +71,13 @@ class CheckAttachmentResult:
     internal_endpoint: str | None = None
     issues: tuple[str, ...] = ()
     attachment_id: int | None = None
+
+
+@dataclass(frozen=True)
+class TopologyJanitorResult:
+    """Idempotent repair counts from :meth:`TopologyAdapter.run_topology_janitor`."""
+
+    stale_attachments_cleaned: int = 0
+    orphan_ip_leases_released: int = 0
+    drift_repairs: int = 0
+    issues: tuple[str, ...] = ()

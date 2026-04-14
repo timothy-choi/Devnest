@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
@@ -58,6 +58,7 @@ from .results import (
     CheckTopologyResult,
     DetachWorkspaceResult,
     EnsureNodeTopologyResult,
+    TopologyJanitorResult,
 )
 
 if TYPE_CHECKING:
@@ -1402,4 +1403,111 @@ class DbTopologyAdapter(TopologyAdapter):
             internal_endpoint=internal,
             issues=issues,
             attachment_id=att.attachment_id,
+        )
+
+    def run_topology_janitor(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        stale_attaching_seconds: int = 600,
+    ) -> TopologyJanitorResult:
+        """Detach stale ``ATTACHING`` / ``FAILED`` rows, release orphan leases, repair terminal drift."""
+        from app.services.workspace_service.models import Workspace
+        from app.services.workspace_service.models.enums import WorkspaceStatus
+
+        node_id = node_id.strip()[:128]
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=max(0, int(stale_attaching_seconds)))
+        issue_list: list[str] = []
+        stale_cleaned = 0
+        orphan_ips = 0
+        drift_fixed = 0
+
+        stuck_stmt = select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == topology_id,
+            TopologyAttachment.node_id == node_id,
+            TopologyAttachment.status.in_(
+                (TopologyAttachmentStatus.ATTACHING, TopologyAttachmentStatus.FAILED),
+            ),
+            TopologyAttachment.updated_at < cutoff,
+        )
+        for att in self._session.exec(stuck_stmt).all():
+            wid = int(att.workspace_id)
+            try:
+                self.detach_workspace(topology_id=topology_id, node_id=node_id, workspace_id=wid)
+                try:
+                    self.release_workspace_ip_lease(
+                        topology_id=topology_id,
+                        node_id=node_id,
+                        workspace_id=wid,
+                    )
+                except WorkspaceIPAllocationError as e:
+                    issue_list.append(f"janitor:stuck_ip_release:{wid}:{e}")
+                stale_cleaned += 1
+            except Exception as e:
+                issue_list.append(f"janitor:stuck_detach:{wid}:{e}")
+
+        alloc_stmt = select(IpAllocation).where(
+            IpAllocation.topology_id == topology_id,
+            IpAllocation.node_id == node_id,
+            IpAllocation.released_at.is_(None),  # type: ignore[union-attr]
+        )
+        for alloc in self._session.exec(alloc_stmt).all():
+            wid = int(alloc.workspace_id)
+            att_row = self._session.exec(
+                select(TopologyAttachment).where(
+                    TopologyAttachment.topology_id == topology_id,
+                    TopologyAttachment.node_id == node_id,
+                    TopologyAttachment.workspace_id == wid,
+                ),
+            ).first()
+            if att_row is None or att_row.status != TopologyAttachmentStatus.ATTACHED:
+                try:
+                    if self.release_workspace_ip_lease(
+                        topology_id=topology_id,
+                        node_id=node_id,
+                        workspace_id=wid,
+                    ):
+                        orphan_ips += 1
+                except WorkspaceIPAllocationError as e:
+                    issue_list.append(f"janitor:orphan_ip:{wid}:{e}")
+
+        drift_stmt = (
+            select(TopologyAttachment)
+            .join(Workspace, Workspace.workspace_id == TopologyAttachment.workspace_id)
+            .where(
+                TopologyAttachment.topology_id == topology_id,
+                TopologyAttachment.node_id == node_id,
+                TopologyAttachment.status == TopologyAttachmentStatus.ATTACHED,
+                Workspace.status.in_(
+                    (
+                        WorkspaceStatus.STOPPED.value,
+                        WorkspaceStatus.ERROR.value,
+                        WorkspaceStatus.DELETED.value,
+                    ),
+                ),
+            )
+        )
+        for att in self._session.exec(drift_stmt).all():
+            wid = int(att.workspace_id)
+            try:
+                self.detach_workspace(topology_id=topology_id, node_id=node_id, workspace_id=wid)
+                try:
+                    self.release_workspace_ip_lease(
+                        topology_id=topology_id,
+                        node_id=node_id,
+                        workspace_id=wid,
+                    )
+                except WorkspaceIPAllocationError:
+                    pass
+                drift_fixed += 1
+            except Exception as e:
+                issue_list.append(f"janitor:drift_detach:{wid}:{e}")
+
+        return TopologyJanitorResult(
+            stale_attachments_cleaned=stale_cleaned,
+            orphan_ip_leases_released=orphan_ips,
+            drift_repairs=drift_fixed,
+            issues=tuple(issue_list),
         )

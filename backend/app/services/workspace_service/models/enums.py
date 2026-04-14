@@ -70,6 +70,7 @@ class WorkspaceRuntimeHealthStatus(str, Enum):
     HEALTHY = "HEALTHY"
     DEGRADED = "DEGRADED"
     UNHEALTHY = "UNHEALTHY"
+    CLEANUP_REQUIRED = "CLEANUP_REQUIRED"
 
 
 class FailureStage(str, Enum):

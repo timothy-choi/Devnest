@@ -28,6 +28,7 @@ from .results import (
     CheckTopologyResult,
     DetachWorkspaceResult,
     EnsureNodeTopologyResult,
+    TopologyJanitorResult,
 )
 
 __all__ = [
@@ -39,6 +40,7 @@ __all__ = [
     "DbTopologyAdapter",
     "DetachWorkspaceResult",
     "EnsureNodeTopologyResult",
+    "TopologyJanitorResult",
     "IpAllocation",
     "Topology",
     "TopologyAdapter",

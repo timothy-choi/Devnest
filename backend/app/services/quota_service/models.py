@@ -18,8 +18,8 @@ class Quota(SQLModel, table=True):
     Limit fields are nullable — ``None`` means unlimited for that dimension.
     Precedence when multiple quotas apply: WORKSPACE > USER > GLOBAL (most specific wins).
 
-    TODO: add ``DailyUsageAggregate`` rollups for efficient max_runtime_hours enforcement.
-    TODO: integrate with billing tiers when commercial features are added.
+    Runtime-hour enforcement uses ``WorkspaceUsageRecord`` (stopped-session seconds);
+    rollups may be added later for dashboards.
     """
 
     __tablename__ = "quota"
