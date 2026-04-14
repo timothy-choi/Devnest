@@ -10,6 +10,8 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Requ
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
+from app.libs.common.config import get_settings
+
 from app.libs.db.database import get_db, get_engine
 from app.libs.security.rate_limit import sse_rate_limit
 from app.services.auth_service.api.dependencies import get_current_user
@@ -358,9 +360,13 @@ async def stream_workspace_events(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from None
 
     # Register with the in-process event bus to receive push notifications.
-    from app.libs.events.workspace_event_bus import get_event_bus, EVENT_BUS_WAIT_TIMEOUT_SEC  # noqa: PLC0415
+    # Multi-worker safety: the in-process bus only notifies listeners in the same OS process.
+    # Cross-worker events (produced by a different gunicorn worker) are delivered via the DB
+    # polling fallback below, bounded by devnest_sse_poll_interval_seconds (default 2s).
+    from app.libs.events.workspace_event_bus import get_event_bus  # noqa: PLC0415
     bus = get_event_bus()
     notification_event = bus.subscribe(workspace_id)
+    _poll_interval = get_settings().devnest_sse_poll_interval_seconds
 
     async def event_stream() -> AsyncIterator[str]:
         nonlocal last_event_id
@@ -370,12 +376,13 @@ async def stream_workspace_events(
                 if await request.is_disconnected():
                     break
 
-                # Wait for a push notification OR the fallback timeout.
-                # notification_event is an asyncio.Event — await it with a timeout.
+                # Wait for an in-process push notification OR the configurable poll timeout.
+                # Same-process events wake the loop immediately (near-zero latency).
+                # Cross-worker events are delivered within _poll_interval seconds via DB poll.
                 try:
-                    await asyncio.wait_for(notification_event.wait(), timeout=EVENT_BUS_WAIT_TIMEOUT_SEC)
+                    await asyncio.wait_for(notification_event.wait(), timeout=_poll_interval)
                 except asyncio.TimeoutError:
-                    pass  # Fallback poll — no notification received within timeout.
+                    pass  # Fallback DB poll — no same-process notification received.
 
                 # Reset so next iteration blocks again.
                 notification_event.clear()

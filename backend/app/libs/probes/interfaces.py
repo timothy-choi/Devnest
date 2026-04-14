@@ -62,6 +62,28 @@ class ProbeRunner(ABC):
         """V1: TCP connect reachability to ``workspace_ip:port`` within ``timeout_seconds`` (no HTTP)."""
         ...
 
+    def check_service_http(
+        self,
+        *,
+        workspace_ip: str,
+        port: int = 8080,
+        timeout_seconds: float = 5.0,
+    ) -> ServiceProbeResult:
+        """HTTP GET to ``http://workspace_ip:port/``; accept 2xx/3xx as ready.
+
+        Default implementation returns healthy=True (pass-through) so existing
+        :class:`ProbeRunner` subclasses that do not override this method continue
+        to work without change.  :class:`DefaultProbeRunner` overrides with a real
+        ``urllib.request`` check.
+        """
+        return ServiceProbeResult(
+            healthy=True,
+            workspace_ip=workspace_ip,
+            port=port,
+            latency_ms=None,
+            issues=(),
+        )
+
     @abstractmethod
     def check_workspace_health(
         self,

@@ -39,7 +39,8 @@ from app.services.integration_service.api.schemas import (
 )
 from app.services.integration_service.github_client import GitHubClient, GitHubClientError
 from app.services.integration_service.models import CITriggerRecord, WorkspaceCIConfig
-from app.services.workspace_service.models import Workspace
+from app.services.workspace_service.models import Workspace, WorkspaceConfig
+from app.services.workspace_service.api.schemas.workspace_schemas import get_workspace_features
 
 _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspaces", tags=["workspace-integrations"])
@@ -52,6 +53,22 @@ def _get_workspace_owned(session: Session, workspace_id: int, user_id: int) -> W
     if ws.owner_user_id != user_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Not your workspace")
     return ws
+
+
+def _assert_ci_enabled(session: Session, workspace_id: int) -> None:
+    """Raise HTTP 403 if the ci_enabled feature flag is not set in this workspace's config."""
+    from sqlmodel import select as _select  # noqa: PLC0415
+    cfg = session.exec(
+        _select(WorkspaceConfig)
+        .where(WorkspaceConfig.workspace_id == workspace_id)
+        .order_by(WorkspaceConfig.version.desc())
+    ).first()
+    features = get_workspace_features(cfg.config_json if cfg is not None else None)
+    if not features.ci_enabled:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail="CI feature is not enabled for this workspace. Enable via workspace config features.ci_enabled=true.",
+        )
 
 
 def _get_ci_config(session: Session, workspace_id: int) -> WorkspaceCIConfig | None:
@@ -109,6 +126,7 @@ def upsert_ci_config(
 ) -> Response:
     assert current.user_auth_id is not None
     _get_workspace_owned(session, workspace_id, current.user_auth_id)
+    _assert_ci_enabled(session, workspace_id)
 
     now = datetime.now(timezone.utc)
     existing = _get_ci_config(session, workspace_id)
@@ -186,6 +204,7 @@ def trigger_ci(
 ) -> CITriggerResponse:
     assert current.user_auth_id is not None
     _get_workspace_owned(session, workspace_id, current.user_auth_id)
+    _assert_ci_enabled(session, workspace_id)
 
     cfg = _get_ci_config(session, workspace_id)
     if cfg is None:

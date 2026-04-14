@@ -144,6 +144,8 @@ def _workspace_control_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE", "1")
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "1")
     monkeypatch.setenv("WORKSPACE_CONTAINER_IMAGE", "nginx:alpine")
+    # Internal workspace IPs are not HTTP-reachable from the API host in this stack (probes are stubbed).
+    monkeypatch.setenv("DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED", "false")
     from app.libs.common.config import get_settings
 
     get_settings.cache_clear()
@@ -179,14 +181,23 @@ def workspace_control_plane_topology(
 
 @pytest.fixture
 def workspace_control_plane_probe_socket_patch() -> Generator[None, None, None]:
-    """Stub TCP connect for service probes (workspace IP is not host-routable)."""
+    """Stub TCP and HTTP probes for service checks (workspace IP is not host-routable)."""
+    from unittest.mock import MagicMock  # noqa: PLC0415
 
     class _FakeSock:
         def close(self) -> None:
             pass
 
+    fake_http = MagicMock()
+    fake_http.status = 200
+    fake_http.__enter__ = lambda s: s
+    fake_http.__exit__ = MagicMock(return_value=False)
+
     with patch(
         "app.libs.probes.probe_runner._probe_create_connection",
         return_value=_FakeSock(),
+    ), patch(
+        "app.libs.probes.probe_runner._probe_urlopen",
+        return_value=fake_http,
     ):
         yield

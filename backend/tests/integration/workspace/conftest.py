@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Generator
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import docker
 import pytest
@@ -78,17 +78,26 @@ def orchestrator_topology(db_session: Session, monkeypatch: pytest.MonkeyPatch) 
 @pytest.fixture
 def e2e_probe_socket_patch() -> Generator[None, None, None]:
     """
-    Stub TCP connect for service probes (workspace IP is not host-routable).
+    Stub TCP connect and HTTP probe for service probes (workspace IP not host-routable).
 
-    Same pattern as ``tests/integration/orchestrator/test_orchestrator_bringup_integration.py``.
+    Patches both ``_probe_create_connection`` (TCP) and ``_probe_urlopen`` (HTTP) so that
+    ``check_workspace_health`` considers the service reachable without a live container.
     """
 
     class _FakeSock:
         def close(self) -> None:
             pass
 
+    fake_http = MagicMock()
+    fake_http.status = 200
+    fake_http.__enter__ = lambda s: s
+    fake_http.__exit__ = MagicMock(return_value=False)
+
     with patch(
         "app.libs.probes.probe_runner._probe_create_connection",
         return_value=_FakeSock(),
+    ), patch(
+        "app.libs.probes.probe_runner._probe_urlopen",
+        return_value=fake_http,
     ):
         yield

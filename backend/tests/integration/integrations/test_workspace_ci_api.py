@@ -14,10 +14,15 @@ def _register_and_login(client, *, username, email, password="pass12345"):
     return resp.json()["access_token"]
 
 
-def _create_workspace(client, token, *, name="ws1"):
+def _create_workspace(client, token, *, name="ws1", ci_enabled: bool = True):
+    """Create a workspace; ci_enabled=True by default so CI tests can exercise CI endpoints."""
     resp = client.post(
         "/workspaces",
-        json={"name": name, "description": "test", "config": {"image": "nginx:alpine"}},
+        json={
+            "name": name,
+            "description": "test",
+            "runtime": {"features": {"ci_enabled": ci_enabled}},
+        },
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code in (201, 202)
@@ -88,14 +93,40 @@ def test_delete_ci_config(client):
 
 
 def test_trigger_ci_without_config_404(client):
+    """Workspace with ci_enabled=True but no CI config → 404 (not 403)."""
     token = _register_and_login(client, username="cinoconf", email="cinoconf@example.com")
-    ws_id = _create_workspace(client, token, name="ci_no_conf")
+    ws_id = _create_workspace(client, token, name="ci_no_conf", ci_enabled=True)
     resp = client.post(
         f"/workspaces/{ws_id}/ci/trigger",
         json={"event_type": "devnest_trigger"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_upsert_ci_config_without_ci_feature_enabled_returns_403(client):
+    """ci_enabled=False → 403 on POST /ci/config."""
+    token = _register_and_login(client, username="cinoci", email="cinoci@example.com")
+    ws_id = _create_workspace(client, token, name="ci_no_feat", ci_enabled=False)
+    resp = client.post(
+        f"/workspaces/{ws_id}/ci/config",
+        json={"provider": "github_actions", "repo_owner": "org", "repo_name": "repo"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN
+    assert "ci" in resp.json()["detail"].lower()
+
+
+def test_trigger_ci_without_ci_feature_enabled_returns_403(client):
+    """ci_enabled=False → 403 on POST /ci/trigger."""
+    token = _register_and_login(client, username="cinocitr", email="cinocitr@example.com")
+    ws_id = _create_workspace(client, token, name="ci_no_feat_tr", ci_enabled=False)
+    resp = client.post(
+        f"/workspaces/{ws_id}/ci/trigger",
+        json={"event_type": "devnest_trigger"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == status.HTTP_403_FORBIDDEN
 
 
 def test_trigger_ci_without_provider_token_400(client, db_session):

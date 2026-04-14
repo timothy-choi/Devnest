@@ -29,6 +29,8 @@ class ProbeIssueCode(str, Enum):
     SERVICE_UNREACHABLE = "SERVICE_UNREACHABLE"
     SERVICE_TIMEOUT = "SERVICE_TIMEOUT"
     SERVICE_CONNECT_ERROR = "SERVICE_CONNECT_ERROR"
+    # HTTP-level readiness: TCP connected but service returned an error or is still initialising.
+    SERVICE_HTTP_NOT_READY = "SERVICE_HTTP_NOT_READY"
 
     # Probe runner / execution
     PROBE_EXECUTION_FAILED = "PROBE_EXECUTION_FAILED"

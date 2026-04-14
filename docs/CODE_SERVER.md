@@ -125,15 +125,18 @@ The probe runner checks code-server readiness via:
 2. **Topology check** (`check_topology_state`): verifies the workspace has an allocated IP and
    is attached to the bridge network.
 3. **Service reachability** (`check_service_reachable`): TCP connect to the workspace IP at
-   port `8080`. A successful TCP connect confirms code-server is listening.
+   port `8080`.
+4. **HTTP readiness** (`check_service_http`, when `DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=true`):
+   HTTP GET to `http://<workspace_ip>:8080/`. Responses with status **below 400** (2xx/3xx) count as
+   ready so redirects are accepted.
 
-A workspace transitions to `RUNNING` only when all three checks pass. If code-server fails to
-bind within the probe timeout (default 5 s), the workspace enters `ERROR` state and the reconcile
-loop will retry.
+A workspace transitions to `RUNNING` only when all checks pass (TCP plus HTTP when enabled). If
+code-server fails to become ready within the probe timeout, the workspace enters `ERROR` state
+and the reconcile loop will retry.
 
-For even stricter readiness (HTTP 200 on `/`), the probe can be extended in a future iteration.
-The TCP connect is sufficient for V1 since code-server immediately accepts TCP connections once
-it has started.
+Set `DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=false` only in special environments where the API host
+cannot HTTP-reach workspace container IPs (e.g. some automated test stacks). **Keep it true in
+production** so `RUNNING` means the IDE is actually serving HTTP, not merely holding a TCP listensocket.
 
 ---
 
