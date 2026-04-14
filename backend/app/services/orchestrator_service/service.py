@@ -43,6 +43,7 @@ from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResu
 from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
 )
+from app.services.placement_service.runtime_policy import authoritative_container_ref_required
 
 from .errors import (
     WorkspaceBringUpError,
@@ -597,9 +598,8 @@ class DefaultOrchestratorService(OrchestratorService):
         wid: str,
         container_ref: str,
     ) -> tuple[int, str | None, str | None]:
-        """Inspect container by deterministic name; return topology int id, container_id, prior state."""
+        """Inspect container using ``container_ref`` (persisted engine id or dev-only deterministic name)."""
         ws_int = _parse_topology_workspace_id(wid)
-        # TODO: load persisted runtime placement (container_id/node_id/topology_id) from Workspace_runtime.
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)
         except Exception as e:
@@ -672,7 +672,18 @@ class DefaultOrchestratorService(OrchestratorService):
         if not wid:
             raise WorkspaceStopError("workspace_id is empty")
 
-        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
+        cid_in = (container_id or "").strip()
+        if authoritative_container_ref_required() and not cid_in:
+            return WorkspaceStopResult(
+                workspace_id=wid,
+                success=False,
+                container_id=None,
+                container_state=None,
+                topology_detached=None,
+                issues=["runtime:authoritative_container_id_required"],
+            )
+
+        container_ref = cid_in or _sanitize_container_name(wid)
         logger.info(
             "orchestrator_stop_start",
             extra={
@@ -729,7 +740,6 @@ class DefaultOrchestratorService(OrchestratorService):
             ws_int = _parse_topology_workspace_id(wid)
         except WorkspaceBringUpError as e:
             raise WorkspaceDeleteError(str(e)) from e
-        # TODO: load persisted container_id / placement from Workspace_runtime.
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)
         except Exception as e:
@@ -810,7 +820,19 @@ class DefaultOrchestratorService(OrchestratorService):
         if not wid:
             raise WorkspaceDeleteError("workspace_id is empty")
 
-        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
+        cid_in = (container_id or "").strip()
+        if authoritative_container_ref_required() and not cid_in:
+            return WorkspaceDeleteResult(
+                workspace_id=wid,
+                success=False,
+                container_deleted=False,
+                topology_detached=None,
+                topology_deleted=None,
+                container_id=None,
+                issues=["runtime:authoritative_container_id_required"],
+            )
+
+        container_ref = cid_in or _sanitize_container_name(wid)
         logger.info(
             "orchestrator_delete_start",
             extra={"workspace_id": wid, "topology_id": self._topology_id, "node_id": self._node_id},

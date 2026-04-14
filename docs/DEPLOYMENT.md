@@ -106,8 +106,17 @@ DEVNEST_WORKSPACE_PROJECTS_BASE=/data/devnest-workspaces
 DEVNEST_WORKSPACE_IMAGE=codercom/code-server:latest
 
 # After TCP connect on the workspace IDE port, perform HTTP GET to confirm the IDE is serving (code-server readiness).
-# Leave true in production. Integration/system tests disable this when workspace IPs are not routable from the API host.
+# Staging/production: must stay true together with DEVNEST_REQUIRE_IDE_HTTP_PROBE (startup validates both).
 DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=true
+# Staging/production: must be true so RUNNING implies HTTP IDE readiness (not TCP-only).
+DEVNEST_REQUIRE_IDE_HTTP_PROBE=true
+
+# Authoritative placement: never enable in staging/production (EC2/VM multi-node).
+DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK=false
+
+# Reconcile duplicate-suppression (requires PostgreSQL URL in staging/production).
+DEVNEST_RECONCILE_LOCK_BACKEND=postgres_advisory
+DEVNEST_REQUIRE_PROD_RECONCILE_LOCKING=true
 # When false, TCP probes from this process require service_reachability_runner (execution node). Use on API-only hosts.
 # Default true for local/dev and workers that are co-located with Docker.
 DEVNEST_PROBE_ASSUME_COLOCATED_ENGINE=true

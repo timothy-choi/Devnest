@@ -66,6 +66,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Verify pytest-timeout
+        run: python scripts/verify_pytest_timeout.py
+
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
@@ -81,6 +84,8 @@ jobs:
 
       # Privileged topology tests run under sudo next (topology_linux suite + topology_linux_core).
       - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         run: |
           pytest tests -v -m "not topology_linux and not topology_linux_core and not gateway" \
             --timeout=600 \
@@ -95,6 +100,8 @@ jobs:
           coverage xml -o nightly-full-tests-coverage.xml
 
       - name: Run Linux topology tests (elevated privileges)
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux or topology_linux_core"
 
       - name: Upload full-suite coverage artifact

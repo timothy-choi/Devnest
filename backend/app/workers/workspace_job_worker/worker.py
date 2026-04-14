@@ -49,6 +49,11 @@ from app.services.orchestrator_service.errors import (
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
 from app.services.autoscaler_service.service import maybe_provision_on_no_schedulable_capacity
+from app.services.cleanup_service import (
+    CLEANUP_SCOPE_BRINGUP_ROLLBACK,
+    CLEANUP_SCOPE_STOP_INCOMPLETE,
+    ensure_durable_cleanup_task,
+)
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
@@ -400,6 +405,12 @@ def _sync_runtime_after_failed_bringup(session: Session, workspace_id: int, resu
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     else:
         rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
+        ensure_durable_cleanup_task(
+            session,
+            workspace_id=workspace_id,
+            scope=CLEANUP_SCOPE_BRINGUP_ROLLBACK,
+            detail=list(result.rollback_issues or result.issues or []),
+        )
     rt.updated_at = ts
     session.add(rt)
 
@@ -425,6 +436,12 @@ def _sync_runtime_after_bringup_exception(session: Session, workspace_id: int, e
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     else:
         rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
+        ensure_durable_cleanup_task(
+            session,
+            workspace_id=workspace_id,
+            scope=CLEANUP_SCOPE_BRINGUP_ROLLBACK,
+            detail=list(exc.rollback_issues or []),
+        )
     rt.updated_at = ts
     session.add(rt)
 
@@ -793,6 +810,12 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
         return
 
     msg = _format_issues(result.issues) or "Stop completed without success"
+    ensure_durable_cleanup_task(
+        session,
+        workspace_id=wid,
+        scope=CLEANUP_SCOPE_STOP_INCOMPLETE,
+        detail=list(result.issues or []),
+    )
     _resolve_orchestrator_result_failure(
         session,
         ws,

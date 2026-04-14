@@ -20,12 +20,14 @@ from sqlmodel import Session, select
 from app.services.auth_service.services.auth_token import create_access_token
 from app.services.workspace_service.models import (
     Workspace,
+    WorkspaceCleanupTask,
     WorkspaceJob,
     WorkspaceJobStatus,
     WorkspaceJobType,
     WorkspaceRuntime,
     WorkspaceStatus,
 )
+from app.services.workspace_service.models.enums import WorkspaceCleanupTaskStatus
 
 pytestmark = [
     pytest.mark.integration,
@@ -94,6 +96,13 @@ def test_ec2_profile_create_stop_start_delete_reuses_runtime_placement(
     assert ws.status == WorkspaceStatus.RUNNING.value
     rt_run = db_session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
     assert rt_run is not None and rt_run.node_id and rt_run.topology_id
+    debt = db_session.exec(
+        select(WorkspaceCleanupTask).where(
+            WorkspaceCleanupTask.workspace_id == wid,
+            WorkspaceCleanupTask.status == WorkspaceCleanupTaskStatus.PENDING.value,
+        ),
+    ).first()
+    assert debt is None, "no durable cleanup debt after successful bring-up"
 
     r_stop = client.post(f"/workspaces/stop/{wid}", headers=_auth(token))
     assert r_stop.status_code == status.HTTP_202_ACCEPTED, r_stop.text

@@ -14,6 +14,9 @@ procedures, and monitoring guidance.
   `drift_repair` count repairs during reconcile (see `ARCHITECTURE.md`).
 - **Rollback failures:** `devnest_orchestrator_bringup_rollback_failed_total` when compensating stop
   does not succeed after retries.
+- **Durable cleanup queue:** `devnest_cleanup_task_enqueued_total` / `devnest_cleanup_task_attempt_total`
+  track persisted cleanup work after failed rollback or partial stop. Reconcile drains pending
+  `workspace_cleanup_task` rows until stop + IP release succeeds or the next attempt is logged.
 
 ---
 

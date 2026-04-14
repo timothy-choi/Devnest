@@ -383,6 +383,14 @@ Scale-down now uses a **two-phase drain**:
 - **Persistence bind mounts** for `/home/coder/.config/code-server` and `/home/coder/.local/share/code-server` are created automatically at `<DEVNEST_WORKSPACE_PROJECTS_BASE>/ws-<id>/code-server/{config,data}`.
 - **Workspace terminal** is feature-gated via `features.terminal_enabled`. See [CODE_SERVER.md](CODE_SERVER.md) and [WORKSPACE_PERSISTENCE.md](WORKSPACE_PERSISTENCE.md).
 
+### Authoritative runtime placement, IDE readiness, durable cleanup (final hardening)
+
+- **Placement:** `resolve_orchestrator_placement` uses `WorkspaceRuntime.node_id` and `topology_id` for every runtime-mutating job (`START`/`STOP`/`RESTART`/`UPDATE`/`DELETE`/`RECONCILE`/`SNAPSHOT_*`) except `CREATE` (scheduler) and first `START` when no runtime row exists. In **staging/production**, `DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK` must be **false**; legacy `DEVNEST_NODE_ID` / `DEVNEST_TOPOLOGY_ID` resolution is **development-only** when explicitly enabled.
+- **Stop/delete:** When fallback is off, the orchestrator requires a persisted Docker **engine** `container_id` (no deterministic-name guess).
+- **IDE contract:** Staging/production require `DEVNEST_REQUIRE_IDE_HTTP_PROBE=true` and `DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=true` so workspace **RUNNING** implies HTTP `/healthz` (or configured path) success, not TCP-only.
+- **Reconcile locking:** Staging/production with `DEVNEST_REQUIRE_PROD_RECONCILE_LOCKING=true` require **PostgreSQL** and `DEVNEST_RECONCILE_LOCK_BACKEND=postgres_advisory` (per-workspace `pg_try_advisory_lock`).
+- **Durable cleanup:** Failed bring-up rollback, failed stop/detach, or IP-release debt enqueue `workspace_cleanup_task` rows; `RECONCILE_RUNTIME` runs `process_durable_cleanup_tasks_for_workspace` (idempotent stop + `release_ip_lease`) until tasks reach `SUCCEEDED`. Metrics: `devnest_cleanup_task_*`.
+
 ---
 
 ## Topology janitor and distributed reconcile (EC2/VM profile)

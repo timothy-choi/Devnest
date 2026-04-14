@@ -121,6 +121,9 @@ class Settings(BaseSettings):
         "devnest_rate_limit_enabled",
         "devnest_metrics_auth_enabled",
         "devnest_workspace_http_probe_enabled",
+        "devnest_require_ide_http_probe",
+        "devnest_allow_runtime_env_fallback",
+        "devnest_require_prod_reconcile_locking",
         "devnest_probe_assume_colocated_engine",
         mode="before",
     )
@@ -311,6 +314,9 @@ class Settings(BaseSettings):
     # workspace IP is not routable from the API host (e.g. integration/system tests with DB-only
     # topology addresses); tests set DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=false via conftest.
     devnest_workspace_http_probe_enabled: bool = True
+    # When true (default), RUNNING / healthy workspace probes must pass HTTP IDE readiness where
+    # ``devnest_workspace_http_probe_enabled`` is also true. Staging/production require both.
+    devnest_require_ide_http_probe: bool = True
     # HTTP path for IDE readiness (code-server exposes /healthz in typical installs). Must start with ``/``.
     devnest_workspace_ide_health_path: str = "/healthz"
     # When true (default), TCP/HTTP probes may run from the API/worker process (same host as Docker).
@@ -318,6 +324,16 @@ class Settings(BaseSettings):
     # tier); then probes require ``NodeExecutionBundle.service_reachability_runner`` (SSH/SSM) so
     # checks run on the execution node.
     devnest_probe_assume_colocated_engine: bool = True
+
+    # Authoritative placement: allow legacy DEVNEST_NODE_ID / DEVNEST_TOPOLOGY_ID resolution in
+    # development only. Must remain false in staging/production.
+    devnest_allow_runtime_env_fallback: bool = False
+
+    # Reconcile duplicate-suppression: ``postgres_advisory`` uses pg_try_advisory_lock (required in
+    # staging/production with PostgreSQL). ``portable`` is SQLite/single-writer only — rejected
+    # for production when ``devnest_require_prod_reconcile_locking`` is true.
+    devnest_reconcile_lock_backend: str = "postgres_advisory"
+    devnest_require_prod_reconcile_locking: bool = True
 
     # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
     devnest_autoscaler_enabled: bool = False
@@ -407,6 +423,12 @@ class Settings(BaseSettings):
     def _normalize_rate_limit_backend(cls, v):  # noqa: ANN001
         s = str(v or "memory").strip().lower()
         return s if s in ("memory", "redis") else "memory"
+
+    @field_validator("devnest_reconcile_lock_backend", mode="before")
+    @classmethod
+    def _normalize_reconcile_lock_backend(cls, v):  # noqa: ANN001
+        s = str(v or "postgres_advisory").strip().lower()
+        return s if s in ("postgres_advisory", "portable") else "postgres_advisory"
 
     @field_validator("devnest_autoscaler_max_concurrent_provisioning", mode="before")
     @classmethod
@@ -519,6 +541,48 @@ class Settings(BaseSettings):
             if raw and len(raw) < min_len:
                 msg = f"{fname} length {len(raw)} < devnest_internal_api_key_min_length ({min_len})"
                 raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_staging_production_placement_and_probes(self) -> Self:
+        env = str(self.devnest_env or "development").strip().lower()
+        if env not in ("production", "staging"):
+            return self
+        if self.devnest_allow_runtime_env_fallback:
+            raise RuntimeError(
+                "DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK must be false in staging/production "
+                "(use authoritative WorkspaceRuntime placement on EC2/VM nodes).",
+            )
+        if not self.devnest_require_ide_http_probe:
+            raise RuntimeError(
+                "DEVNEST_REQUIRE_IDE_HTTP_PROBE must be true in staging/production so RUNNING "
+                "implies code-server HTTP readiness.",
+            )
+        if not self.devnest_workspace_http_probe_enabled:
+            raise RuntimeError(
+                "DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED must be true in staging/production "
+                "when IDE HTTP readiness is required.",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_staging_production_reconcile_locking(self) -> Self:
+        env = str(self.devnest_env or "development").strip().lower()
+        if env not in ("production", "staging"):
+            return self
+        if not self.devnest_require_prod_reconcile_locking:
+            return self
+        url = (self.database_url or "").strip().lower()
+        if not url.startswith("postgresql"):
+            raise RuntimeError(
+                "Staging/production with DEVNEST_REQUIRE_PROD_RECONCILE_LOCKING=true requires "
+                "PostgreSQL (DATABASE_URL) so per-workspace reconcile advisory locks work.",
+            )
+        if self.devnest_reconcile_lock_backend != "postgres_advisory":
+            raise RuntimeError(
+                f"DEVNEST_RECONCILE_LOCK_BACKEND={self.devnest_reconcile_lock_backend!r} is not "
+                "allowed in staging/production; use postgres_advisory.",
+            )
         return self
 
 
