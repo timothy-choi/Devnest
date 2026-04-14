@@ -54,10 +54,15 @@ DEVNEST_RECONCILE_BATCH_SIZE=10
 DEVNEST_RECONCILE_TARGET_STATUSES=RUNNING,ERROR
 DEVNEST_RECONCILE_LEASE_TTL_SECONDS=120  # seconds before a RUNNING reconcile is stale
 
-# Rate limiting (in-process sliding window; set false to disable)
+# Rate limiting — choose memory (single-process) or redis (distributed multi-worker)
 DEVNEST_RATE_LIMIT_ENABLED=true
 DEVNEST_RATE_LIMIT_AUTH_PER_MINUTE=20   # /auth/login, /auth/register, /auth/forgot-password
 DEVNEST_RATE_LIMIT_SSE_PER_MINUTE=30    # /workspaces/{id}/events SSE endpoint
+
+# Distributed rate limiting (Redis-backed) — set for multi-worker deployments
+# DEVNEST_RATE_LIMIT_BACKEND=redis              # "memory" (default) or "redis"
+# DEVNEST_REDIS_URL=redis://redis-host:6379/0   # required when backend=redis
+# DEVNEST_REQUIRE_DISTRIBUTED_RATE_LIMITING=true # abort if redis URL missing
 
 # Integration / Provider Token Encryption
 # Generate with: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -72,6 +77,16 @@ GITHUB_OAUTH_PUBLIC_BASE_URL=https://api.yourdomain.com   # base for /auth/oauth
 GOOGLE_CLIENT_ID=<your-google-client-id>
 GOOGLE_CLIENT_SECRET=<your-google-client-secret>
 GCLOUD_OAUTH_PUBLIC_BASE_URL=https://api.yourdomain.com   # base for /auth/oauth/google/callback
+
+# Workspace runtime: projects base (required for persistent workspace files)
+# Must be an absolute path on the Docker host; created automatically if missing.
+DEVNEST_WORKSPACE_PROJECTS_BASE=/data/devnest-workspaces
+# code-server image (must include code-server; official: codercom/code-server:latest)
+DEVNEST_WORKSPACE_IMAGE=codercom/code-server:latest
+
+# Autoscaler drain delay (safe scale-down)
+DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS=30         # wait before terminating a draining node
+DEVNEST_AUTOSCALER_RECENT_ACTIVITY_WINDOW_SECONDS=300  # skip nodes with recent heartbeats
 
 # Terminal WebSocket settings
 DEVNEST_WORKSPACE_SHELL=/bin/bash   # shell to launch in terminal sessions

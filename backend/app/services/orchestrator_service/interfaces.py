@@ -21,8 +21,18 @@ class OrchestratorService(ABC):
         *,
         workspace_id: str,
         requested_config_version: int | None = None,
+        cpu_limit_cores: float | None = None,
+        memory_limit_mib: int | None = None,
+        env: dict | None = None,
+        features: dict | None = None,
     ) -> WorkspaceBringUpResult:
-        """Provision or start a workspace runtime."""
+        """Provision or start a workspace runtime.
+
+        ``cpu_limit_cores`` and ``memory_limit_mib`` enforce container resource quotas when set.
+        ``env`` injects additional environment variables from ``config_json``.
+        ``features`` passes optional feature flags (e.g. ``terminal_enabled``) so the orchestrator
+        can configure the runtime accordingly.
+        """
 
     @abstractmethod
     def stop_workspace_runtime(

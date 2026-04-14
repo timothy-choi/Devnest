@@ -308,10 +308,11 @@ class TestLoadPendingJobs:
         assert tick.processed_count == 2
         assert orch.bring_up_workspace_runtime.call_count == 2
         wid_str = wid_str_holder["v"]
-        orch.bring_up_workspace_runtime.assert_any_call(
-            workspace_id=wid_str,
-            requested_config_version=REQUESTED_CONFIG_VERSION,
-        )
+        # Worker now passes additional resource-limit and feature kwargs from config_json.
+        calls = orch.bring_up_workspace_runtime.call_args_list
+        matching = [c for c in calls if c.kwargs.get("workspace_id") == wid_str]
+        assert len(matching) >= 1
+        assert matching[0].kwargs.get("requested_config_version") == REQUESTED_CONFIG_VERSION
 
 
 class TestMarkJobStarted:
@@ -324,7 +325,7 @@ class TestMarkJobStarted:
         orch = _orch()
         job_id_holder: dict[str, int] = {}
 
-        def _bring(*, workspace_id: str, requested_config_version: int | None = None) -> WorkspaceBringUpResult:
+        def _bring(*, workspace_id: str, requested_config_version: int | None = None, **_kw: object) -> WorkspaceBringUpResult:
             jid = job_id_holder["id"]
             with Session(workspace_job_worker_engine) as s:
                 job = s.get(WorkspaceJob, jid)
@@ -384,10 +385,11 @@ class TestDispatchCreate:
             run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
             session.commit()
 
-        orch.bring_up_workspace_runtime.assert_called_once_with(
-            workspace_id=str(wid),
-            requested_config_version=REQUESTED_CONFIG_VERSION,
-        )
+        # Worker now passes additional resource-limit and feature kwargs from config_json.
+        orch.bring_up_workspace_runtime.assert_called_once()
+        bup_kwargs = orch.bring_up_workspace_runtime.call_args.kwargs
+        assert bup_kwargs["workspace_id"] == str(wid)
+        assert bup_kwargs["requested_config_version"] == REQUESTED_CONFIG_VERSION
 
         with Session(workspace_job_worker_engine) as session:
             job = session.get(WorkspaceJob, job_id)
@@ -453,10 +455,11 @@ class TestDispatchStart:
             run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
             session.commit()
 
-        orch.bring_up_workspace_runtime.assert_called_once_with(
-            workspace_id=str(wid),
-            requested_config_version=REQUESTED_CONFIG_VERSION,
-        )
+        # Worker passes additional resource-limit and feature kwargs from config_json.
+        orch.bring_up_workspace_runtime.assert_called_once()
+        bup_kwargs = orch.bring_up_workspace_runtime.call_args.kwargs
+        assert bup_kwargs["workspace_id"] == str(wid)
+        assert bup_kwargs["requested_config_version"] == REQUESTED_CONFIG_VERSION
         with Session(workspace_job_worker_engine) as session:
             job = session.get(WorkspaceJob, job_id)
             assert job is not None
@@ -979,7 +982,7 @@ class TestCallOrder:
         orch = _orch()
         events: list[str] = []
 
-        def _bring(*, workspace_id: str, requested_config_version: int | None = None) -> WorkspaceBringUpResult:
+        def _bring(*, workspace_id: str, requested_config_version: int | None = None, **_kw: object) -> WorkspaceBringUpResult:
             events.append("orchestrator")
             return _bringup_ok(workspace_id)
 

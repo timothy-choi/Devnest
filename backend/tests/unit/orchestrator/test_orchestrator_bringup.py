@@ -173,28 +173,30 @@ class TestBringUpHappyPath:
         assert out.issues is None or out.issues == []
 
         # Runtime: ensure_running_runtime_only order, then second netns read before attach.
-        assert mock_runtime.mock_calls == [
-            call.ensure_container(
-                name=f"devnest-ws-{WORKSPACE_ID}",
-                image=None,
-                cpu_limit=None,
-                memory_limit_bytes=None,
-                env=None,
-                ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
-                labels={
-                    "devnest.workspace_id": WORKSPACE_ID,
-                    "devnest.managed_by": "orchestrator",
-                },
-                project_mount=None,
-                workspace_host_path=host_path,
-                extra_bind_mounts=None,
-                existing_container_id=None,
-            ),
-            call.start_container(container_id=CONTAINER_ID),
-            call.inspect_container(container_id=CONTAINER_ID),
-            call.get_container_netns_ref(container_id=CONTAINER_ID),
-            call.get_container_netns_ref(container_id=CONTAINER_ID),
-        ]
+        # env now includes code-server defaults; extra_bind_mounts includes CS persistence paths.
+        ensure_call = mock_runtime.mock_calls[0]
+        assert ensure_call[0] == "ensure_container"
+        ensure_kwargs = ensure_call[2]
+        assert ensure_kwargs["name"] == f"devnest-ws-{WORKSPACE_ID}"
+        assert ensure_kwargs["image"] is None
+        assert ensure_kwargs["cpu_limit"] is None
+        assert ensure_kwargs["memory_limit_bytes"] is None
+        # Code-server env is injected automatically.
+        assert isinstance(ensure_kwargs["env"], dict)
+        assert ensure_kwargs["env"].get("CODE_SERVER_AUTH") == "none"
+        assert ensure_kwargs["env"].get("PORT") == "8080"
+        assert ensure_kwargs["ports"] == ((0, WORKSPACE_IDE_CONTAINER_PORT),)
+        assert ensure_kwargs["workspace_host_path"] == host_path
+        # Code-server bind mounts are injected.
+        extra = ensure_kwargs.get("extra_bind_mounts") or []
+        container_paths = [m.container_path for m in extra]
+        assert "/home/coder/.config/code-server" in container_paths
+        assert "/home/coder/.local/share/code-server" in container_paths
+        # Remaining calls in order
+        assert mock_runtime.mock_calls[1] == call.start_container(container_id=CONTAINER_ID)
+        assert mock_runtime.mock_calls[2] == call.inspect_container(container_id=CONTAINER_ID)
+        assert mock_runtime.mock_calls[3] == call.get_container_netns_ref(container_id=CONTAINER_ID)
+        assert mock_runtime.mock_calls[4] == call.get_container_netns_ref(container_id=CONTAINER_ID)
 
         mock_topology.ensure_node_topology.assert_called_once_with(
             topology_id=TOPOLOGY_ID,

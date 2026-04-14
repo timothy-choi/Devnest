@@ -35,8 +35,9 @@ from app.services.integration_service.terminal_service import TerminalError, rel
 from app.services.node_execution_service.factory import resolve_node_execution_bundle
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
+from app.services.workspace_service.api.schemas.workspace_schemas import get_workspace_features
 from app.services.workspace_service.errors import WorkspaceAccessDeniedError
-from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+from app.services.workspace_service.models import Workspace, WorkspaceConfig, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceStatus
 from app.services.workspace_service.services.workspace_session_service import (
     resolve_workspace_session_for_access,
@@ -87,6 +88,24 @@ async def workspace_terminal(
     ws_obj = db.get(Workspace, workspace_id)
     if ws_obj is None:
         await websocket.close(code=_CLOSE_POLICY_VIOLATION, reason="workspace_not_found")
+        return
+
+    # Feature gate: terminal must be explicitly enabled in the workspace config.
+    _latest_cfg = db.exec(
+        select(WorkspaceConfig)
+        .where(WorkspaceConfig.workspace_id == workspace_id)
+        .order_by(WorkspaceConfig.version.desc())
+    ).first()
+    _features = get_workspace_features(_latest_cfg.config_json if _latest_cfg else None)
+    if not _features.terminal_enabled:
+        await websocket.close(
+            code=_CLOSE_POLICY_VIOLATION,
+            reason="terminal_feature_not_enabled",
+        )
+        _logger.info(
+            "terminal_rejected_feature_disabled",
+            extra={"workspace_id": workspace_id},
+        )
         return
 
     if user is not None:

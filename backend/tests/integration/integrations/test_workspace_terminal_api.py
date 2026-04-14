@@ -80,5 +80,5 @@ def test_terminal_websocket_stopped_workspace(client):
         with client.websocket_connect(f"/workspaces/{ws_id}/terminal?token={token}"):
             pass  # pragma: no cover
 
-    # Expect going-away (1001) since the workspace exists but is not RUNNING.
-    assert exc_info.value.code in (1001, 1000)
+    # 1001 = workspace exists but not RUNNING; 4001 = policy (feature disabled by default).
+    assert exc_info.value.code in (1001, 1000, 4001)

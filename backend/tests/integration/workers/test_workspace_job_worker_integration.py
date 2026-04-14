@@ -230,10 +230,10 @@ def test_process_create_job_happy_path_persists_runtime(
     run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
-    orch.bring_up_workspace_runtime.assert_called_once_with(
-        workspace_id=str(wid),
-        requested_config_version=REQUESTED_CONFIG_VERSION,
-    )
+    assert orch.bring_up_workspace_runtime.call_count == 1
+    _kw = orch.bring_up_workspace_runtime.call_args.kwargs
+    assert _kw["workspace_id"] == str(wid)
+    assert _kw["requested_config_version"] == REQUESTED_CONFIG_VERSION
 
     job = db_session.get(WorkspaceJob, job_id)
     ws = db_session.get(Workspace, wid)
@@ -285,10 +285,10 @@ def test_process_start_job_happy_path(
     run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
-    orch.bring_up_workspace_runtime.assert_called_once_with(
-        workspace_id=str(wid),
-        requested_config_version=REQUESTED_CONFIG_VERSION,
-    )
+    assert orch.bring_up_workspace_runtime.call_count == 1
+    _kw = orch.bring_up_workspace_runtime.call_args.kwargs
+    assert _kw["workspace_id"] == str(wid)
+    assert _kw["requested_config_version"] == REQUESTED_CONFIG_VERSION
     job = db_session.get(WorkspaceJob, job_id)
     ws = db_session.get(Workspace, wid)
     assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value

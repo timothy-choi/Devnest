@@ -283,6 +283,21 @@ class Settings(BaseSettings):
     # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist (last-node safety).
     # Values below 2 are coerced to 2 so scale-down cannot target the sole READY EC2 node via misconfiguration.
     devnest_autoscaler_min_ec2_nodes_before_reclaim: int = 2
+    # Drain delay: minimum seconds to wait after a node is marked DRAINING before allowing termination.
+    # Prevents premature scale-down on nodes that still have recently-started workloads.
+    devnest_autoscaler_drain_delay_seconds: int = 30
+    # Recent-activity window: a node is considered "recently active" if a workspace was started/stopped
+    # within this many seconds of the scale-down evaluation. Default 300s (5 min).
+    devnest_autoscaler_recent_activity_window_seconds: int = 300
+
+    # ── Distributed rate limiting (Redis) ───────────────────────────────────
+    # Rate limit backend: "memory" (default, single-process) or "redis" (distributed).
+    # When "redis", DEVNEST_REDIS_URL must be set.
+    devnest_rate_limit_backend: str = "memory"
+    # Redis connection URL for distributed rate limiting (e.g. redis://localhost:6379/0).
+    devnest_redis_url: str = ""
+    # When true, startup aborts if devnest_rate_limit_backend=redis but devnest_redis_url is empty.
+    devnest_require_distributed_rate_limiting: bool = False
 
     @field_validator("devnest_worker_enabled", mode="before")
     @classmethod
@@ -311,7 +326,12 @@ class Settings(BaseSettings):
             return 5
         return max(1, min(n, 50))
 
-    @field_validator("devnest_autoscaler_enabled", "devnest_autoscaler_provision_on_no_capacity", mode="before")
+    @field_validator(
+        "devnest_autoscaler_enabled",
+        "devnest_autoscaler_provision_on_no_capacity",
+        "devnest_require_distributed_rate_limiting",
+        mode="before",
+    )
     @classmethod
     def _parse_autoscaler_flags(cls, v):  # noqa: ANN001
         if isinstance(v, bool):
@@ -319,6 +339,30 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
+
+    @field_validator("devnest_autoscaler_drain_delay_seconds", mode="before")
+    @classmethod
+    def _coerce_drain_delay(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 30
+        return max(0, min(n, 3600))
+
+    @field_validator("devnest_autoscaler_recent_activity_window_seconds", mode="before")
+    @classmethod
+    def _coerce_activity_window(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 300
+        return max(0, min(n, 86400))
+
+    @field_validator("devnest_rate_limit_backend", mode="before")
+    @classmethod
+    def _normalize_rate_limit_backend(cls, v):  # noqa: ANN001
+        s = str(v or "memory").strip().lower()
+        return s if s in ("memory", "redis") else "memory"
 
     @field_validator("devnest_autoscaler_max_concurrent_provisioning", mode="before")
     @classmethod
@@ -405,6 +449,18 @@ class Settings(BaseSettings):
                 "To allow the default secret in a non-production environment, set "
                 "DEVNEST_ENV=development and DEVNEST_REQUIRE_SECRETS=false."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_redis_config(self) -> Self:
+        """Abort when distributed rate limiting is required but Redis URL is missing."""
+        if self.devnest_require_distributed_rate_limiting and self.devnest_rate_limit_backend == "redis":
+            if not (self.devnest_redis_url or "").strip():
+                raise RuntimeError(
+                    "DEVNEST_REQUIRE_DISTRIBUTED_RATE_LIMITING=true and "
+                    "DEVNEST_RATE_LIMIT_BACKEND=redis, but DEVNEST_REDIS_URL is empty. "
+                    "Set DEVNEST_REDIS_URL to a valid Redis connection URL."
+                )
         return self
 
     @model_validator(mode="after")
