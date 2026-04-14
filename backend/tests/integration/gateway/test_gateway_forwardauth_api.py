@@ -97,7 +97,7 @@ def _seed_active_session(
         session_token_hash=token_hash,
         status=WorkspaceSessionStatus.ACTIVE.value,
         role=WorkspaceSessionRole.OWNER.value,
-        created_at=now,
+        issued_at=now,
         updated_at=now,
         expires_at=expires_at,
     )
@@ -403,7 +403,7 @@ class TestForwardAuthEnforcementMode:
             session_token_hash=token_hash,
             status=WorkspaceSessionStatus.ACTIVE.value,
             role=WorkspaceSessionRole.OWNER.value,
-            created_at=now,
+            issued_at=now,
             updated_at=now,
             expires_at=now + timedelta(hours=1),
         )
