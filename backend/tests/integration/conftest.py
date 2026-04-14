@@ -37,6 +37,8 @@ def _integration_internal_api_key(monkeypatch):
     """
     monkeypatch.setenv("INTERNAL_API_KEY", "integration-test-internal-key")
     monkeypatch.setenv("DEVNEST_RATE_LIMIT_ENABLED", "false")
+    # Topology workspace IPs are not HTTP-reachable from the pytest host; TCP is stubbed in many suites.
+    monkeypatch.setenv("DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED", "false")
     get_settings.cache_clear()
 
     # Reset any accumulated window state from previous tests in this session.

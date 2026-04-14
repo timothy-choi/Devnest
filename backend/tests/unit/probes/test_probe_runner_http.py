@@ -224,6 +224,29 @@ class TestCheckWorkspaceHealthHttpIntegration:
         assert result.healthy is False
         assert result.service_healthy is False
 
+    def test_healthy_when_tcp_passes_and_http_probe_disabled_via_settings(self):
+        """Integration/system tests disable DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED; HTTP must not run."""
+        runner = self._make_runner_with_healthy_tcp()
+        http_called = {"n": 0}
+
+        def _count_http(*_a, **_kw):
+            http_called["n"] += 1
+            return _mock_http_response(200)
+
+        settings = MagicMock()
+        settings.devnest_workspace_http_probe_enabled = False
+        with patch("app.libs.common.config.get_settings", return_value=settings):
+            with patch("app.libs.probes.probe_runner._probe_urlopen", side_effect=_count_http):
+                result = runner.check_workspace_health(
+                    workspace_id="1",
+                    topology_id="1",
+                    node_id="node-1",
+                    container_id="ctr-abc",
+                )
+        assert http_called["n"] == 0
+        assert result.healthy is True
+        assert result.service_healthy is True
+
 
 # ---------------------------------------------------------------------------
 # ProbeRunner ABC: default check_service_http is a pass-through

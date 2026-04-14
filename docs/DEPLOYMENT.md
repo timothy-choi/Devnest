@@ -84,6 +84,13 @@ DEVNEST_WORKSPACE_PROJECTS_BASE=/data/devnest-workspaces
 # code-server image (must include code-server; official: codercom/code-server:latest)
 DEVNEST_WORKSPACE_IMAGE=codercom/code-server:latest
 
+# After TCP connect on the workspace IDE port, perform HTTP GET to confirm the IDE is serving (code-server readiness).
+# Leave true in production. Integration/system tests disable this when workspace IPs are not routable from the API host.
+DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=true
+
+# SSE: max latency for cross-worker event delivery (DB poll fallback when not on same gunicorn worker)
+DEVNEST_SSE_POLL_INTERVAL_SECONDS=2
+
 # Autoscaler drain delay (safe scale-down)
 DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS=30         # wait before terminating a draining node
 DEVNEST_AUTOSCALER_RECENT_ACTIVITY_WINDOW_SECONDS=300  # skip nodes with recent heartbeats

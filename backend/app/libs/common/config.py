@@ -119,6 +119,7 @@ class Settings(BaseSettings):
         "devnest_reconcile_enabled",
         "devnest_rate_limit_enabled",
         "devnest_metrics_auth_enabled",
+        "devnest_workspace_http_probe_enabled",
         mode="before",
     )
     @classmethod
@@ -290,6 +291,12 @@ class Settings(BaseSettings):
     # (gunicorn workers do not share the in-process event bus; they all poll DB instead).
     # Range: [0.5, 60]. Default 2.0.
     devnest_sse_poll_interval_seconds: float = 2.0
+
+    # After TCP connect succeeds on the workspace IDE port, perform HTTP GET to verify code-server
+    # (or equivalent) is serving. Default true in production. Set false for environments where the
+    # workspace IP is not routable from the API host (e.g. integration/system tests with DB-only
+    # topology addresses); tests set DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=false via conftest.
+    devnest_workspace_http_probe_enabled: bool = True
 
     # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
     devnest_autoscaler_enabled: bool = False

@@ -153,10 +153,18 @@ def test_check_workspace_health_aggregate_with_persisted_state(
         def close(self) -> None:
             pass
 
+    fake_http = MagicMock()
+    fake_http.status = 200
+    fake_http.__enter__ = lambda s: s
+    fake_http.__exit__ = MagicMock(return_value=False)
+
     runner = DefaultProbeRunner(runtime=mock_runtime_running, topology=topology_adapter)
     with patch(
         "app.libs.probes.probe_runner._probe_create_connection",
         return_value=_FakeSock(),
+    ), patch(
+        "app.libs.probes.probe_runner._probe_urlopen",
+        return_value=fake_http,
     ):
         agg = runner.check_workspace_health(
             workspace_id="5151",

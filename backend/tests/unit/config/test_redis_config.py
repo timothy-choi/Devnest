@@ -61,3 +61,17 @@ class TestRedisConfig:
             devnest_require_distributed_rate_limiting=True,
         )
         assert s.devnest_rate_limit_backend == "memory"
+
+
+class TestWorkspaceHttpProbeConfig:
+    def test_http_probe_enabled_by_default(self) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        s = Settings(database_url="postgresql://x:y@h/d")
+        assert s.devnest_workspace_http_probe_enabled is True
+
+    def test_http_probe_disabled_from_env_string(self) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        s = Settings(database_url="postgresql://x:y@h/d", devnest_workspace_http_probe_enabled="false")
+        assert s.devnest_workspace_http_probe_enabled is False

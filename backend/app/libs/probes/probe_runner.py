@@ -582,15 +582,21 @@ class DefaultProbeRunner(ProbeRunner):
                 timeout_seconds=timeout_seconds,
             )
             if svc.healthy:
-                # TCP connected — now verify the service is actually serving HTTP.
-                # This prevents marking a workspace RUNNING while code-server is still starting.
-                svc_http = self.check_service_http(
-                    workspace_ip=ws_ip,
-                    port=expected_port,
-                    timeout_seconds=timeout_seconds,
-                )
-                service_healthy = svc_http.healthy
-                service_issues = (*svc.issues, *svc_http.issues)
+                # TCP connected — optionally verify HTTP (code-server readiness). When disabled
+                # (e.g. tests with non-host-routable workspace IPs), TCP alone defines service health.
+                from app.libs.common.config import get_settings  # noqa: PLC0415
+
+                if get_settings().devnest_workspace_http_probe_enabled:
+                    svc_http = self.check_service_http(
+                        workspace_ip=ws_ip,
+                        port=expected_port,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    service_healthy = svc_http.healthy
+                    service_issues = (*svc.issues, *svc_http.issues)
+                else:
+                    service_healthy = svc.healthy
+                    service_issues = svc.issues
             else:
                 service_healthy = False
                 service_issues = svc.issues
