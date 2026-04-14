@@ -493,6 +493,7 @@ class TestDispatchStop:
 
         orch.stop_workspace_runtime.assert_called_once_with(
             workspace_id=str(wid),
+            container_id="old-ctr",
             requested_by=str(owner_user_id),
         )
         with Session(workspace_job_worker_engine) as session:
@@ -536,6 +537,7 @@ class TestDispatchRestart:
 
         orch.restart_workspace_runtime.assert_called_once_with(
             workspace_id=str(wid),
+            container_id=None,
             requested_by=str(owner_user_id),
             requested_config_version=REQUESTED_CONFIG_VERSION,
         )
@@ -578,6 +580,7 @@ class TestDispatchDelete:
 
         orch.delete_workspace_runtime.assert_called_once_with(
             workspace_id=str(wid),
+            container_id="old-ctr",
             requested_by=str(owner_user_id),
         )
         with Session(workspace_job_worker_engine) as session:
@@ -623,6 +626,7 @@ class TestDispatchUpdate:
 
         orch.update_workspace_runtime.assert_called_once_with(
             workspace_id=str(wid),
+            container_id=None,
             requested_config_version=cfg,
             requested_by=str(owner_user_id),
         )
@@ -715,7 +719,10 @@ class TestReconcileRuntimeJob:
             run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
             session.commit()
 
-        orch.check_workspace_runtime_health.assert_called_once_with(workspace_id=str(wid))
+        orch.check_workspace_runtime_health.assert_called_once_with(
+            workspace_id=str(wid),
+            container_id="old-ctr",
+        )
         orch.bring_up_workspace_runtime.assert_not_called()
         with Session(workspace_job_worker_engine) as session:
             job2 = session.get(WorkspaceJob, job_id)

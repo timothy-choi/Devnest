@@ -22,7 +22,12 @@ Set the following before starting the application:
 DATABASE_URL=postgresql+psycopg://devnest:STRONG_PASSWORD@db-host:5432/devnest
 JWT_SECRET_KEY=$(openssl rand -hex 32)
 
-# Production enforcement (prevents accidental insecure deployments)
+# Runtime environment — triggers automatic secret enforcement for non-development environments.
+# Accepted values: development (default), staging, production.
+# When set to staging or production and JWT_SECRET_KEY is the default placeholder, startup aborts.
+DEVNEST_ENV=production
+
+# Explicit secret enforcement (alternative to DEVNEST_ENV; either flag is sufficient).
 DEVNEST_REQUIRE_SECRETS=true
 
 # Internal API keys (use different keys per scope)
@@ -333,16 +338,21 @@ pytest tests/integration -v
 # Generate a cryptographically strong secret
 openssl rand -hex 32
 
-# Set it and enforce it
+# Option A: explicit flag
 JWT_SECRET_KEY=<output>
 DEVNEST_REQUIRE_SECRETS=true
+
+# Option B: environment-aware (recommended for multi-env deployments)
+JWT_SECRET_KEY=<output>
+DEVNEST_ENV=production   # or staging; any non-development value triggers enforcement
 ```
 
-If `DEVNEST_REQUIRE_SECRETS=true` and the default placeholder `change-me-in-production` is used,
-the application will refuse to start with a clear error message.
+If the default placeholder `change-me-in-production` is used and either `DEVNEST_REQUIRE_SECRETS=true`
+or `DEVNEST_ENV` is not `development`, the application raises a `RuntimeError` at startup with a
+clear error message.
 
-Even without `DEVNEST_REQUIRE_SECRETS=true`, a `WARNING` is always emitted at startup when the
-default secret is detected.
+A `WARNING` is always emitted at startup when the default secret is detected, regardless of
+enforcement settings.
 
 ### Internal API Keys
 
@@ -386,6 +396,17 @@ DevNest emits structured logs with a `devnest_event` field. Recommended queries:
 ### Metrics
 
 A Prometheus metrics endpoint is available at `/metrics`.
+
+To protect it with an internal API key (recommended in production):
+
+```bash
+DEVNEST_METRICS_AUTH_ENABLED=true
+INTERNAL_API_KEY_INFRASTRUCTURE=<strong-random-key>
+```
+
+When enabled, Prometheus must supply the `X-Internal-API-Key` header with the INFRASTRUCTURE scope key.
+If your Prometheus scraper cannot supply headers, protect the endpoint at the ingress layer instead
+(e.g. Traefik middleware to restrict to internal IPs) and leave `DEVNEST_METRICS_AUTH_ENABLED=false`.
 
 ### Audit Logs
 

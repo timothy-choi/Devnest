@@ -6,8 +6,12 @@
 #
 # Services:
 #   postgres      — managed DB (consider RDS in real production)
-#   api           — FastAPI backend (DEVNEST_WORKER_ENABLED=true runs built-in job worker)
-#   reconcile     — optional dedicated reconcile-only API process (lightweight)
+#   api           — FastAPI backend with built-in job worker and reconcile loop
+#                   (DEVNEST_WORKER_ENABLED=true, DEVNEST_RECONCILE_ENABLED=true)
+#
+# The reconcile loop runs as a background task inside the API process.
+# To run it as a separate process, scale the api service or run a second instance with
+# DEVNEST_WORKER_ENABLED=false and DEVNEST_RECONCILE_ENABLED=true.
 #
 # For real production, run DB migrations before starting services:
 #   docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head

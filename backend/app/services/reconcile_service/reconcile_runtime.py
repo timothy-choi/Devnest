@@ -420,15 +420,23 @@ def _reconcile_stopped(
 ) -> None:
     wid = ws.workspace_id
     assert wid is not None
+    persisted_container_id = wmod._get_persisted_container_id(session, wid)
     try:
-        health = orchestrator.check_workspace_runtime_health(workspace_id=str(wid))
+        health = orchestrator.check_workspace_runtime_health(
+            workspace_id=str(wid),
+            container_id=persisted_container_id,
+        )
     except WorkspaceBringUpError as e:
         _fail_reconcile(session, ws, job, f"reconcile:health_check_failed:{e}")
         return
 
     if health.success:
         try:
-            stop_res = orchestrator.stop_workspace_runtime(workspace_id=str(wid), requested_by=requested_by)
+            stop_res = orchestrator.stop_workspace_runtime(
+                workspace_id=str(wid),
+                container_id=persisted_container_id,
+                requested_by=requested_by,
+            )
         except WorkspaceStopError as e:
             _fail_reconcile(session, ws, job, f"reconcile:stop_failed:{e}")
             return
@@ -508,9 +516,13 @@ def _reconcile_running(
 ) -> None:
     wid = ws.workspace_id
     assert wid is not None
+    persisted_container_id = wmod._get_persisted_container_id(session, wid)
 
     try:
-        health = orchestrator.check_workspace_runtime_health(workspace_id=str(wid))
+        health = orchestrator.check_workspace_runtime_health(
+            workspace_id=str(wid),
+            container_id=persisted_container_id,
+        )
     except WorkspaceBringUpError as e:
         _fail_reconcile(session, ws, job, f"reconcile:health_check_failed:{e}")
         return

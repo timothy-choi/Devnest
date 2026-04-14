@@ -7,7 +7,6 @@ on:
     paths:
       - "backend/**"
       - "devnest-gateway/**"
-      - "gateway/**"
       - "traefik/**"
       - "docker-compose*.yml"
       - "docker-compose.system.yml"
@@ -19,7 +18,6 @@ on:
     paths:
       - "backend/**"
       - "devnest-gateway/**"
-      - "gateway/**"
       - "traefik/**"
       - "docker-compose*.yml"
       - "docker-compose.system.yml"
@@ -38,7 +36,7 @@ concurrency:
 # System job also excludes workspace_image (full workspace image build).
 #
 # Path filters (job `detect`): backend-only changes skip gateway tests; devnest-gateway-only
-# (or root compose / traefik / gateway/**) changes skip heavy backend jobs. Any workflow edit
+# (or root compose / traefik) changes skip heavy backend jobs. Any workflow edit
 # under .github/workflows/ runs both backend and gateway jobs.
 #
 # --- Nightly tier ---
@@ -66,7 +64,6 @@ jobs:
               - 'backend/**'
             gateway:
               - 'devnest-gateway/**'
-              - 'gateway/**'
               - 'traefik/**'
               - 'docker-compose*.yml'
               - 'docker-compose.system.yml'

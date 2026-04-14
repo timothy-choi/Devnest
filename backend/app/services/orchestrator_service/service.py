@@ -432,10 +432,14 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_by: str | None = None,
     ) -> WorkspaceStopResult:
         """
         Detach topology (best-effort), stop container (best-effort).
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available. Falls back to deterministic name derivation when ``None``.
 
         Returns :class:`WorkspaceStopResult` for the worker to persist (e.g. cleared or stopped runtime).
         """
@@ -445,7 +449,7 @@ class DefaultOrchestratorService(OrchestratorService):
         if not wid:
             raise WorkspaceStopError("workspace_id is empty")
 
-        container_ref = _sanitize_container_name(wid)
+        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
         logger.info(
             "orchestrator_stop_start",
             extra={"workspace_id": wid, "topology_id": self._topology_id, "node_id": self._node_id},
@@ -551,10 +555,14 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_by: str | None = None,
     ) -> WorkspaceDeleteResult:
         """
         Detach, delete container, optionally delete node topology runtime.
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available. Falls back to deterministic name derivation when ``None``.
 
         Returns :class:`WorkspaceDeleteResult` for the worker to clear ``WorkspaceRuntime`` on success.
         """
@@ -564,7 +572,7 @@ class DefaultOrchestratorService(OrchestratorService):
         if not wid:
             raise WorkspaceDeleteError("workspace_id is empty")
 
-        container_ref = _sanitize_container_name(wid)
+        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
         logger.info(
             "orchestrator_delete_start",
             extra={"workspace_id": wid, "topology_id": self._topology_id, "node_id": self._node_id},
@@ -603,11 +611,15 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_by: str | None = None,
         requested_config_version: int | None = None,
     ) -> WorkspaceRestartResult:
         """
         Stop then bring-up workspace runtime (optional new ``requested_config_version`` label).
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available; it is used for the stop phase only (the bring-up phase allocates a new ID).
 
         Returns :class:`WorkspaceRestartResult` aggregating stop and bring-up outcomes.
         """
@@ -632,7 +644,11 @@ class DefaultOrchestratorService(OrchestratorService):
         )
 
         try:
-            stop_res = self.stop_workspace_runtime(workspace_id=wid, requested_by=requested_by)
+            stop_res = self.stop_workspace_runtime(
+                workspace_id=wid,
+                container_id=container_id,
+                requested_by=requested_by,
+            )
         except WorkspaceStopError as e:
             raise WorkspaceRestartError(str(e)) from e
 
@@ -723,6 +739,7 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        container_id: str | None = None,
         requested_config_version: int,
         requested_by: str | None = None,
     ) -> WorkspaceUpdateResult:
@@ -730,6 +747,9 @@ class DefaultOrchestratorService(OrchestratorService):
         If container config label matches ``requested_config_version``, health-check only (noop).
 
         Otherwise restarts the workspace to apply the new version.
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available.
         """
         _ = requested_by  # TODO: persist audit trail / emit update event
 
@@ -744,7 +764,7 @@ class DefaultOrchestratorService(OrchestratorService):
         except WorkspaceBringUpError as e:
             raise WorkspaceUpdateError(str(e)) from e
 
-        container_ref = _sanitize_container_name(wid)
+        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)
         except Exception as e:
@@ -784,6 +804,7 @@ class DefaultOrchestratorService(OrchestratorService):
         try:
             r = self.restart_workspace_runtime(
                 workspace_id=wid,
+                container_id=container_id,
                 requested_by=requested_by,
                 requested_config_version=requested_config_version,
             )
@@ -820,14 +841,23 @@ class DefaultOrchestratorService(OrchestratorService):
         )
         return ur
 
-    def check_workspace_runtime_health(self, *, workspace_id: str) -> WorkspaceBringUpResult:
-        """Inspect + ``ProbeRunner.check_workspace_health`` only (no start/stop/topology writes)."""
+    def check_workspace_runtime_health(
+        self,
+        *,
+        workspace_id: str,
+        container_id: str | None = None,
+    ) -> WorkspaceBringUpResult:
+        """Inspect + ``ProbeRunner.check_workspace_health`` only (no start/stop/topology writes).
+
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
+        when available. Falls back to deterministic name derivation when ``None``.
+        """
         wid = (workspace_id or "").strip()
         if not wid:
             raise WorkspaceBringUpError("workspace_id is empty")
 
         _parse_topology_workspace_id(wid)
-        container_ref = _sanitize_container_name(wid)
+        container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
 
         try:
             ins = self._runtime_adapter.inspect_container(container_id=container_ref)
