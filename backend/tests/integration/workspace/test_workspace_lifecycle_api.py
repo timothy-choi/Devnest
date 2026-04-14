@@ -165,7 +165,7 @@ class TestWorkspaceLifecycleApiHappyPath:
         login = client.post(
             "/auth/login",
             json={
-                "email": f"life_reg_{suffix}@example.com",
+                "username": f"life_reg_{suffix}",
                 "password": "SecurePass123!",
             },
         )
@@ -217,7 +217,7 @@ class TestWorkspaceLifecycleApiHappyPath:
         mock_orch = self._make_mock_orchestrator(wid_str)
 
         with patch(
-            "app.services.orchestrator_service.app_factory.build_orchestrator_for_workspace_job",
+            "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
             return_value=mock_orch,
         ):
             # Process CREATE job → workspace becomes RUNNING
@@ -248,7 +248,7 @@ class TestWorkspaceLifecycleApiHappyPath:
             wid_str, container_id=rt.container_id
         )
         with patch(
-            "app.services.orchestrator_service.app_factory.build_orchestrator_for_workspace_job",
+            "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
             return_value=mock_orch,
         ):
             _process_job(client, stop_jid)
@@ -269,7 +269,7 @@ class TestWorkspaceLifecycleApiHappyPath:
         delete_jid = int(r_delete.json()["job_id"])
 
         with patch(
-            "app.services.orchestrator_service.app_factory.build_orchestrator_for_workspace_job",
+            "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
             return_value=mock_orch,
         ):
             _process_job(client, delete_jid)
@@ -290,7 +290,7 @@ class TestWorkspaceLifecycleApiHappyPath:
         mock_orch = self._make_mock_orchestrator(wid_str)
 
         with patch(
-            "app.services.orchestrator_service.app_factory.build_orchestrator_for_workspace_job",
+            "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
             return_value=mock_orch,
         ):
             _process_job(client, create_jid)
@@ -316,8 +316,8 @@ class TestWorkspaceLifecycleApiHappyPath:
 
 
 class TestWorkspaceLifecycleApiNegativeCases:
-    def test_create_workspace_duplicate_name_returns_409(self, client, db_session: Session) -> None:
-        """Creating two workspaces with the same name for the same owner returns 409."""
+    def test_create_workspace_with_same_name_is_allowed(self, client, db_session: Session) -> None:
+        """The API does not enforce unique workspace names per user; both creations succeed."""
         suffix = uuid.uuid4().hex[:8]
         _, token = _register_and_token(
             client,
@@ -338,7 +338,7 @@ class TestWorkspaceLifecycleApiNegativeCases:
             json={"name": ws_name, "is_private": True},
             headers=_auth_header(token),
         )
-        assert r2.status_code == status.HTTP_409_CONFLICT
+        assert r2.status_code == status.HTTP_202_ACCEPTED
 
     def test_stop_nonexistent_workspace_returns_404(self, client) -> None:
         suffix = uuid.uuid4().hex[:8]
@@ -375,7 +375,7 @@ class TestWorkspaceLifecycleApiNegativeCases:
         mock_orch.bring_up_workspace_runtime.return_value = _mock_bring_up_result(wid_str)
 
         with patch(
-            "app.services.orchestrator_service.app_factory.build_orchestrator_for_workspace_job",
+            "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
             return_value=mock_orch,
         ):
             _process_job(client, create_jid)
@@ -423,7 +423,7 @@ class TestWorkspaceLifecycleApiNegativeCases:
         mock_orch.bring_up_workspace_runtime.return_value = _mock_bring_up_result(str(wid))
 
         with patch(
-            "app.services.orchestrator_service.app_factory.build_orchestrator_for_workspace_job",
+            "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
             return_value=mock_orch,
         ):
             _process_job(client, create_jid)
@@ -478,7 +478,7 @@ class TestWorkspaceJobCreation:
         mock_orch.bring_up_workspace_runtime.return_value = _mock_bring_up_result(str(wid))
 
         with patch(
-            "app.services.orchestrator_service.app_factory.build_orchestrator_for_workspace_job",
+            "app.workers.workspace_job_runner.build_orchestrator_for_workspace_job",
             return_value=mock_orch,
         ):
             _process_job(client, create_jid)

@@ -20,6 +20,7 @@ from fastapi import status
 from sqlmodel import Session
 
 from app.libs.common.config import get_settings
+from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.models import Workspace, WorkspaceRuntime, WorkspaceSession
 from app.services.workspace_service.models.enums import (
     WorkspaceRuntimeHealthStatus,
@@ -44,7 +45,23 @@ def _ws_forwarded_host(workspace_id: int, base_domain: str = _BASE_DOMAIN) -> st
     return f"ws-{workspace_id}.{base_domain}"
 
 
-def _seed_running_workspace(db_session: Session, *, owner_user_id: int = 1) -> Workspace:
+def _seed_user(db_session: Session) -> int:
+    """Insert a UserAuth row and return its id."""
+    user = UserAuth(
+        username=f"gw_u_{uuid.uuid4().hex[:8]}",
+        email=f"gw_{uuid.uuid4().hex[:8]}@test.local",
+        password_hash="x",
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    assert user.user_auth_id is not None
+    return user.user_auth_id
+
+
+def _seed_running_workspace(db_session: Session, *, owner_user_id: int | None = None) -> Workspace:
+    if owner_user_id is None:
+        owner_user_id = _seed_user(db_session)
     now = datetime.now(timezone.utc)
     ws = Workspace(
         name=f"gw-auth-ws-{uuid.uuid4().hex[:8]}",
@@ -64,10 +81,12 @@ def _seed_active_session(
     db_session: Session,
     *,
     workspace_id: int,
-    user_id: int = 1,
+    user_id: int | None = None,
     ttl_seconds: int = 3600,
 ) -> tuple[str, WorkspaceSession]:
     """Create an ACTIVE session row; return (plain_token, session_row)."""
+    if user_id is None:
+        user_id = _seed_user(db_session)
     plain_token = generate_workspace_session_token()
     token_hash = hash_workspace_session_token(plain_token)
     now = datetime.now(timezone.utc)
@@ -92,7 +111,7 @@ def _seed_expired_session(
     db_session: Session,
     *,
     workspace_id: int,
-    user_id: int = 1,
+    user_id: int | None = None,
 ) -> tuple[str, WorkspaceSession]:
     """Create an ACTIVE session that has already expired."""
     return _seed_active_session(
@@ -297,10 +316,11 @@ class TestForwardAuthEnforcementMode:
     # ------------------------------------------------------------------
 
     def test_stopped_workspace_returns_401(self, client, db_session: Session) -> None:
+        owner_id = _seed_user(db_session)
         now = datetime.now(timezone.utc)
         ws = Workspace(
             name=f"gw-stopped-{uuid.uuid4().hex[:8]}",
-            owner_user_id=1,
+            owner_user_id=owner_id,
             status=WorkspaceStatus.STOPPED.value,
             is_private=True,
             created_at=now,
@@ -322,10 +342,11 @@ class TestForwardAuthEnforcementMode:
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_deleted_workspace_returns_401(self, client, db_session: Session) -> None:
+        owner_id = _seed_user(db_session)
         now = datetime.now(timezone.utc)
         ws = Workspace(
             name=f"gw-deleted-{uuid.uuid4().hex[:8]}",
-            owner_user_id=1,
+            owner_user_id=owner_id,
             status=WorkspaceStatus.DELETED.value,
             is_private=True,
             created_at=now,
@@ -363,9 +384,10 @@ class TestForwardAuthEnforcementMode:
 
         # First create a stub workspace row to satisfy the FK, then create the session
         # pointing to a non-existent id by crafting the row directly.
+        dummy_owner_id = _seed_user(db_session)
         ws_dummy = Workspace(
             name=f"dummy-{uuid.uuid4().hex[:8]}",
-            owner_user_id=1,
+            owner_user_id=dummy_owner_id,
             status=WorkspaceStatus.RUNNING.value,
             is_private=True,
             created_at=now,
@@ -377,7 +399,7 @@ class TestForwardAuthEnforcementMode:
 
         sess = WorkspaceSession(
             workspace_id=ws_dummy.workspace_id,
-            user_id=1,
+            user_id=dummy_owner_id,
             session_token_hash=token_hash,
             status=WorkspaceSessionStatus.ACTIVE.value,
             role=WorkspaceSessionRole.OWNER.value,

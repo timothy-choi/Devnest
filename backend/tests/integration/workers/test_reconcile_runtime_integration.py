@@ -146,7 +146,10 @@ def test_reconcile_running_syncs_runtime_and_succeeds(
     run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
     db_session.expire_all()
 
-    orch.check_workspace_runtime_health.assert_called_once_with(workspace_id=str(wid))
+    orch.check_workspace_runtime_health.assert_called_once_with(
+        workspace_id=str(wid),
+        container_id="old",
+    )
     orch.stop_workspace_runtime.assert_not_called()
 
     job2 = db_session.get(WorkspaceJob, jid)
