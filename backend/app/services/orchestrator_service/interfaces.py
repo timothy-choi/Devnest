@@ -51,8 +51,9 @@ class OrchestratorService(ABC):
     ) -> WorkspaceStopResult:
         """Detach topology and stop the workspace container.
 
-        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
-        when available. Falls back to deterministic name derivation when ``None``.
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``.
+        Deterministic name derivation applies only when authoritative refs are not required
+        (e.g. development with env fallback enabled).
 
         When ``release_ip_lease`` is true, an active DB IP lease for this workspace is released
         after detach/stop (failed bring-up / ERROR reconcile); idempotent when no lease exists.
@@ -68,8 +69,9 @@ class OrchestratorService(ABC):
     ) -> WorkspaceDeleteResult:
         """Detach topology, delete the workspace container, optionally remove node topology if safe.
 
-        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
-        when available. Falls back to deterministic name derivation when ``None``.
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``.
+        Deterministic name derivation applies only when authoritative refs are not required
+        (e.g. development with env fallback enabled).
         """
 
     @abstractmethod
@@ -98,8 +100,9 @@ class OrchestratorService(ABC):
     ) -> WorkspaceUpdateResult:
         """Apply ``requested_config_version`` (no-op when already current, else restart-based V1).
 
-        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
-        when available.
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``.
+        When authoritative refs are required, an empty/missing id yields ``success=False`` without
+        deterministic-name inspection.
         """
 
     @abstractmethod
@@ -111,8 +114,9 @@ class OrchestratorService(ABC):
     ) -> WorkspaceBringUpResult:
         """Read-only probe roll-up for an existing workspace runtime (no repair, no topology mutation).
 
-        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
-        when available. Falls back to deterministic name derivation when ``None``.
+        ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``.
+        Deterministic name derivation applies only when authoritative refs are not required
+        (e.g. development with env fallback enabled).
         """
 
     @abstractmethod

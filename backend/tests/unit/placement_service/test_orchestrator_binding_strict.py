@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.services.auth_service.models import UserAuth
-from app.services.placement_service.errors import AuthoritativePlacementError
+from app.services.placement_service.errors import AuthoritativePlacementError, InvalidPlacementParametersError
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 from app.services.placement_service.orchestrator_binding import resolve_orchestrator_placement
 from app.services.workspace_service.models import (
@@ -44,7 +44,7 @@ def _seed_user(session: Session) -> int:
     return u.user_auth_id
 
 
-def _add_node(session: Session) -> None:
+def _add_node(session: Session, *, default_topology_id: int | None = 99) -> None:
     session.add(
         ExecutionNode(
             node_key="n1",
@@ -56,6 +56,7 @@ def _add_node(session: Session) -> None:
             total_memory_mb=8192,
             allocatable_cpu=4.0,
             allocatable_memory_mb=8192,
+            default_topology_id=default_topology_id,
         ),
     )
     session.commit()
@@ -150,3 +151,92 @@ def test_start_with_partial_runtime_raises_when_strict(bind_engine: Engine) -> N
         with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
             with pytest.raises(AuthoritativePlacementError, match="complete WorkspaceRuntime"):
                 resolve_orchestrator_placement(session, ws2, job2)
+
+
+def test_repo_import_reuses_complete_runtime_when_strict(bind_engine: Engine) -> None:
+    with Session(bind_engine) as session:
+        uid = _seed_user(session)
+        _add_node(session)
+        ws, job = _ws_job(session, uid, WorkspaceJobType.REPO_IMPORT.value)
+        wid = ws.workspace_id
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=wid,
+                node_id="n1",
+                topology_id=55,
+                container_id="c1",
+            ),
+        )
+        session.commit()
+        ws_id = ws.workspace_id
+        job_id = job.workspace_job_id
+
+    fake_settings = type(
+        "S",
+        (),
+        {
+            "devnest_env": "production",
+            "devnest_allow_runtime_env_fallback": False,
+        },
+    )()
+
+    with Session(bind_engine) as session:
+        ws = session.get(Workspace, ws_id)
+        job = session.get(WorkspaceJob, job_id)
+        assert ws is not None and job is not None
+        with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
+            nk, tid = resolve_orchestrator_placement(session, ws, job)
+        assert nk == "n1"
+        assert tid == 55
+
+
+def test_repo_import_without_runtime_raises_when_strict(bind_engine: Engine) -> None:
+    with Session(bind_engine) as session:
+        uid = _seed_user(session)
+        _add_node(session)
+        ws, job = _ws_job(session, uid, WorkspaceJobType.REPO_IMPORT.value)
+        ws_id = ws.workspace_id
+        job_id = job.workspace_job_id
+
+    fake_settings = type(
+        "S",
+        (),
+        {
+            "devnest_env": "production",
+            "devnest_allow_runtime_env_fallback": False,
+        },
+    )()
+
+    with Session(bind_engine) as session:
+        ws = session.get(Workspace, ws_id)
+        job = session.get(WorkspaceJob, job_id)
+        assert ws is not None and job is not None
+        with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
+            with pytest.raises(AuthoritativePlacementError, match="node_id and topology_id"):
+                resolve_orchestrator_placement(session, ws, job)
+
+
+def test_create_requires_default_topology_on_node_when_strict(bind_engine: Engine) -> None:
+    with Session(bind_engine) as session:
+        uid = _seed_user(session)
+        _add_node(session, default_topology_id=None)
+        ws, job = _ws_job(session, uid, WorkspaceJobType.CREATE.value)
+        ws_id = ws.workspace_id
+        job_id = job.workspace_job_id
+
+    fake_settings = type(
+        "S",
+        (),
+        {
+            "devnest_env": "production",
+            "devnest_allow_runtime_env_fallback": False,
+        },
+    )()
+
+    with Session(bind_engine) as session:
+        ws = session.get(Workspace, ws_id)
+        job = session.get(WorkspaceJob, job_id)
+        assert ws is not None and job is not None
+        with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
+            with pytest.raises(InvalidPlacementParametersError, match="default_topology_id"):
+                resolve_orchestrator_placement(session, ws, job)

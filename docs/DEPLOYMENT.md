@@ -113,6 +113,8 @@ DEVNEST_REQUIRE_IDE_HTTP_PROBE=true
 
 # Authoritative placement: never enable in staging/production (EC2/VM multi-node).
 DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK=false
+# Each schedulable execution node must have default_topology_id set for new workload placement
+# (strict mode forbids inferring topology from DEVNEST_TOPOLOGY_ID when scheduling).
 
 # Reconcile duplicate-suppression (requires PostgreSQL URL in staging/production).
 DEVNEST_RECONCILE_LOCK_BACKEND=postgres_advisory

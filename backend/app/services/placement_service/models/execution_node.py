@@ -121,7 +121,8 @@ class ExecutionNode(SQLModel, table=True):
     default_topology_id: int | None = Field(
         default=None,
         index=True,
-        description="Optional topology id when placing (soft ref; null uses DEVNEST_TOPOLOGY_ID).",
+        description="Topology id for new scheduling (soft ref). Required in staging/production strict "
+        "placement; in development, bootstrap may default this from DEVNEST_TOPOLOGY_ID.",
     )
 
     last_synced_at: datetime | None = Field(

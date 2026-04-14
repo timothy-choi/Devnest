@@ -15,8 +15,10 @@ procedures, and monitoring guidance.
 - **Rollback failures:** `devnest_orchestrator_bringup_rollback_failed_total` when compensating stop
   does not succeed after retries.
 - **Durable cleanup queue:** `devnest_cleanup_task_enqueued_total` / `devnest_cleanup_task_attempt_total`
-  track persisted cleanup work after failed rollback or partial stop. Reconcile drains pending
-  `workspace_cleanup_task` rows until stop + IP release succeeds or the next attempt is logged.
+  track persisted cleanup work after failed rollback or partial stop. Pending `workspace_cleanup_task`
+  rows are drained from **reconcile** and from **ordinary job-worker ticks** (`drain_pending_cleanup_tasks`),
+  so progress does not rely on a single optional control-plane path. Incomplete runtime placement defers
+  work with a recorded `deferred_reason` until `WorkspaceRuntime` has a complete node/topology reference.
 
 ---
 
