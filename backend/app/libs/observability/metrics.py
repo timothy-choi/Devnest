@@ -58,6 +58,12 @@ RECONCILE_OPS_TOTAL = Counter(
     ["result"],
 )
 
+BRINGUP_ROLLBACK_TOTAL = Counter(
+    "devnest_orchestrator_bringup_rollback_total",
+    "Compensating rollbacks after failed or aborted workspace bring-up",
+    ["reason"],
+)
+
 INTERNAL_AUTH_FAILURES_TOTAL = Counter(
     "devnest_internal_auth_failures",
     "Rejected internal API requests (missing/invalid X-Internal-API-Key)",
@@ -127,6 +133,14 @@ def record_gateway_operation(*, operation: str, success: bool) -> None:
 
 def record_reconcile_terminal(*, succeeded: bool) -> None:
     RECONCILE_OPS_TOTAL.labels(result="succeeded" if succeeded else "failed").inc()
+
+
+def record_bringup_rollback(*, reason: str) -> None:
+    """Low-cardinality reason: ``exception`` (bring-up raised) or ``probe_unhealthy``."""
+    r = (reason or "unknown").strip().lower()
+    if r not in ("exception", "probe_unhealthy"):
+        r = "exception"
+    BRINGUP_ROLLBACK_TOTAL.labels(reason=r).inc()
 
 
 def record_internal_auth_failure(*, scope: str) -> None:

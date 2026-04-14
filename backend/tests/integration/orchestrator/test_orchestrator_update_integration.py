@@ -299,7 +299,7 @@ def test_update_workspace_runtime_restart_probe_unhealthy_without_tcp_patch_inte
     topology_adapter_integration: DbTopologyAdapter,
     tmp_path,
 ) -> None:
-    """Version bump without probe patch → stop succeeds, bring-up completes but probe roll-up fails."""
+    """Version bump without probe patch → stop succeeds, bring-up probe fails; rollback stops new container."""
     tid = _seed_topology(
         db_session,
         spec={
@@ -355,7 +355,7 @@ def test_update_workspace_runtime_restart_probe_unhealthy_without_tcp_patch_inte
         assert out.container_id
         ins = runtime_adapter_integration.inspect_container(container_id=out.container_id)
         assert ins.exists is True
-        assert (ins.container_state or "").strip().lower() == "running"
+        assert (ins.container_state or "").strip().lower() in ("exited", "stopped")
     finally:
         _remove_container(
             orchestrator_docker_client,

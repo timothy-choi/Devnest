@@ -120,6 +120,7 @@ class Settings(BaseSettings):
         "devnest_rate_limit_enabled",
         "devnest_metrics_auth_enabled",
         "devnest_workspace_http_probe_enabled",
+        "devnest_probe_assume_colocated_engine",
         mode="before",
     )
     @classmethod
@@ -297,6 +298,11 @@ class Settings(BaseSettings):
     # workspace IP is not routable from the API host (e.g. integration/system tests with DB-only
     # topology addresses); tests set DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=false via conftest.
     devnest_workspace_http_probe_enabled: bool = True
+    # When true (default), TCP/HTTP probes may run from the API/worker process (same host as Docker).
+    # Set false on control-plane hosts that are not co-located with workspace Docker (e.g. API-only
+    # tier); then probes require ``NodeExecutionBundle.service_reachability_runner`` (SSH/SSM) so
+    # checks run on the execution node.
+    devnest_probe_assume_colocated_engine: bool = True
 
     # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
     devnest_autoscaler_enabled: bool = False

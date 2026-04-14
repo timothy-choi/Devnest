@@ -342,6 +342,31 @@ class TestAllocateWorkspaceIP:
         assert len(ips) == len(set(ips))
 
 
+class TestReleaseWorkspaceIpLease:
+    def test_release_marks_row_and_idempotent(self, topo_session: Session) -> None:
+        tid = _insert_topology(
+            topo_session,
+            spec={"cidr": "10.77.50.0/24", "gateway_ip": "10.77.50.1"},
+        )
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=501)
+        assert adapter.release_workspace_ip_lease(topology_id=tid, node_id="n1", workspace_id=501) is True
+        assert adapter.release_workspace_ip_lease(topology_id=tid, node_id="n1", workspace_id=501) is False
+        row = topo_session.exec(
+            select(IpAllocation).where(
+                IpAllocation.topology_id == tid,
+                IpAllocation.node_id == "n1",
+                IpAllocation.workspace_id == 501,
+            ),
+        ).first()
+        assert row is not None
+        assert row.released_at is not None
+        nxt = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=501)
+        assert nxt.workspace_ip is not None
+        assert nxt.leased_existing is False
+
+
 class TestAttachWorkspace:
     def test_creates_attachment_and_internal_endpoint(self, topo_session: Session) -> None:
         tid = _insert_topology(

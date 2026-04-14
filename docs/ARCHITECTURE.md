@@ -68,6 +68,10 @@ DevNest is a cloud-hosted coding environment platform — a "Google Drive for co
 - Interfaces with Docker to manage workspace container lifecycle.
 - Abstracts over local Docker and EC2-hosted Docker nodes.
 - Returns structured `OrchestratorResult` objects for worker processing.
+- **Compensating rollback:** If bring-up raises after the container or topology steps, or if the
+  aggregate health probe returns unhealthy, the orchestrator **stops** the engine, **detaches**
+  topology, and **releases** the workspace IP lease (`TopologyAdapter.release_workspace_ip_lease`)
+  in an idempotent, best-effort sequence so failed starts do not leak veths, containers, or addresses.
 
 **Container ID handling**: All lifecycle operations (`stop`, `delete`, `restart`, `update`,
 `check_health`) accept an optional `container_id` parameter. When provided (sourced from
@@ -101,6 +105,9 @@ Reconcile and snapshot jobs do not move the workspace to `ERROR`.
 target statuses (default: `RUNNING,ERROR`) and calls `enqueue_reconcile_runtime_job`
 for each. The loop is idempotent — the **reconcile lease** mechanism ensures no
 duplicate jobs are enqueued:
+
+**`ERROR` workspaces:** `RECONCILE_RUNTIME` first runs orchestrator stop with `release_ip_lease=true` to drop orphan containers and return topology IP rows to the pool,
+then performs gateway route orphan cleanup when the gateway is enabled.
 
 - **QUEUED** reconcile job exists → `WorkspaceBusyError` raised; loop silently skips.
 - **RUNNING** reconcile job within `DEVNEST_RECONCILE_LEASE_TTL_SECONDS` → skipped.

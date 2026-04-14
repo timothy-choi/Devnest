@@ -89,6 +89,24 @@ class TopologyAdapter(ABC):
         """
 
     @abstractmethod
+    def release_workspace_ip_lease(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> bool:
+        """
+        Mark the active IP allocation row for this workspace as released (``released_at`` set).
+
+        Idempotent: no active lease returns ``False``. Used after failed bring-up / ERROR cleanup so
+        addresses return to the pool while preserving history rows.
+
+        Raises:
+            WorkspaceIPAllocationError: Persisting the release failed (caller may retry).
+        """
+
+    @abstractmethod
     def delete_topology(self, *, topology_id: int, node_id: str) -> None:
         """
         Remove node-local topology runtime when no longer needed (attachments should be detached first).

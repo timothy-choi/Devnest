@@ -11,7 +11,7 @@ from app.libs.probes.interfaces import ProbeRunner
 from app.libs.runtime.errors import ContainerStopError
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import ContainerInspectionResult, RuntimeActionResult
-from app.libs.topology.errors import WorkspaceDetachError
+from app.libs.topology.errors import WorkspaceDetachError, WorkspaceIPAllocationError
 from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.models.enums import TopologyAttachmentStatus
 from app.libs.topology.results import DetachWorkspaceResult
@@ -183,6 +183,46 @@ class TestStopHappyPath:
         svc.stop_workspace_runtime(workspace_id=WORKSPACE_ID)
 
         assert order == ["detach", "stop"]
+
+    def test_release_ip_lease_invoked_after_stop(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _inspect_running(mock_runtime)
+        _detach_ok(mock_topology)
+        _stop_ok(mock_runtime)
+        mock_topology.release_workspace_ip_lease.return_value = True
+
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        out = svc.stop_workspace_runtime(workspace_id=WORKSPACE_ID, release_ip_lease=True)
+
+        assert out.success is True
+        mock_topology.release_workspace_ip_lease.assert_called_once_with(
+            topology_id=TOPOLOGY_ID,
+            node_id=NODE_ID,
+            workspace_id=int(WORKSPACE_ID),
+        )
+
+    def test_release_ip_lease_failure_fails_roll_up(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _inspect_running(mock_runtime)
+        _detach_ok(mock_topology)
+        _stop_ok(mock_runtime)
+        mock_topology.release_workspace_ip_lease.side_effect = WorkspaceIPAllocationError("persist")
+
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        out = svc.stop_workspace_runtime(workspace_id=WORKSPACE_ID, release_ip_lease=True)
+
+        assert out.success is False
+        assert out.issues and any("topology:ip_release_failed" in i for i in out.issues)
 
 
 class TestStopUnexpectedFailuresRaise:

@@ -233,7 +233,7 @@ def execute_reconcile_runtime_job(
         return
 
     if ws.status == WorkspaceStatus.ERROR.value:
-        _reconcile_error_cleanup(session, ws, job)
+        _reconcile_error_cleanup(session, orchestrator, ws, job)
         return
 
     if ws.status == WorkspaceStatus.STOPPED.value:
@@ -293,9 +293,45 @@ def _reconcile_deleted(session: Session, ws: Workspace, job: WorkspaceJob) -> No
     wmod._mark_job_succeeded(session, job)
 
 
-def _reconcile_error_cleanup(session: Session, ws: Workspace, job: WorkspaceJob) -> None:
+def _reconcile_error_cleanup(
+    session: Session,
+    orchestrator: OrchestratorService,
+    ws: Workspace,
+    job: WorkspaceJob,
+) -> None:
+    """Best-effort: orphan Docker + topology IP on the execution node, then orphan gateway routes."""
     wid = ws.workspace_id
     assert wid is not None
+    persisted_container_id = wmod._get_persisted_container_id(session, wid)
+
+    try:
+        stop_res = orchestrator.stop_workspace_runtime(
+            workspace_id=str(wid),
+            container_id=persisted_container_id,
+            release_ip_lease=True,
+        )
+    except WorkspaceStopError as e:
+        _fail_reconcile(session, ws, job, f"reconcile:error_cleanup_stop_failed:{e}")
+        return
+
+    if stop_res.success:
+        record_workspace_event(
+            session,
+            workspace_id=wid,
+            event_type=WorkspaceStreamEventType.RECONCILE_FIXED_RUNTIME,
+            status=ws.status,
+            message="Reconcile: cleaned orphan workspace engine/topology lease for ERROR workspace",
+            payload={"job_id": job.workspace_job_id},
+        )
+    else:
+        logger.info(
+            "reconcile_error_engine_cleanup_partial",
+            extra={
+                "workspace_id": wid,
+                "issues": (stop_res.issues or [])[:5],
+            },
+        )
+
     settings = get_settings()
     if not settings.devnest_gateway_enabled:
         record_workspace_event(
@@ -303,7 +339,7 @@ def _reconcile_error_cleanup(session: Session, ws: Workspace, job: WorkspaceJob)
             workspace_id=wid,
             event_type=WorkspaceStreamEventType.RECONCILE_NOOP,
             status=ws.status,
-            message="Reconcile noop (gateway disabled)",
+            message="Reconcile noop (gateway disabled; engine cleanup attempted)",
             payload={"job_id": job.workspace_job_id},
         )
         wmod._mark_job_succeeded(session, job)
@@ -320,7 +356,7 @@ def _reconcile_error_cleanup(session: Session, ws: Workspace, job: WorkspaceJob)
             workspace_id=wid,
             event_type=WorkspaceStreamEventType.RECONCILE_NOOP,
             status=ws.status,
-            message="Reconcile noop (no orphan gateway route)",
+            message="Reconcile noop (no orphan gateway route after engine cleanup)",
             payload={"job_id": job.workspace_job_id},
         )
         wmod._mark_job_succeeded(session, job)

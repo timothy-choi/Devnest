@@ -383,6 +383,65 @@ def test_reconcile_stopped_stop_failure_emits_reconcile_failed(
     assert any(e.event_type == WorkspaceStreamEventType.RECONCILE_FAILED for e in evs)
 
 
+def test_reconcile_error_workspace_runs_engine_cleanup(
+    db_session: Session,
+    patch_worker_now: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "false")
+    from app.libs.common.config import get_settings
+
+    get_settings.cache_clear()
+
+    owner = _seed_owner(db_session)
+    wid = _seed_running_workspace(db_session, owner)
+    ws = db_session.get(Workspace, wid)
+    assert ws is not None
+    ws.status = WorkspaceStatus.ERROR.value
+    db_session.add(ws)
+    db_session.commit()
+
+    job = WorkspaceJob(
+        workspace_id=wid,
+        job_type=WorkspaceJobType.RECONCILE_RUNTIME.value,
+        status="QUEUED",
+        requested_by_user_id=owner,
+        requested_config_version=CFG_V,
+        attempt=0,
+    )
+    db_session.add(job)
+    db_session.commit()
+    jid = job.workspace_job_id
+
+    orch = _orch()
+    orch.stop_workspace_runtime.return_value = WorkspaceStopResult(
+        workspace_id=str(wid),
+        success=True,
+        container_id="old",
+        container_state="exited",
+        topology_detached=True,
+        issues=None,
+    )
+
+    run_pending_jobs(db_session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+    db_session.expire_all()
+
+    orch.stop_workspace_runtime.assert_called_once()
+    call_kw = orch.stop_workspace_runtime.call_args.kwargs
+    assert call_kw["workspace_id"] == str(wid)
+    assert call_kw["container_id"] == "old"
+    assert call_kw["release_ip_lease"] is True
+
+    job2 = db_session.get(WorkspaceJob, jid)
+    assert job2 is not None
+    assert job2.status == WorkspaceJobStatus.SUCCEEDED.value
+
+    evs = db_session.exec(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wid)).all()
+    assert any(e.event_type == WorkspaceStreamEventType.RECONCILE_FIXED_RUNTIME for e in evs)
+
+    get_settings.cache_clear()
+
+
 def test_enqueue_reconcile_runtime_via_service(
     db_session: Session,
 ) -> None:
