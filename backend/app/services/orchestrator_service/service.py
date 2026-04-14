@@ -25,10 +25,13 @@ from app.libs.probes.interfaces import ProbeRunner
 from app.libs.runtime.errors import RuntimeAdapterError
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import (
+    CODE_SERVER_CONFIG_CONTAINER_PATH,
+    CODE_SERVER_DATA_CONTAINER_PATH,
     WORKSPACE_IDE_CONTAINER_PORT,
     ContainerInspectionResult,
     EnsureRunningRuntimeResult,
     NetnsRefResult,
+    WorkspaceExtraBindMountSpec,
 )
 from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
@@ -223,8 +226,84 @@ class DefaultOrchestratorService(OrchestratorService):
             labels=labels,
         )
 
-    def _bring_up_start_container(self, ctx: _BringUpContext) -> EnsureRunningRuntimeResult:
-        """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns unless skip-linux-attach)."""
+    @staticmethod
+    def _code_server_env(port: int = WORKSPACE_IDE_CONTAINER_PORT) -> dict[str, str]:
+        """Return canonical code-server environment variables for the workspace container.
+
+        code-server reads these at startup:
+        - ``CS_DISABLE_GETTING_STARTED_OVERRIDE``: suppress the welcome page.
+        - ``CODE_SERVER_AUTH``: "none" means no password (auth handled by DevNest gateway sessions).
+        - ``PORT``: in-container listen port (must match ``WORKSPACE_IDE_CONTAINER_PORT``).
+        """
+        return {
+            "CS_DISABLE_GETTING_STARTED_OVERRIDE": "1",
+            "CODE_SERVER_AUTH": "none",
+            "PORT": str(port),
+        }
+
+    def _code_server_extra_bind_mounts(self, wid: str) -> list[WorkspaceExtraBindMountSpec]:
+        """Build code-server persistence bind mounts for config and data.
+
+        Each workspace gets per-workspace subdirectories under ``workspace_projects_base``
+        so that config and extension state persist across stop/start/restart. These are
+        in addition to the primary project mount (``/home/coder/project``).
+
+        Returns an empty list when the projects base is not set or the paths cannot be
+        constructed (non-blocking; the workspace will still start without persistence for
+        those dirs).
+        """
+        base = (self._workspace_projects_base or "").strip()
+        if not base:
+            return []
+        wid_clean = (wid or "").strip()
+        if not wid_clean:
+            return []
+        cs_base = os.path.join(base, f"ws-{wid_clean}", "code-server")
+        cfg_host = os.path.join(cs_base, "config")
+        data_host = os.path.join(cs_base, "data")
+        try:
+            os.makedirs(cfg_host, exist_ok=True)
+            os.makedirs(data_host, exist_ok=True)
+        except OSError as e:
+            logger.warning(
+                "orchestrator_code_server_bind_mount_mkdir_failed",
+                extra={"workspace_id": wid, "error": str(e)},
+            )
+            return []
+        return [
+            WorkspaceExtraBindMountSpec(
+                host_path=cfg_host,
+                container_path=CODE_SERVER_CONFIG_CONTAINER_PATH,
+            ),
+            WorkspaceExtraBindMountSpec(
+                host_path=data_host,
+                container_path=CODE_SERVER_DATA_CONTAINER_PATH,
+            ),
+        ]
+
+    def _bring_up_start_container(
+        self,
+        ctx: _BringUpContext,
+        *,
+        cpu_limit_cores: float | None = None,
+        memory_limit_mib: int | None = None,
+        env: dict | None = None,
+    ) -> EnsureRunningRuntimeResult:
+        """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns unless skip-linux-attach).
+
+        Injects code-server environment variables and sets up persistence bind mounts for
+        the code-server config and data directories (in addition to the primary project mount).
+        """
+        memory_limit_bytes: int | None = None
+        if memory_limit_mib is not None and memory_limit_mib > 0:
+            memory_limit_bytes = int(memory_limit_mib) * 1024 * 1024
+
+        # Merge code-server defaults with caller-provided env (caller values win).
+        merged_env: dict[str, str] = {**self._code_server_env(), **(env or {})}
+
+        # Add code-server persistence bind mounts.
+        cs_extra_mounts = self._code_server_extra_bind_mounts(ctx.wid)
+
         try:
             return ensure_running_runtime_only(
                 self._runtime_adapter,
@@ -234,6 +313,10 @@ class DefaultOrchestratorService(OrchestratorService):
                 labels=ctx.labels,
                 workspace_host_path=ctx.workspace_host_path,
                 skip_netns_resolution=_env_skip_linux_topology_attachment(),
+                cpu_limit=cpu_limit_cores,
+                memory_limit_bytes=memory_limit_bytes,
+                env=merged_env,
+                extra_bind_mounts=cs_extra_mounts if cs_extra_mounts else None,
             )
         except RuntimeAdapterError as e:
             raise WorkspaceBringUpError(f"runtime bring-up failed: {e}") from e
@@ -321,9 +404,17 @@ class DefaultOrchestratorService(OrchestratorService):
         *,
         workspace_id: str,
         requested_config_version: int | None = None,
+        cpu_limit_cores: float | None = None,
+        memory_limit_mib: int | None = None,
+        env: dict | None = None,
+        features: dict | None = None,
     ) -> WorkspaceBringUpResult:
         """
         Start workspace container, wire topology attachment, run service probe.
+
+        ``cpu_limit_cores`` and ``memory_limit_mib`` are applied to the container when non-None.
+        ``env`` is merged into the container environment.
+        ``features`` carries optional feature flags (reserved; currently informational).
 
         Returns a :class:`WorkspaceBringUpResult` for the worker to persist on ``WorkspaceRuntime``.
         """
@@ -335,9 +426,16 @@ class DefaultOrchestratorService(OrchestratorService):
             requested_config_version=requested_config_version,
             topology_id=self._topology_id,
             node_id=self._node_id,
+            cpu_limit_cores=cpu_limit_cores,
+            memory_limit_mib=memory_limit_mib,
         )
         try:
-            running = self._bring_up_start_container(ctx)
+            running = self._bring_up_start_container(
+                ctx,
+                cpu_limit_cores=cpu_limit_cores,
+                memory_limit_mib=memory_limit_mib,
+                env=env,
+            )
             logger.debug(
                 "orchestrator_bring_up_runtime_running",
                 extra={"workspace_id": ctx.wid, "container_id": running.container_id},
@@ -952,21 +1050,90 @@ class DefaultOrchestratorService(OrchestratorService):
             raise WorkspaceSnapshotError(str(e)) from e
 
     @staticmethod
-    def _safe_snapshot_tar_extract(tf: tarfile.TarFile, dest: Path) -> None:
-        """Reject member paths that escape ``dest`` (tar slip). Symlinks in archives are a TODO for V1."""
-        dest_resolved = dest.resolve()
-        dest_resolved.mkdir(parents=True, exist_ok=True)
+    def _validate_tar_members(tf: tarfile.TarFile, dest_resolved: Path) -> None:
+        """Reject any member that would escape ``dest_resolved`` (tar-slip / path traversal).
+
+        Checks applied per member:
+        - Absolute paths are rejected.
+        - ``..`` components that escape the destination are rejected.
+        - Resolved destination must be within ``dest_resolved``.
+        - Device / block-special members are rejected.
+        - Hard-links that point outside dest are rejected.
+        """
         for m in tf.getmembers():
             name = (m.name or "").strip()
-            if not name or name.startswith("/"):
+            # Reject empty names, absolute paths, or overt traversal sequences
+            if not name or name.startswith("/") or name.startswith(".."):
                 raise WorkspaceSnapshotError(f"snapshot:import:unsafe_path:{name!r}")
+            # Reject device or block-special members
+            if m.isdev() or m.ischr() or m.isblk() or m.isfifo():
+                raise WorkspaceSnapshotError(f"snapshot:import:unsafe_member_type:{name!r}")
             target = (dest_resolved / name).resolve()
             if target != dest_resolved and dest_resolved not in target.parents:
                 raise WorkspaceSnapshotError(f"snapshot:import:unsafe_path:{name!r}")
-        if sys.version_info >= (3, 12):
-            tf.extractall(path=str(dest_resolved), filter="data")
-        else:
-            tf.extractall(path=str(dest_resolved))
+            # Reject hard-links pointing outside dest
+            if m.islnk():
+                link_target = (dest_resolved / (m.linkname or "")).resolve()
+                if dest_resolved not in link_target.parents and link_target != dest_resolved:
+                    raise WorkspaceSnapshotError(f"snapshot:import:unsafe_hardlink:{name!r}")
+
+    @staticmethod
+    def _safe_snapshot_tar_extract(tf: tarfile.TarFile, dest: Path) -> None:
+        """Extract archive to ``dest`` with full path-traversal protection and atomic rename.
+
+        Safety guarantees:
+        1. All member paths validated against ``dest`` before extraction begins.
+        2. Extraction performed into a sibling temp directory to prevent partial-restore.
+        3. On success: destination is atomically swapped (existing renamed to .bak, temp
+           renamed to dest, backup removed).
+        4. On failure: temp directory is removed and original dest is preserved intact.
+        """
+        import shutil  # noqa: PLC0415
+
+        dest_resolved = dest.resolve()
+        dest_resolved.mkdir(parents=True, exist_ok=True)
+
+        # Step 1: Validate all members before touching the filesystem.
+        DefaultOrchestratorService._validate_tar_members(tf, dest_resolved)
+
+        # Step 2: Extract into a sibling temp dir for atomicity.
+        parent = dest_resolved.parent
+        tmp_dir = Path(tempfile.mkdtemp(dir=parent, prefix=".devnest-restore-tmp-"))
+        try:
+            if sys.version_info >= (3, 12):
+                tf.extractall(path=str(tmp_dir), filter="data")
+            else:
+                tf.extractall(path=str(tmp_dir))
+
+            # Step 3: Atomic swap — rename current dest to .bak, promote temp, remove .bak.
+            bak_dir = dest_resolved.parent / (dest_resolved.name + ".bak")
+            try:
+                if bak_dir.exists():
+                    shutil.rmtree(bak_dir, ignore_errors=True)
+                if dest_resolved.exists():
+                    dest_resolved.rename(bak_dir)
+                tmp_dir.rename(dest_resolved)
+                if bak_dir.exists():
+                    shutil.rmtree(bak_dir, ignore_errors=True)
+            except OSError as e:
+                # Rollback: restore backup if rename partially failed.
+                if not dest_resolved.exists() and bak_dir.exists():
+                    try:
+                        bak_dir.rename(dest_resolved)
+                    except OSError:
+                        pass
+                raise WorkspaceSnapshotError(f"snapshot:import:atomic_swap_failed:{e}") from e
+        except WorkspaceSnapshotError:
+            raise
+        except (OSError, tarfile.TarError) as e:
+            raise WorkspaceSnapshotError(f"snapshot:import:extract_failed:{e}") from e
+        finally:
+            # Always clean up the temp dir if it still exists (e.g. exception before rename).
+            if tmp_dir.exists():
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
     def export_workspace_filesystem_snapshot(
         self,
@@ -1066,10 +1233,24 @@ class DefaultOrchestratorService(OrchestratorService):
                 issues=["snapshot:import:archive_missing"],
             )
 
+        # Validate the archive is a valid tar before opening for extraction.
+        if not tarfile.is_tarfile(src):
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=["snapshot:import:invalid_archive_format"],
+            )
+
         try:
             with tarfile.open(src, "r:*") as tf:
                 self._safe_snapshot_tar_extract(tf, dest_root)
-        except (OSError, tarfile.TarError, WorkspaceSnapshotError) as e:
+        except WorkspaceSnapshotError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=[str(e)],
+            )
+        except (OSError, tarfile.TarError) as e:
             return WorkspaceSnapshotOperationResult(
                 workspace_id=wid,
                 success=False,

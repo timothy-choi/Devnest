@@ -63,8 +63,10 @@ from app.services.orchestrator_service.results import (
     WorkspaceUpdateResult,
 )
 from app.services.storage.factory import get_snapshot_storage_provider
+from app.services.workspace_service.api.schemas.workspace_schemas import get_workspace_features
 from app.services.workspace_service.models import (
     Workspace,
+    WorkspaceConfig,
     WorkspaceJob,
     WorkspaceRuntime,
     WorkspaceSnapshot,
@@ -1376,9 +1378,25 @@ def _execute_job_body(
     cfg_v = int(job.requested_config_version)
 
     if jt in (WorkspaceJobType.CREATE.value, WorkspaceJobType.START.value):
+        # Load workspace config for resource limits and feature flags.
+        _cfg_row = session.exec(
+            select(WorkspaceConfig)
+            .where(WorkspaceConfig.workspace_id == wid)
+            .order_by(WorkspaceConfig.version.desc())
+        ).first()
+        _config_json: dict = (_cfg_row.config_json if _cfg_row else None) or {}
+        _cpu_limit = _config_json.get("cpu_limit_cores")
+        _mem_limit = _config_json.get("memory_limit_mib")
+        _env = _config_json.get("env") or {}
+        _features = get_workspace_features(_config_json).model_dump()
+
         result = orchestrator.bring_up_workspace_runtime(
             workspace_id=wid_str,
             requested_config_version=cfg_v,
+            cpu_limit_cores=float(_cpu_limit) if _cpu_limit else None,
+            memory_limit_mib=int(_mem_limit) if _mem_limit else None,
+            env=_env if isinstance(_env, dict) else {},
+            features=_features,
         )
         _finalize_bringup_result(session, ws, job, result, config_version=cfg_v)
         return

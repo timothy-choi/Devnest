@@ -38,19 +38,48 @@ def get_health() -> dict[str, str]:
 @router.get(
     "/ready",
     summary="Readiness",
-    description="Database reachable. TODO: optional dependency checks (Redis, gateway).",
+    description=(
+        "Verifies all required dependencies are reachable. "
+        "Checks: database connectivity. "
+        "Optional checks (when configured): Redis connectivity. "
+        "Returns 200 when all checks pass; 503 with a structured failure report otherwise."
+    ),
 )
-def get_ready() -> dict[str, str]:
+def get_ready() -> dict:
+    checks: dict[str, str] = {}
+    failures: list[str] = []
+
+    # --- Database ---
     try:
         engine = get_engine()
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
+        checks["database"] = "ok"
     except Exception as exc:
+        checks["database"] = f"error:{exc.__class__.__name__}"
+        failures.append("database")
+
+    # --- Redis (optional, only when URL is configured) ---
+    settings = get_settings()
+    redis_url = (getattr(settings, "devnest_redis_url", "") or "").strip()
+    if redis_url:
+        try:
+            import redis as _redis  # noqa: PLC0415
+            r = _redis.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2)
+            r.ping()
+            checks["redis"] = "ok"
+        except Exception as exc:
+            checks["redis"] = f"error:{exc.__class__.__name__}"
+            failures.append("redis")
+    else:
+        checks["redis"] = "not_configured"
+
+    if failures:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"not_ready:{exc.__class__.__name__}",
-        ) from exc
-    return {"status": "ready"}
+            detail={"status": "not_ready", "failed": failures, "checks": checks},
+        )
+    return {"status": "ready", "checks": checks}
 
 
 @router.get(

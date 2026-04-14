@@ -290,6 +290,93 @@ Requires a stored GitHub provider token with `repo` scope.
 
 ---
 
+## P2 Backend Hardening (Phase 2)
+
+### Distributed Rate Limiting (Task 1)
+
+Rate limiting supports two backends selectable via `DEVNEST_RATE_LIMIT_BACKEND`:
+
+- **`memory`** (default): in-process sliding window per IP. Fast, no dependencies. In multi-worker deployments the effective limit is `rate_limit × worker_count`. Suitable for single-process deployments.
+- **`redis`**: Redis sorted-set backed distributed sliding window. Accurate across all API workers. Requires `DEVNEST_REDIS_URL`. Fails **open** (allows the request) when Redis is unreachable to prevent cascading outages. Set `DEVNEST_REQUIRE_DISTRIBUTED_RATE_LIMITING=true` to abort startup if the URL is missing.
+
+Per-endpoint limiters are lazily created and cached for the process lifetime.
+
+### /ready Endpoint Hardening (Task 8)
+
+`GET /ready` now performs structured dependency checks:
+
+| Check | When | Notes |
+|---|---|---|
+| `database` | Always | `SELECT 1` on the SQLAlchemy engine |
+| `redis` | When `DEVNEST_REDIS_URL` is set | `PING` via redis-py |
+
+A 200 response includes `{"status": "ready", "checks": {"database": "ok", "redis": "ok|not_configured"}}`.
+A 503 response includes `{"status": "not_ready", "failed": ["database"], "checks": {...}}` for diagnosis.
+
+### Optional Workspace Feature Gating (Task 14)
+
+Workspace features default to **disabled**. Users opt in at creation or update time by setting fields in `runtime.features`:
+
+```json
+{
+  "features": {
+    "terminal_enabled": true,
+    "ci_enabled": false,
+    "ai_tools_enabled": false
+  }
+}
+```
+
+These flags are stored in `WorkspaceConfig.config_json.features`. Feature-disabled workspaces reject access explicitly:
+
+- **`terminal_enabled=false`**: WebSocket terminal rejects with code `4001`.
+- **`ci_enabled`**: Reserved (future CI/CD toggle).
+- **`ai_tools_enabled`**: Reserved (future AI tooling toggle).
+
+### CPU / Memory Quota Enforcement (Task 6)
+
+Container resource limits are read from `config_json` at bring-up time and passed to the Docker runtime:
+
+| Config key | Maps to | Docker API |
+|---|---|---|
+| `cpu_limit_cores` | fractional vCPUs | `CpuPeriod` / `CpuQuota` |
+| `memory_limit_mib` | MiB × 1024² | `Memory` (bytes) |
+
+When both are `null` (default), no cgroup limits are applied (container inherits host limits). Set per workspace:
+
+```json
+{ "cpu_limit_cores": 2.0, "memory_limit_mib": 2048 }
+```
+
+### Autoscaler Drain Delay (Task 4)
+
+Scale-down now uses a **two-phase drain**:
+
+1. **Phase 1**: An idle READY EC2 node is selected and marked `DRAINING`. Nodes with recent workspace heartbeat activity (`DEVNEST_AUTOSCALER_RECENT_ACTIVITY_WINDOW_SECONDS`) are skipped.
+2. **Phase 2**: On the next scale-down evaluation, DRAINING nodes that have waited at least `DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS` are terminated.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS` | 30 | Minimum wait before terminating a draining node |
+| `DEVNEST_AUTOSCALER_RECENT_ACTIVITY_WINDOW_SECONDS` | 300 | Heartbeat window for "recently active" check |
+
+### Snapshot Restore Safety (Task 3)
+
+`import_workspace_filesystem_snapshot` now provides:
+
+1. **Format validation**: `tarfile.is_tarfile()` check before opening.
+2. **Full path-traversal validation** (all members before extraction): absolute paths, `..` sequences, device/special files, hard-links outside dest.
+3. **Atomic swap**: extraction to sibling temp dir → rename existing to `.bak` → rename temp to dest → remove `.bak`.
+4. **Clean rollback**: on any failure the original directory is preserved intact and temp dirs are removed.
+
+### code-server Integration (Tasks 12 + 13)
+
+- **Standard env vars** (`CODE_SERVER_AUTH=none`, `PORT=8080`, `CS_DISABLE_GETTING_STARTED_OVERRIDE=1`) are injected at bring-up. Per-workspace `env` overrides win.
+- **Persistence bind mounts** for `/home/coder/.config/code-server` and `/home/coder/.local/share/code-server` are created automatically at `<DEVNEST_WORKSPACE_PROJECTS_BASE>/ws-<id>/code-server/{config,data}`.
+- **Workspace terminal** is feature-gated via `features.terminal_enabled`. See [CODE_SERVER.md](CODE_SERVER.md) and [WORKSPACE_PERSISTENCE.md](WORKSPACE_PERSISTENCE.md).
+
+---
+
 ## Known Gaps and Deferred Items
 
 | Area | Status | Notes |
@@ -312,8 +399,16 @@ Requires a stored GitHub provider token with `repo` scope.
 | Workspace repo import | Implemented | `POST /workspaces/{id}/import-repo` → async REPO_IMPORT worker job |
 | Workspace git pull/push | Implemented | `POST /workspaces/{id}/git/pull|push` — synchronous exec in container |
 | Workspace CI/CD trigger | Implemented | GitHub Actions `repository_dispatch` via `POST /workspaces/{id}/ci/trigger` |
-| Workspace terminal (TTY) | Implemented | `WS /workspaces/{id}/terminal` — Docker exec PTY relay |
+| Workspace terminal (TTY) | Implemented | `WS /workspaces/{id}/terminal` — Docker exec PTY relay; feature-gated by `features.terminal_enabled` |
 | SSM interactive terminal | Deferred | SSM mode requires AWS Session Manager; V1 returns informative error |
 | Route53 DNS automation | Deferred | Manual DNS setup required for production domains |
 | Advanced cert rotation | Deferred | ACME handles renewal; multi-domain cert management deferred |
 | Pair programming / shared terminals | Deferred | Single-user terminal per workspace in V1 |
+| Distributed rate limiting (Redis) | Implemented | `DEVNEST_RATE_LIMIT_BACKEND=redis`; fails open on Redis errors |
+| code-server persistence | Implemented | Config + data bind mounts; see `CODE_SERVER.md` |
+| Workspace CPU/memory limits | Implemented | `cpu_limit_cores` / `memory_limit_mib` in `config_json` |
+| Optional feature gating | Implemented | `features.terminal_enabled`; future: `ci_enabled`, `ai_tools_enabled` |
+| Autoscaler drain delay | Implemented | Two-phase drain; `DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS` |
+| Snapshot restore safety | Implemented | Path traversal protection + atomic swap |
+| SSE multi-worker (LISTEN/NOTIFY) | Deferred | Currently poll-based; Postgres LISTEN/NOTIFY planned for P3 |
+| Google OAuth token (repo access) | Deferred | Google is sign-in only; GitHub is primary Git provider |

@@ -198,7 +198,7 @@ both look up the persisted container ID before calling `check_workspace_runtime_
 
 ## Rate Limiting
 
-In-process sliding-window rate limiter with no external dependencies:
+Sliding-window rate limiter with pluggable backend:
 
 | Layer | Scope | Default |
 |---|---|---|
@@ -206,7 +206,34 @@ In-process sliding-window rate limiter with no external dependencies:
 | `auth_rate_limit` dependency | per-IP, auth endpoints | 20 req/min |
 | `sse_rate_limit` dependency | per-IP, SSE endpoint | 30 req/min |
 
+**Backend selection** via `DEVNEST_RATE_LIMIT_BACKEND`:
+
+| Value | Description |
+|---|---|
+| `memory` (default) | In-process per-worker. Effective limit in multi-worker = configured_limit × workers. |
+| `redis` | Distributed Redis sorted-set. Accurate across all workers. Requires `DEVNEST_REDIS_URL`. |
+
+Redis limiter **fails open**: if Redis is unreachable, the request is allowed through to avoid cascading outages. Monitor Redis health separately via the `/ready` endpoint.
+
+Set `DEVNEST_REQUIRE_DISTRIBUTED_RATE_LIMITING=true` to abort startup if `DEVNEST_REDIS_URL` is unset when Redis backend is requested.
+
 Disable globally with `DEVNEST_RATE_LIMIT_ENABLED=false` (dev/CI only).
+
+---
+
+## Snapshot Restore Safety
+
+Snapshot archives (`.tar.gz`) accepted via the restore API are validated before any files are written:
+
+| Check | Detail |
+|---|---|
+| Format validation | `tarfile.is_tarfile()` before opening |
+| Absolute paths | Rejected (`/etc/passwd`, etc.) |
+| Path traversal | Members containing `../` are rejected |
+| Device files | `chr`, `blk`, `fifo` members are rejected |
+| Hard-links outside dest | Hard-link targets are checked against the destination root |
+
+Extraction is **atomic**: files go to a temp directory first; the original directory is renamed to a backup, then the temp dir is renamed into place. On any extraction failure, the original directory is fully preserved and temporary directories are removed.
 
 ---
 
@@ -250,3 +277,9 @@ Before production deployment, verify:
 - [ ] `DATABASE_URL` uses a dedicated least-privilege database user
 - [ ] `sslmode=require` appended to `DATABASE_URL` for encrypted DB connections
 - [ ] S3 bucket has versioning enabled and IAM policy limits to the required actions
+- [ ] `DEVNEST_RATE_LIMIT_BACKEND=redis` + `DEVNEST_REDIS_URL` set for multi-worker deployments
+- [ ] `DEVNEST_REQUIRE_DISTRIBUTED_RATE_LIMITING=true` in production (fail if Redis absent)
+- [ ] Redis instance uses `requirepass` or ACL authentication; network access restricted to API hosts
+- [ ] `CODE_SERVER_AUTH=none` is intentional: workspace sessions are the auth layer; do not expose workspace ports publicly without gateway
+- [ ] `DEVNEST_WORKSPACE_PROJECTS_BASE` is on durable storage (not `/tmp`)
+- [ ] Workspace feature flags (`terminal_enabled`, etc.) default to `false`; only enable as needed

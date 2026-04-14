@@ -15,6 +15,41 @@ class PortMappingSchema(BaseModel):
     host_port: int | None = Field(default=None, ge=1, le=65535)
 
 
+class WorkspaceFeatureFlags(BaseModel):
+    """Optional feature gates stored in ``config_json.features``.
+
+    All features default to ``False`` (disabled). Users must explicitly opt in at
+    workspace creation or update time. Feature-disabled workspaces reject attempts
+    to use that capability with an explicit 409/403.
+
+    Known feature keys
+    ------------------
+    terminal_enabled   — allow WS terminal (/workspaces/{id}/terminal).
+    ci_enabled         — CI/CD integration (future; currently reserved).
+    ai_tools_enabled   — AI assistant tooling (future; currently reserved).
+    """
+
+    terminal_enabled: bool = False
+    ci_enabled: bool = False
+    ai_tools_enabled: bool = False
+
+    model_config = ConfigDict(extra="allow")
+
+
+def get_workspace_features(config_json: dict | None) -> WorkspaceFeatureFlags:
+    """Parse feature flags from a ``WorkspaceConfig.config_json`` dict.
+
+    Unknown keys are preserved (``extra="allow"``) so future feature additions
+    are forward-compatible with older code reading the config.
+    Returns a fully-defaulted ``WorkspaceFeatureFlags`` when ``config_json`` is
+    missing or has no ``features`` key.
+    """
+    raw = (config_json or {}).get("features") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return WorkspaceFeatureFlags.model_validate(raw)
+
+
 class WorkspaceRuntimeSpecSchema(BaseModel):
     """Intent bundled into ``WorkspaceConfig.config_json`` (no runtime execution here)."""
 
@@ -25,6 +60,13 @@ class WorkspaceRuntimeSpecSchema(BaseModel):
     ports: list[PortMappingSchema] = Field(default_factory=list)
     topology_id: int | None = None
     storage: dict[str, Any] = Field(default_factory=dict)
+    features: WorkspaceFeatureFlags = Field(
+        default_factory=WorkspaceFeatureFlags,
+        description=(
+            "Optional feature gates. Disabled by default. "
+            "Set terminal_enabled=true to allow terminal WebSocket access."
+        ),
+    )
 
     def to_config_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +77,7 @@ class WorkspaceRuntimeSpecSchema(BaseModel):
             "ports": [p.model_dump() for p in self.ports],
             "topology_id": self.topology_id,
             "storage": self.storage,
+            "features": self.features.model_dump(),
         }
 
 

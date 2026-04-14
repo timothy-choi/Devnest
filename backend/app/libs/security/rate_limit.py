@@ -1,10 +1,16 @@
-"""In-process HTTP rate limiting (no external dependency required).
+"""HTTP rate limiting — in-memory (single-process) or Redis-backed (distributed).
 
-Implements a **sliding-window** per-key counter backed by a thread-safe in-memory
-dict. Suitable for single-process deployments. In multi-process deployments (e.g.
-multiple gunicorn workers) each process maintains its own window — effective rate
-limit per-client is ``rate_limit × worker_count``; for production deployments with
-many workers, move to Redis-backed limiting.
+Backend selection
+-----------------
+Set ``DEVNEST_RATE_LIMIT_BACKEND=redis`` and ``DEVNEST_REDIS_URL=redis://...`` to
+enable distributed rate limiting across multiple API workers. When the Redis backend
+is selected but the connection fails at request time the limiter **degrades to
+allow** the request (fail-open) and logs a warning to avoid cascading outages.
+
+The in-memory backend (default) uses a thread-safe sliding-window counter. In
+multi-process deployments each process maintains its own window — effective limit
+per-client is ``rate_limit × worker_count``; use the Redis backend for production
+multi-worker deployments.
 
 Usage
 -----
@@ -38,6 +44,87 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 _logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Redis-backed sliding-window limiter
+# ---------------------------------------------------------------------------
+
+class RedisRateLimiter:
+    """Distributed sliding-window rate limiter backed by Redis sorted sets.
+
+    Each ``key`` maps to a Redis sorted set where every member is a unique
+    request ID and the score is the monotonic UTC timestamp (``time.time()``).
+    Expired entries are removed on each call using ``ZREMRANGEBYSCORE``.
+
+    Fails **open** (allows the request) when the Redis connection is
+    unavailable to prevent cascading outages.
+    """
+
+    def __init__(self, calls: int, period: int, *, redis_url: str) -> None:
+        if calls <= 0 or period <= 0:
+            raise ValueError("calls and period must be positive integers")
+        self._calls = calls
+        self._period = float(period)
+        self._redis_url = redis_url
+        self._client = None
+        self._client_lock = threading.Lock()
+
+    def _get_client(self):
+        with self._client_lock:
+            if self._client is None:
+                try:
+                    import redis as _redis  # noqa: PLC0415
+                    self._client = _redis.from_url(
+                        self._redis_url,
+                        socket_connect_timeout=1,
+                        socket_timeout=1,
+                        decode_responses=True,
+                    )
+                except Exception as exc:
+                    _logger.warning("redis_rate_limiter:connect_failed", extra={"error": str(exc)})
+                    return None
+            return self._client
+
+    def is_allowed(self, key: str) -> bool:
+        """Return True and record the request; fail open on Redis errors."""
+        client = self._get_client()
+        if client is None:
+            return True
+        now = time.time()
+        cutoff = now - self._period
+        redis_key = f"devnest:rl:{key}"
+        try:
+            pipe = client.pipeline()
+            pipe.zremrangebyscore(redis_key, "-inf", cutoff)
+            pipe.zcard(redis_key)
+            pipe.zadd(redis_key, {f"{now}:{id(object())}" : now})
+            pipe.expire(redis_key, int(self._period) + 5)
+            results = pipe.execute()
+            count_before = int(results[1])
+            return count_before < self._calls
+        except Exception as exc:
+            _logger.warning("redis_rate_limiter:error", extra={"error": str(exc)})
+            with self._client_lock:
+                self._client = None  # reset — reconnect on next request
+            return True  # fail open
+
+    def retry_after_seconds(self, key: str) -> float:
+        """Approximate seconds until next slot; returns 0 on Redis errors."""
+        client = self._get_client()
+        if client is None:
+            return 0.0
+        now = time.time()
+        cutoff = now - self._period
+        redis_key = f"devnest:rl:{key}"
+        try:
+            oldest_scores = client.zrangebyscore(redis_key, cutoff, "+inf", start=0, num=1, withscores=True)
+            if oldest_scores:
+                oldest = float(oldest_scores[0][1])
+                return max(0.0, oldest + self._period - now)
+        except Exception:
+            pass
+        return 0.0
 
 
 class SlidingWindowRateLimiter:
@@ -110,6 +197,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         default_period: int = 60,
     ) -> None:
         super().__init__(app)
+        # Middleware limiter is always in-memory; per-endpoint Redis limiters are
+        # created lazily via _get_or_create_limiter. The middleware acts as a
+        # global default guard regardless of backend setting.
         self._limiter = SlidingWindowRateLimiter(calls=default_calls, period=default_period)
 
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -202,27 +292,56 @@ def sse_rate_limit(request: Request) -> None:
         )
 
 
-# Module-level registry of named SlidingWindowRateLimiter instances so per-endpoint
-# limiters are singletons (one window per name, not recreated per request).
-_named_limiters: dict[str, SlidingWindowRateLimiter] = {}
+# Module-level registry of named limiter instances so per-endpoint limiters are
+# singletons (one window per name, not recreated per request). Supports both
+# SlidingWindowRateLimiter (memory) and RedisRateLimiter (distributed).
+_named_limiters: dict[str, SlidingWindowRateLimiter | RedisRateLimiter] = {}
 _named_limiters_lock = threading.Lock()
 
 
-def _get_or_create_limiter(name: str, *, calls: int, period: int = 60) -> SlidingWindowRateLimiter:
+def _is_redis_backend() -> bool:
+    """True when the configured rate-limit backend is Redis and a URL is set."""
+    try:
+        from app.libs.common.config import get_settings  # noqa: PLC0415
+        s = get_settings()
+        backend = (getattr(s, "devnest_rate_limit_backend", "memory") or "memory").strip().lower()
+        redis_url = (getattr(s, "devnest_redis_url", "") or "").strip()
+        return backend == "redis" and bool(redis_url)
+    except Exception:
+        return False
+
+
+def _redis_url() -> str:
+    try:
+        from app.libs.common.config import get_settings  # noqa: PLC0415
+        return (getattr(get_settings(), "devnest_redis_url", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _get_or_create_limiter(
+    name: str, *, calls: int, period: int = 60
+) -> SlidingWindowRateLimiter | RedisRateLimiter:
     with _named_limiters_lock:
         if name not in _named_limiters:
-            _named_limiters[name] = SlidingWindowRateLimiter(calls=calls, period=period)
+            if _is_redis_backend():
+                _named_limiters[name] = RedisRateLimiter(
+                    calls=calls, period=period, redis_url=_redis_url()
+                )
+            else:
+                _named_limiters[name] = SlidingWindowRateLimiter(calls=calls, period=period)
         return _named_limiters[name]
 
 
 def reset_all_limiters() -> None:
-    """Clear all in-memory rate-limit windows.
+    """Clear all rate-limit windows (in-memory) or discard Redis client references.
 
     Intended for use in test teardown / setup to prevent window state from one test
     bleeding into another.  Not safe to call in production under concurrent load.
     """
     with _named_limiters_lock:
         for limiter in _named_limiters.values():
-            with limiter._lock:
-                limiter._windows.clear()
+            if isinstance(limiter, SlidingWindowRateLimiter):
+                with limiter._lock:
+                    limiter._windows.clear()
         _named_limiters.clear()

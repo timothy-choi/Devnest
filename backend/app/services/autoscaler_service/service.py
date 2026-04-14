@@ -10,6 +10,7 @@ TODO: provisioning jobs / SQS, cooldown windows, predictive signals, per-tenant 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import and_, func
 from sqlmodel import Session, select
@@ -397,28 +398,144 @@ def select_node_for_scale_down(session: Session) -> ExecutionNode | None:
     return session.exec(stmt).first()
 
 
+def _node_has_recent_activity(
+    session: Session,
+    node_key: str,
+    *,
+    window_seconds: int,
+) -> bool:
+    """Return True when a workspace runtime on ``node_key`` had recent heartbeat activity.
+
+    Uses ``WorkspaceRuntime.last_heartbeat_at`` as a proxy for "recently active". A node is
+    considered active if any workspace runtime row pinned to it was heartbeated within the last
+    ``window_seconds`` seconds. This prevents draining nodes that still host warm workloads.
+    """
+    from datetime import timezone  # noqa: PLC0415
+    if window_seconds <= 0:
+        return False
+    cutoff = datetime.now(timezone.utc).timestamp() - window_seconds
+    stmt = (
+        select(WorkspaceRuntime)
+        .where(
+            and_(
+                WorkspaceRuntime.node_id == node_key,
+                WorkspaceRuntime.last_heartbeat_at.isnot(None),
+            )
+        )
+        .limit(10)
+    )
+    runtimes = list(session.exec(stmt).all())
+    for rt in runtimes:
+        if rt.last_heartbeat_at is None:
+            continue
+        hb_ts = rt.last_heartbeat_at.timestamp() if hasattr(rt.last_heartbeat_at, "timestamp") else 0.0
+        if hb_ts > cutoff:
+            return True
+    return False
+
+
+def _find_draining_node_past_delay(
+    session: Session,
+    *,
+    drain_delay_seconds: int,
+) -> ExecutionNode | None:
+    """Find a DRAINING EC2 node that has been draining for at least ``drain_delay_seconds``.
+
+    Uses ``ExecutionNode.updated_at`` as the drain-started-at proxy. Returns the first
+    candidate sorted by ``node_key`` for determinism.
+    """
+    from datetime import timezone  # noqa: PLC0415
+    if drain_delay_seconds <= 0:
+        stmt = (
+            select(ExecutionNode)
+            .where(
+                and_(
+                    ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+                    ExecutionNode.status == ExecutionNodeStatus.DRAINING.value,
+                )
+            )
+            .order_by(ExecutionNode.node_key.asc())
+            .limit(1)
+        )
+        return session.exec(stmt).first()
+
+    cutoff = datetime.now(timezone.utc).timestamp() - drain_delay_seconds
+    stmt = (
+        select(ExecutionNode)
+        .where(
+            and_(
+                ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+                ExecutionNode.status == ExecutionNodeStatus.DRAINING.value,
+            )
+        )
+        .order_by(ExecutionNode.node_key.asc())
+    )
+    candidates = list(session.exec(stmt).all())
+    for node in candidates:
+        if node.updated_at is None:
+            return node  # unknown drain start; allow termination
+        ua_ts = node.updated_at.timestamp() if hasattr(node.updated_at, "timestamp") else 0.0
+        if ua_ts <= cutoff:
+            return node
+    return None
+
+
 def reclaim_one_idle_ec2_node(
     session: Session,
     *,
     ec2_client: object | None = None,
 ) -> ExecutionNode | None:
     """
-    Drain + terminate one idle EC2 node selected by :func:`select_node_for_scale_down`.
+    Two-phase drain + terminate for a safe, non-premature scale-down.
+
+    **Phase 1 — Mark:** Find an idle READY EC2 node, check for recent workspace activity,
+    mark it ``DRAINING``. The node will not be immediately terminated.
+
+    **Phase 2 — Terminate:** Find a DRAINING node that has waited at least
+    ``DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS`` (default 30 s) and terminate it.
+
+    Both phases run on each call; a node marked in Phase 1 will be terminated on the next
+    call once the delay elapses.
 
     **Destructive:** use internal/admin routes only. Caller must ``commit``.
-
-    TODO: honor drain delay / in-flight workspace jobs on the node (queue-aware).
     """
-    node = select_node_for_scale_down(session)
-    if node is None:
-        return None
-    mark_node_draining(session, node_key=node.node_key)
-    out = terminate_ec2_node(session, node_key=node.node_key, ec2_client=ec2_client)
-    record_autoscaler_scale_down()
-    log_event(
-        logger,
-        LogEvent.AUTOSCALER_SCALE_DOWN_TRIGGERED,
-        node_key=node.node_key,
-        instance_id=(node.provider_instance_id or "").strip() or None,
-    )
+    settings = get_settings()
+    drain_delay = int(getattr(settings, "devnest_autoscaler_drain_delay_seconds", 30))
+    activity_window = int(getattr(settings, "devnest_autoscaler_recent_activity_window_seconds", 300))
+
+    # Phase 2: terminate a DRAINING node past the delay window.
+    out: ExecutionNode | None = None
+    draining_candidate = _find_draining_node_past_delay(session, drain_delay_seconds=drain_delay)
+    if draining_candidate is not None:
+        out = terminate_ec2_node(session, node_key=draining_candidate.node_key, ec2_client=ec2_client)
+        record_autoscaler_scale_down()
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_DOWN_TRIGGERED,
+            node_key=draining_candidate.node_key,
+            instance_id=(draining_candidate.provider_instance_id or "").strip() or None,
+            drain_delay_seconds=drain_delay,
+        )
+
+    # Phase 1: select a new idle node and mark it DRAINING (for future termination).
+    ready_node = select_node_for_scale_down(session)
+    if ready_node is not None:
+        # Safety: skip nodes with recent workspace heartbeat activity.
+        nk = (ready_node.node_key or "").strip()
+        if activity_window > 0 and _node_has_recent_activity(session, nk, window_seconds=activity_window):
+            logger.info(
+                "autoscaler_drain_suppressed_recent_activity",
+                extra={"node_key": nk, "activity_window_seconds": activity_window},
+            )
+        else:
+            mark_node_draining(session, node_key=ready_node.node_key)
+            logger.info(
+                "autoscaler_node_marked_draining",
+                extra={
+                    "node_key": nk,
+                    "drain_delay_seconds": drain_delay,
+                    "will_terminate_after": f"{drain_delay}s",
+                },
+            )
+
     return out
