@@ -174,6 +174,15 @@ class Settings(BaseSettings):
             return 20
         return max(1, min(n, 10000))
 
+    @field_validator("devnest_sse_poll_interval_seconds", mode="before")
+    @classmethod
+    def _coerce_sse_poll_interval(cls, v):  # noqa: ANN001
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return 2.0
+        return max(0.5, min(n, 60.0))
+
     # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
     aws_region: str = ""
     aws_access_key_id: str = ""
@@ -274,6 +283,13 @@ class Settings(BaseSettings):
     devnest_rate_limit_auth_per_minute: int = 20
     # Max requests per minute per IP for the SSE event-stream endpoint.
     devnest_rate_limit_sse_per_minute: int = 30
+
+    # ── SSE event delivery ────────────────────────────────────────────────────
+    # How often (seconds) the SSE polling loop wakes up to check for new DB events.
+    # This is the maximum latency for cross-worker event delivery in multi-process deployments
+    # (gunicorn workers do not share the in-process event bus; they all poll DB instead).
+    # Range: [0.5, 60]. Default 2.0.
+    devnest_sse_poll_interval_seconds: float = 2.0
 
     # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
     devnest_autoscaler_enabled: bool = False

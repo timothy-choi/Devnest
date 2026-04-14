@@ -376,11 +376,19 @@ class TestCheckWorkspaceHealth:
         mock_runtime: MagicMock,
         mock_topology: MagicMock,
     ) -> None:
+        import urllib.error
         self._healthy_container(mock_runtime)
         self._healthy_topology_with_ip(mock_topology)
+        fake_http = MagicMock()
+        fake_http.status = 200
+        fake_http.__enter__ = lambda s: s
+        fake_http.__exit__ = MagicMock(return_value=False)
         with patch(
             "app.libs.probes.probe_runner._probe_create_connection",
             return_value=TestCheckServiceReachable._FakeSock(),
+        ), patch(
+            "app.libs.probes.probe_runner._probe_urlopen",
+            return_value=fake_http,
         ):
             out = runner.check_workspace_health(
                 workspace_id="10",
@@ -409,9 +417,16 @@ class TestCheckWorkspaceHealth:
             mounts=(),
         )
         self._healthy_topology_with_ip(mock_topology)
+        fake_http = MagicMock()
+        fake_http.status = 200
+        fake_http.__enter__ = lambda s: s
+        fake_http.__exit__ = MagicMock(return_value=False)
         with patch(
             "app.libs.probes.probe_runner._probe_create_connection",
             return_value=TestCheckServiceReachable._FakeSock(),
+        ), patch(
+            "app.libs.probes.probe_runner._probe_urlopen",
+            return_value=fake_http,
         ):
             out = runner.check_workspace_health(
                 workspace_id="10",

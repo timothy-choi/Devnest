@@ -13,6 +13,8 @@ import errno
 import math
 import socket
 import time
+import urllib.error
+import urllib.request
 
 import ipaddress
 
@@ -35,6 +37,9 @@ from .results import (
 # Tests patch this symbol. Patching ``probe_runner.socket.create_connection`` mutates the stdlib
 # ``socket`` module (``probe_runner.socket`` is that module) and breaks unrelated TCP clients (httpx).
 _probe_create_connection = socket.create_connection
+
+# Tests patch this symbol to mock HTTP readiness checks without a live server.
+_probe_urlopen = urllib.request.urlopen
 
 
 def _parse_non_negative_int(raw: str) -> int | None:
@@ -499,6 +504,58 @@ class DefaultProbeRunner(ProbeRunner):
                 except OSError:
                     pass
 
+    def check_service_http(
+        self,
+        *,
+        workspace_ip: str,
+        port: int = 8080,
+        timeout_seconds: float = 5.0,
+    ) -> ServiceProbeResult:
+        """HTTP GET ``http://workspace_ip:port/``; accept 2xx/3xx as HTTP-ready.
+
+        Uses ``urllib.request`` (stdlib-only; no new dependencies). TCP-level errors
+        (connection refused, timeout, DNS failure) are treated as not-ready and the
+        workspace stays in the probe loop until the service is fully initialised.
+        """
+        ip = (workspace_ip or "").strip()
+        url = f"http://{ip}:{port}/"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with _probe_urlopen(req, timeout=timeout_seconds) as resp:
+                http_status: int = resp.status
+        except urllib.error.HTTPError as exc:
+            http_status = exc.code
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_HTTP_NOT_READY,
+                    message=f"HTTP GET {url} failed: {exc}",
+                ),
+            )
+
+        if http_status < 400:
+            return ServiceProbeResult(
+                healthy=True,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=(),
+            )
+        return ServiceProbeResult(
+            healthy=False,
+            workspace_ip=ip,
+            port=port,
+            latency_ms=None,
+            issues=_service_issue(
+                code=ProbeIssueCode.SERVICE_HTTP_NOT_READY,
+                message=f"HTTP GET {url} returned {http_status}",
+            ),
+        )
+
     def check_workspace_health(
         self,
         *,
@@ -524,8 +581,19 @@ class DefaultProbeRunner(ProbeRunner):
                 port=expected_port,
                 timeout_seconds=timeout_seconds,
             )
-            service_healthy = svc.healthy
-            service_issues = svc.issues
+            if svc.healthy:
+                # TCP connected — now verify the service is actually serving HTTP.
+                # This prevents marking a workspace RUNNING while code-server is still starting.
+                svc_http = self.check_service_http(
+                    workspace_ip=ws_ip,
+                    port=expected_port,
+                    timeout_seconds=timeout_seconds,
+                )
+                service_healthy = svc_http.healthy
+                service_issues = (*svc.issues, *svc_http.issues)
+            else:
+                service_healthy = False
+                service_issues = svc.issues
         else:
             service_healthy = False
             missing_ip_code = ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value
