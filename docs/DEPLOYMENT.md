@@ -24,7 +24,11 @@ These are **intended shapes**, not separate products. Pick the combination that 
 
 **Probes:** For EC2/SSH/SSM nodes, `NodeExecutionBundle.service_reachability_runner` runs TCP (`nc`) and HTTP (`curl`) **on the execution host**, so readiness matches real reachability. Set `DEVNEST_PROBE_ASSUME_COLOCATED_ENGINE=false` on any control-plane host that builds an orchestrator **without** that runner (so misconfiguration fails closed). Local dev keeps the default `true`.
 
-**Failed bring-up:** The orchestrator performs a **compensating rollback** (detach, stop container, release IP lease) when bring-up raises or when the health probe fails, so partial containers and leases are not left behind. `RECONCILE_RUNTIME` for workspaces in `ERROR` also stops the engine and releases the lease before gateway orphan cleanup.
+**Failed bring-up:** The orchestrator performs a **compensating rollback** (detach, stop container, release IP lease) when bring-up raises or when the health probe fails, with bounded retries on the inner stop; the worker may set `WorkspaceRuntime.health_status=CLEANUP_REQUIRED` if rollback still fails. `RECONCILE_RUNTIME` runs a **topology janitor** first (stuck attachments, orphan IP leases, simple DB/workspace drift) when `DEVNEST_TOPOLOGY_JANITOR_ENABLED=true` (default), then applies reconcile logic. PostgreSQL workers use a **session advisory lock** per workspace during reconcile to avoid duplicate repairs.
+
+**Readiness:** Set `DEVNEST_WORKSPACE_IDE_HEALTH_PATH` (default `/healthz`) for code-server HTTP readiness after TCP succeeds. Use `DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED` and `DEVNEST_PROBE_ASSUME_COLOCATED_ENGINE` per the EC2 control-plane vs execution-host split above.
+
+**Quota:** `CREATE` and start-class intents enforce `max_running_workspaces`, **monthly** `max_runtime_hours` (from `WORKSPACE_STOPPED` usage quantities in seconds), and **`max_cpu` / `max_memory_mb`** against summed `WorkspaceRuntime.reserved_*` plus the workspace being started.
 
 ---
 

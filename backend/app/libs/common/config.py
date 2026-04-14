@@ -117,6 +117,7 @@ class Settings(BaseSettings):
         "devnest_gateway_enabled",
         "devnest_gateway_auth_enabled",
         "devnest_reconcile_enabled",
+        "devnest_topology_janitor_enabled",
         "devnest_rate_limit_enabled",
         "devnest_metrics_auth_enabled",
         "devnest_workspace_http_probe_enabled",
@@ -157,6 +158,15 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 120
         return max(30, min(n, 3600))
+
+    @field_validator("devnest_topology_janitor_stale_seconds", mode="before")
+    @classmethod
+    def _coerce_topology_janitor_stale(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 600
+        return max(30, min(n, 86400))
 
     @field_validator("workspace_job_stuck_timeout_seconds", mode="before")
     @classmethod
@@ -264,6 +274,9 @@ class Settings(BaseSettings):
     # If a RECONCILE_RUNTIME job has been RUNNING longer than this many seconds it is
     # considered stale (crashed worker) and a new reconcile may be enqueued. Default 120s.
     devnest_reconcile_lease_ttl_seconds: int = 120
+    # Topology janitor (stuck attachments / orphan IP leases) runs at the start of reconcile when enabled.
+    devnest_topology_janitor_enabled: bool = True
+    devnest_topology_janitor_stale_seconds: int = 600
 
     # ── Worker stuck-job reclaim ──────────────────────────────────────────────
     # If a job has been in RUNNING state longer than this many seconds it is presumed
@@ -298,6 +311,8 @@ class Settings(BaseSettings):
     # workspace IP is not routable from the API host (e.g. integration/system tests with DB-only
     # topology addresses); tests set DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=false via conftest.
     devnest_workspace_http_probe_enabled: bool = True
+    # HTTP path for IDE readiness (code-server exposes /healthz in typical installs). Must start with ``/``.
+    devnest_workspace_ide_health_path: str = "/healthz"
     # When true (default), TCP/HTTP probes may run from the API/worker process (same host as Docker).
     # Set false on control-plane hosts that are not co-located with workspace Docker (e.g. API-only
     # tier); then probes require ``NodeExecutionBundle.service_reachability_runner`` (SSH/SSM) so

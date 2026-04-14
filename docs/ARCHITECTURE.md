@@ -69,9 +69,10 @@ DevNest is a cloud-hosted coding environment platform — a "Google Drive for co
 - Abstracts over local Docker and EC2-hosted Docker nodes.
 - Returns structured `OrchestratorResult` objects for worker processing.
 - **Compensating rollback:** If bring-up raises after the container or topology steps, or if the
-  aggregate health probe returns unhealthy, the orchestrator **stops** the engine, **detaches**
-  topology, and **releases** the workspace IP lease (`TopologyAdapter.release_workspace_ip_lease`)
-  in an idempotent, best-effort sequence so failed starts do not leak veths, containers, or addresses.
+  aggregate health probe returns unhealthy, the orchestrator **stops** the engine (with bounded retries), **detaches** topology, and **releases** the workspace IP lease
+  (`TopologyAdapter.release_workspace_ip_lease`) in an idempotent sequence. The worker persists
+  rollback outcome on `WorkspaceBringUpResult` / `WorkspaceBringUpError` and may mark
+  `WorkspaceRuntime.health_status=CLEANUP_REQUIRED` when rollback cannot complete.
 
 **Container ID handling**: All lifecycle operations (`stop`, `delete`, `restart`, `update`,
 `check_health`) accept an optional `container_id` parameter. When provided (sourced from
@@ -381,6 +382,20 @@ Scale-down now uses a **two-phase drain**:
 - **Standard env vars** (`CODE_SERVER_AUTH=none`, `PORT=8080`, `CS_DISABLE_GETTING_STARTED_OVERRIDE=1`) are injected at bring-up. Per-workspace `env` overrides win.
 - **Persistence bind mounts** for `/home/coder/.config/code-server` and `/home/coder/.local/share/code-server` are created automatically at `<DEVNEST_WORKSPACE_PROJECTS_BASE>/ws-<id>/code-server/{config,data}`.
 - **Workspace terminal** is feature-gated via `features.terminal_enabled`. See [CODE_SERVER.md](CODE_SERVER.md) and [WORKSPACE_PERSISTENCE.md](WORKSPACE_PERSISTENCE.md).
+
+---
+
+## Topology janitor and distributed reconcile (EC2/VM profile)
+
+- **Janitor:** `TopologyAdapter.run_topology_janitor` (implemented on `DbTopologyAdapter`) runs at the
+  beginning of each `RECONCILE_RUNTIME` job when `DEVNEST_TOPOLOGY_JANITOR_ENABLED=true` (default).
+  It is **idempotent**: stale `ATTACHING` / `FAILED` attachments older than
+  `DEVNEST_TOPOLOGY_JANITOR_STALE_SECONDS`, **orphan active IP leases** (no `ATTACHED` row), and
+  **drift** (`ATTACHED` while workspace is `STOPPED` / `ERROR` / `DELETED`) are detached and leases
+  released where safe. Metrics: `devnest_topology_janitor_actions_total`.
+- **Reconcile lock:** On PostgreSQL, `execute_reconcile_runtime_job` acquires a **session advisory lock** per workspace before janitor + reconcile work, so two workers cannot apply conflicting
+  repairs concurrently. Contention yields `reconcile:advisory_lock_contended` with bounded retry.
+  Non-PostgreSQL test DBs skip locking (single-writer semantics).
 
 ---
 

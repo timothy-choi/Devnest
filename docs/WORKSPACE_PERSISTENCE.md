@@ -13,7 +13,8 @@ and what the operator must provide to make persistence work in production.
 | **code-server config** | `config.yaml`, auth tokens, UI theme | Host bind mount | stop, start, restart |
 | **code-server data** | Extensions, workspace history, editor state | Host bind mount | stop, start, restart |
 | **Workspace metadata** | Name, status, description, owner | PostgreSQL `workspace` table | always |
-| **Runtime placement** | `container_id`, node_id, topology_id | PostgreSQL `workspace_runtime` table | survives API restart |
+| **Runtime placement** | `container_id`, node_id, topology_id, `health_status` | PostgreSQL `workspace_runtime` table | survives API restart |
+| **Cleanup signal** | `health_status=CLEANUP_REQUIRED` when bring-up rollback cannot complete | `workspace_runtime` | cleared by successful stop/reconcile |
 | **Snapshots** | Compressed `.tar.gz` of project directory | Local FS or S3 | manual trigger |
 
 ---

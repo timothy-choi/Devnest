@@ -16,7 +16,22 @@ class AppOrchestratorBindingError(OrchestratorError):
 class WorkspaceBringUpError(OrchestratorError):
     """Unexpected bring-up failure: validation, runtime, topology, or probe errors (not probe-unhealthy roll-ups)."""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        rollback_attempted: bool = False,
+        rollback_succeeded: bool | None = None,
+        rollback_issues: list[str] | None = None,
+        rollback_container_id: str | None = None,
+        rollback_container_state: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.rollback_attempted = rollback_attempted
+        self.rollback_succeeded = rollback_succeeded
+        self.rollback_issues = list(rollback_issues) if rollback_issues else None
+        self.rollback_container_id = rollback_container_id
+        self.rollback_container_state = rollback_container_state
 
 
 class WorkspaceStopError(OrchestratorError):

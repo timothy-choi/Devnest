@@ -51,11 +51,20 @@ def resolve_orchestrator_placement(
     **Caveat:** ``RECONCILE_RUNTIME`` with no ``WorkspaceRuntime`` row (or empty ``node_id``)
     uses env fallback — acceptable for V1 local dev; multi-node should ensure runtime rows
     exist or extend this path to call placement (TODO).
+
+    **START** reuses ``WorkspaceRuntime.node_id`` / ``topology_id`` when present so bring-up
+    targets the same execution node as the last successful run (authoritative placement). Fresh
+    workspaces (no persisted node) still schedule via ``schedule_workspace``.
     """
     wid = ws.workspace_id
     assert wid is not None
     jt = job.job_type
     rt = _runtime_row(session, wid)
+
+    if jt == WorkspaceJobType.START.value and rt is not None:
+        nk = (rt.node_id or "").strip()
+        if nk and rt.topology_id is not None:
+            return nk, int(rt.topology_id)
 
     reuse_from_runtime = (
         rt is not None

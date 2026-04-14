@@ -15,6 +15,10 @@
 
 ``issues`` use stable ``component:code:message``-style strings where applicable; the service
 normalizes empty issue lists to ``None`` for a stable JSON/API shape.
+
+**Bring-up rollback:** On probe failure or aborted bring-up, the orchestrator runs a compensating
+stop/detach/IP release. ``rollback_*`` fields describe that attempt; the worker maps a failed
+rollback to ``WorkspaceRuntime.health_status=CLEANUP_REQUIRED`` for deterministic follow-up.
 """
 
 from __future__ import annotations
@@ -36,6 +40,10 @@ class WorkspaceBringUpResult:
     internal_endpoint: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
+    # Compensating rollback after failed bring-up (probe unhealthy or exception path in caller).
+    rollback_attempted: bool = False
+    rollback_succeeded: Optional[bool] = None
+    rollback_issues: Optional[List[str]] = None
 
 
 @dataclass

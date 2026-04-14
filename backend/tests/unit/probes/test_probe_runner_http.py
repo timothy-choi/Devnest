@@ -62,7 +62,7 @@ class TestCheckServiceHttp:
     def test_500_returns_not_healthy(self):
         runner = _make_runner()
         http_err = urllib.error.HTTPError(
-            url="http://10.0.0.1:8080/",
+            url="http://10.0.0.1:8080/healthz",
             code=500,
             msg="Internal Server Error",
             hdrs=None,
@@ -76,7 +76,7 @@ class TestCheckServiceHttp:
     def test_404_returns_not_healthy(self):
         runner = _make_runner()
         http_err = urllib.error.HTTPError(
-            url="http://10.0.0.1:8080/",
+            url="http://10.0.0.1:8080/healthz",
             code=404,
             msg="Not Found",
             hdrs=None,
@@ -276,6 +276,7 @@ class TestCheckWorkspaceHealthHttpIntegration:
         settings = MagicMock()
         settings.devnest_workspace_http_probe_enabled = True
         settings.devnest_probe_assume_colocated_engine = True
+        settings.devnest_workspace_ide_health_path = "/healthz"
         with patch("app.libs.common.config.get_settings", return_value=settings):
             with patch("app.libs.probes.probe_runner._probe_urlopen") as uo:
                 result = runner.check_workspace_health(
@@ -287,6 +288,7 @@ class TestCheckWorkspaceHealthHttpIntegration:
         assert result.healthy is True
         uo.assert_not_called()
         assert any("curl" in c for c in recorded), recorded
+        assert any("http://10.0.0.5:8080/healthz" in " ".join(c) for c in recorded), recorded
 
 
 # ---------------------------------------------------------------------------

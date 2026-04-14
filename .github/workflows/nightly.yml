@@ -83,6 +83,7 @@ jobs:
       - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
         run: |
           pytest tests -v -m "not topology_linux and not topology_linux_core and not gateway" \
+            --timeout=600 \
             --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
 
       - name: Finalize suite coverage XML

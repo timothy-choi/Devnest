@@ -13,12 +13,16 @@ from app.services.policy_service.enums import ScopeType
 from app.services.quota_service.errors import QuotaExceededError
 from app.services.quota_service.models import Quota
 from app.services.quota_service.service import (
+    check_monthly_runtime_hours_quota,
+    check_owner_compute_quota,
     check_running_workspace_quota,
     check_session_quota,
     check_snapshot_quota,
     check_workspace_quota,
 )
-from app.services.workspace_service.models import Workspace, WorkspaceSnapshot
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.models import WorkspaceUsageRecord
+from app.services.workspace_service.models import Workspace, WorkspaceRuntime, WorkspaceSnapshot
 from app.services.workspace_service.models.enums import (
     WorkspaceSnapshotStatus,
     WorkspaceStatus,
@@ -273,3 +277,68 @@ class TestCheckSessionQuota:
             check_session_quota(quota_session, workspace_id=wid, owner_user_id=uid, current_session_count=2)
         assert exc_info.value.quota_field == "max_sessions"
         assert exc_info.value.limit == 2
+
+
+class TestMonthlyRuntimeHoursQuota:
+    def test_exceeds_when_stopped_seconds_exceed_limit(self, quota_session: Session) -> None:
+        uid = _seed_user(quota_session)
+        _add_quota(quota_session, scope_type=ScopeType.USER, scope_id=uid, max_runtime_hours=1.0)
+        quota_session.add(
+            WorkspaceUsageRecord(
+                owner_user_id=uid,
+                event_type=UsageEventType.WORKSPACE_STOPPED.value,
+                quantity=4000,
+            ),
+        )
+        quota_session.commit()
+        with pytest.raises(QuotaExceededError) as ei:
+            check_monthly_runtime_hours_quota(quota_session, owner_user_id=uid)
+        assert ei.value.quota_field == "max_runtime_hours"
+
+
+class TestOwnerComputeQuota:
+    def test_exceeds_when_proposed_plus_reserved_over_cpu(self, quota_session: Session) -> None:
+        uid = _seed_user(quota_session)
+        _add_quota(quota_session, scope_type=ScopeType.USER, scope_id=uid, max_cpu=2.0)
+        w1 = _seed_workspace(quota_session, uid, status=WorkspaceStatus.RUNNING.value)
+        quota_session.add(
+            WorkspaceRuntime(
+                workspace_id=w1,
+                node_id="n",
+                topology_id=1,
+                reserved_cpu=1.5,
+                reserved_memory_mb=512,
+            ),
+        )
+        quota_session.commit()
+        with pytest.raises(QuotaExceededError) as ei:
+            check_owner_compute_quota(
+                quota_session,
+                owner_user_id=uid,
+                proposed_cpu=1.0,
+                proposed_memory_mb=256,
+                ignore_workspace_id=None,
+            )
+        assert ei.value.quota_field == "max_cpu"
+
+    def test_ignore_workspace_excludes_its_reservation(self, quota_session: Session) -> None:
+        uid = _seed_user(quota_session)
+        _add_quota(quota_session, scope_type=ScopeType.USER, scope_id=uid, max_cpu=2.0)
+        w1 = _seed_workspace(quota_session, uid, status=WorkspaceStatus.STOPPED.value)
+        quota_session.add(
+            WorkspaceRuntime(
+                workspace_id=w1,
+                node_id="n",
+                topology_id=1,
+                reserved_cpu=1.5,
+                reserved_memory_mb=512,
+            ),
+        )
+        quota_session.commit()
+        check_owner_compute_quota(
+            quota_session,
+            owner_user_id=uid,
+            proposed_cpu=1.0,
+            proposed_memory_mb=256,
+            ignore_workspace_id=w1,
+        )

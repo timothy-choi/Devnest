@@ -13,8 +13,8 @@ class QuotaExceededError(Exception):
         self,
         *,
         quota_field: str,
-        limit: int,
-        current: int,
+        limit: int | float,
+        current: int | float,
         scope: str = "unknown",
     ) -> None:
         self.quota_field = quota_field

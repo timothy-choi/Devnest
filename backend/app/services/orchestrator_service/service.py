@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sys
+import time
 import tarfile
 import tempfile
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from app.libs.runtime.models import (
 from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
 from app.libs.topology.interfaces import TopologyAdapter
-from app.libs.topology.results import AttachWorkspaceResult
+from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
 from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
@@ -197,6 +198,13 @@ class DefaultOrchestratorService(OrchestratorService):
         self._workspace_image = workspace_image
         self._ensure_workspace_project_dir = (
             ensure_workspace_project_dir or default_local_ensure_workspace_project_dir
+        )
+
+    def run_topology_janitor(self, *, stale_attaching_seconds: int = 600) -> TopologyJanitorResult:
+        return self._topology_service.run_topology_janitor(
+            topology_id=int(self._topology_id),
+            node_id=self._node_id,
+            stale_attaching_seconds=stale_attaching_seconds,
         )
 
     def _bring_up_build_context(
@@ -410,8 +418,12 @@ class DefaultOrchestratorService(OrchestratorService):
         running: EnsureRunningRuntimeResult | None,
         *,
         reason: str,
-    ) -> None:
-        """Best-effort: detach, stop engine, release IP lease (idempotent). Never raises."""
+    ) -> tuple[bool, list[str], WorkspaceStopResult | None]:
+        """Detach, stop engine, release IP lease (idempotent).
+
+        Returns ``(ok, issue strings, last stop result)`` where ``last stop result`` is set when
+        ``stop_workspace_runtime`` returned ``success=True`` on the final attempt. Never raises.
+        """
         log_event(
             logger,
             LogEvent.ORCHESTRATOR_BRINGUP_ROLLBACK,
@@ -426,18 +438,33 @@ class DefaultOrchestratorService(OrchestratorService):
         cid = (running.container_id if running is not None else None) or None
         if cid is not None:
             cid = str(cid).strip() or None
-        try:
-            self.stop_workspace_runtime(
-                workspace_id=ctx.wid,
-                container_id=cid,
-                requested_by=None,
-                release_ip_lease=True,
-            )
-        except WorkspaceStopError as e:
-            logger.warning(
-                "orchestrator_bringup_rollback_stop_failed",
-                extra={"workspace_id": ctx.wid, "error": str(e)[:500]},
-            )
+        issues: list[str] = []
+        last_stop: WorkspaceStopResult | None = None
+        for attempt in (1, 2):
+            try:
+                stop_out = self.stop_workspace_runtime(
+                    workspace_id=ctx.wid,
+                    container_id=cid,
+                    requested_by=None,
+                    release_ip_lease=True,
+                )
+                last_stop = stop_out
+                if stop_out.success:
+                    return True, issues, stop_out
+                issues.append(
+                    f"rollback:stop_incomplete:{attempt}:"
+                    f"{','.join(stop_out.issues or ['no_issues_field'])}",
+                )
+            except WorkspaceStopError as e:
+                issues.append(f"rollback:stop_error:{attempt}:{e}")
+            if attempt == 1:
+                time.sleep(0.35)
+        logger.warning(
+            "orchestrator_bringup_rollback_stop_failed",
+            extra={"workspace_id": ctx.wid, "issues": issues[:5]},
+        )
+        devnest_metrics.record_bringup_rollback_failed()
+        return False, issues, last_stop
 
     def bring_up_workspace_runtime(
         self,
@@ -483,6 +510,27 @@ class DefaultOrchestratorService(OrchestratorService):
             )
             netns, attach_res = self._bring_up_attach_topology(ctx, running)
             result = self._bring_up_run_probe(ctx, running, netns, attach_res)
+        except WorkspaceBringUpError as e:
+            log_event(
+                logger,
+                LogEvent.ORCHESTRATOR_BRINGUP_FAILED,
+                level=logging.WARNING,
+                workspace_id=ctx.wid,
+                error=str(e)[:500],
+            )
+            rb_ok, rb_issues, stop_out = self._bring_up_compensating_rollback(ctx, running, reason="exception")
+            rid = (stop_out.container_id if stop_out else None) or (
+                running.container_id if running is not None else None
+            )
+            rst = stop_out.container_state if stop_out else None
+            raise WorkspaceBringUpError(
+                str(e),
+                rollback_attempted=True,
+                rollback_succeeded=rb_ok,
+                rollback_issues=rb_issues,
+                rollback_container_id=rid,
+                rollback_container_state=rst,
+            ) from e
         except Exception as e:
             log_event(
                 logger,
@@ -491,8 +539,19 @@ class DefaultOrchestratorService(OrchestratorService):
                 workspace_id=ctx.wid,
                 error=str(e)[:500],
             )
-            self._bring_up_compensating_rollback(ctx, running, reason="exception")
-            raise
+            rb_ok, rb_issues, stop_out = self._bring_up_compensating_rollback(ctx, running, reason="exception")
+            rid = (stop_out.container_id if stop_out else None) or (
+                running.container_id if running is not None else None
+            )
+            rst = stop_out.container_state if stop_out else None
+            raise WorkspaceBringUpError(
+                f"unexpected bring-up failure: {e}",
+                rollback_attempted=True,
+                rollback_succeeded=rb_ok,
+                rollback_issues=rb_issues,
+                rollback_container_id=rid,
+                rollback_container_state=rst,
+            ) from e
         if result.success:
             log_event(
                 logger,
@@ -510,7 +569,27 @@ class DefaultOrchestratorService(OrchestratorService):
                 probe_healthy=result.probe_healthy,
                 issues=(result.issues or [])[:5],
             )
-            self._bring_up_compensating_rollback(ctx, running, reason="probe_unhealthy")
+            rb_ok, rb_issues, stop_out = self._bring_up_compensating_rollback(ctx, running, reason="probe_unhealthy")
+            merged_issues = list(result.issues or [])
+            merged_issues.extend(rb_issues)
+            cid = (stop_out.container_id if stop_out else None) or result.container_id
+            cst = (stop_out.container_state if stop_out else None) or result.container_state
+            result = WorkspaceBringUpResult(
+                workspace_id=result.workspace_id,
+                success=False,
+                node_id=result.node_id,
+                topology_id=result.topology_id,
+                container_id=cid,
+                container_state=cst,
+                netns_ref=result.netns_ref,
+                workspace_ip=None if rb_ok else result.workspace_ip,
+                internal_endpoint=None if rb_ok else result.internal_endpoint,
+                probe_healthy=False,
+                issues=_issues_or_none(merged_issues),
+                rollback_attempted=True,
+                rollback_succeeded=rb_ok,
+                rollback_issues=_issues_or_none(rb_issues),
+            )
         return result
 
     def _stop_load_inspection(

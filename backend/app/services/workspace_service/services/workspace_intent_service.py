@@ -48,12 +48,18 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
+from app.services.placement_service.constants import (
+    DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+)
 from app.services.policy_service.service import (
     evaluate_session_creation,
     evaluate_workspace_creation,
     evaluate_workspace_start,
 )
 from app.services.quota_service.service import (
+    check_monthly_runtime_hours_quota,
+    check_owner_compute_quota,
     check_running_workspace_quota,
     check_session_quota,
     check_workspace_quota,
@@ -410,6 +416,28 @@ def _persist_intent(
             session,
             owner_user_id=int(ws.owner_user_id),
             workspace_id=ws.workspace_id,
+            correlation_id=cid_pre,
+        )
+        check_monthly_runtime_hours_quota(
+            session,
+            owner_user_id=int(ws.owner_user_id),
+            correlation_id=cid_pre,
+        )
+        cfg_row = session.exec(
+            select(WorkspaceConfig)
+            .where(WorkspaceConfig.workspace_id == ws.workspace_id)
+            .order_by(WorkspaceConfig.version.desc()),
+        ).first()
+        cfg_json: dict = (cfg_row.config_json if cfg_row else None) or {}
+        p_cpu = float(cfg_json.get("cpu_limit_cores") or DEFAULT_WORKSPACE_REQUEST_CPU)
+        p_mem = int(cfg_json.get("memory_limit_mib") or DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
+        assert ws.workspace_id is not None
+        check_owner_compute_quota(
+            session,
+            owner_user_id=int(ws.owner_user_id),
+            proposed_cpu=p_cpu,
+            proposed_memory_mb=p_mem,
+            ignore_workspace_id=int(ws.workspace_id),
             correlation_id=cid_pre,
         )
         evaluate_workspace_start(
@@ -888,6 +916,18 @@ def create_workspace(
     # --- Policy and quota checks (before any DB writes) ---
     cid_pre = _effective_correlation_id(correlation_id)
     check_workspace_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
+    check_running_workspace_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
+    check_monthly_runtime_hours_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
+    rt_cpu = float(body.runtime.cpu_limit_cores or DEFAULT_WORKSPACE_REQUEST_CPU)
+    rt_mem = int(body.runtime.memory_limit_mib or DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
+    check_owner_compute_quota(
+        session,
+        owner_user_id=owner_user_id,
+        proposed_cpu=rt_cpu,
+        proposed_memory_mb=rt_mem,
+        ignore_workspace_id=None,
+        correlation_id=cid_pre,
+    )
     evaluate_workspace_creation(
         session,
         owner_user_id=owner_user_id,

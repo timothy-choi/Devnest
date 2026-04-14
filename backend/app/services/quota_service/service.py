@@ -10,8 +10,12 @@ Current-usage queries hit the primary tables (Workspace, WorkspaceSnapshot, etc.
 directly rather than the append-only usage ledger — this gives accurate real-time
 counts while the usage ledger serves aggregation and historical analysis.
 
-TODO: add max_runtime_hours enforcement via DailyUsageAggregate when rollups exist.
-TODO: wire max_cpu / max_memory_mb checks when placement reservations are enforced.
+``max_runtime_hours`` uses ``WorkspaceUsageRecord`` rows for ``WORKSPACE_STOPPED`` in the
+current UTC calendar month; ``quantity`` must hold session duration seconds (see worker).
+
+``max_cpu`` / ``max_memory_mb`` compare effective quota against the sum of
+``WorkspaceRuntime.reserved_*`` for the owner's workspaces, plus a proposed reservation for
+the workspace being started or created.
 """
 
 from __future__ import annotations
@@ -25,7 +29,13 @@ from sqlmodel import Session, select
 from app.libs.observability.correlation import get_correlation_id
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
-from app.services.workspace_service.models import Workspace, WorkspaceSnapshot
+from app.services.placement_service.constants import (
+    DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+)
+from app.services.usage_service.enums import UsageEventType
+from app.services.usage_service.models import WorkspaceUsageRecord
+from app.services.workspace_service.models import Workspace, WorkspaceRuntime, WorkspaceSnapshot
 from app.services.workspace_service.models.enums import (
     WorkspaceSnapshotStatus,
     WorkspaceStatus,
@@ -117,8 +127,8 @@ def _exceed_and_raise(
     session: Session,
     *,
     quota_field: str,
-    limit: int,
-    current: int,
+    limit: int | float,
+    current: int | float,
     scope: str,
     owner_user_id: int | None = None,
     workspace_id: int | None = None,
@@ -188,6 +198,98 @@ def check_workspace_quota(
             quota_field="max_workspaces",
             limit=quota.max_workspaces,
             current=current,
+            scope=f"user:{owner_user_id}",
+            owner_user_id=owner_user_id,
+            correlation_id=correlation_id,
+        )
+
+
+def check_monthly_runtime_hours_quota(
+    session: Session,
+    *,
+    owner_user_id: int,
+    correlation_id: str | None = None,
+) -> None:
+    """Raise if the owner's stopped-session seconds this UTC month exceed ``max_runtime_hours``."""
+    quota = _get_effective_quota(session, owner_user_id=owner_user_id)
+    if quota is None or quota.max_runtime_hours is None:
+        return
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    total_secs = int(
+        session.exec(
+            select(func.coalesce(func.sum(WorkspaceUsageRecord.quantity), 0))
+            .where(WorkspaceUsageRecord.owner_user_id == owner_user_id)
+            .where(WorkspaceUsageRecord.event_type == UsageEventType.WORKSPACE_STOPPED.value)
+            .where(WorkspaceUsageRecord.created_at >= month_start),
+        ).one()
+    )
+    current_hours = total_secs / 3600.0
+    limit = float(quota.max_runtime_hours)
+    if current_hours >= limit:
+        _exceed_and_raise(
+            session,
+            quota_field="max_runtime_hours",
+            limit=limit,
+            current=round(current_hours, 4),
+            scope=f"user:{owner_user_id}",
+            owner_user_id=owner_user_id,
+            correlation_id=correlation_id,
+        )
+
+
+def check_owner_compute_quota(
+    session: Session,
+    *,
+    owner_user_id: int,
+    proposed_cpu: float,
+    proposed_memory_mb: int,
+    ignore_workspace_id: int | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Raise if ``reserved_*`` for other workspaces plus proposed reservation exceeds CPU/memory caps."""
+    quota = _get_effective_quota(session, owner_user_id=owner_user_id)
+    if quota is None:
+        return
+    if quota.max_cpu is None and quota.max_memory_mb is None:
+        return
+
+    stmt = (
+        select(
+            func.coalesce(func.sum(WorkspaceRuntime.reserved_cpu), 0.0),
+            func.coalesce(func.sum(WorkspaceRuntime.reserved_memory_mb), 0),
+        )
+        .select_from(WorkspaceRuntime)
+        .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
+        .where(Workspace.owner_user_id == owner_user_id)
+    )
+    if ignore_workspace_id is not None:
+        stmt = stmt.where(Workspace.workspace_id != ignore_workspace_id)
+    used_cpu, used_mem = session.exec(stmt).one()
+    used_cpu = float(used_cpu or 0.0)
+    used_mem = int(used_mem or 0)
+    new_cpu = used_cpu + float(proposed_cpu)
+    new_mem = used_mem + int(proposed_memory_mb)
+
+    if quota.max_cpu is not None and new_cpu > float(quota.max_cpu) + 1e-9:
+        lim = float(quota.max_cpu)
+        _exceed_and_raise(
+            session,
+            quota_field="max_cpu",
+            limit=lim,
+            current=round(new_cpu, 4),
+            scope=f"user:{owner_user_id}",
+            owner_user_id=owner_user_id,
+            correlation_id=correlation_id,
+        )
+    if quota.max_memory_mb is not None and new_mem > int(quota.max_memory_mb):
+        _exceed_and_raise(
+            session,
+            quota_field="max_memory_mb",
+            limit=int(quota.max_memory_mb),
+            current=new_mem,
             scope=f"user:{owner_user_id}",
             owner_user_id=owner_user_id,
             correlation_id=correlation_id,

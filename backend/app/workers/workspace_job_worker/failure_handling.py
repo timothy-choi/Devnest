@@ -65,6 +65,8 @@ def orchestrator_exception_retryable(job_type: str | None) -> bool:
 def classify_reconcile_failure(message: str) -> tuple[FailureStage, bool]:
     """Retryable vs terminal for reconcile paths (conservative: transient infra → retry)."""
     m = (message or "").strip().lower()
+    if "reconcile:advisory_lock_contended" in m:
+        return FailureStage.PLACEMENT, True
     if "reconcile:workspace_busy" in m or "reconcile:unsupported_workspace_status" in m:
         return FailureStage.UNKNOWN, False
     if "gateway_" in m or "gateway:" in m:

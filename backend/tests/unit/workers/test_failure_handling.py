@@ -28,6 +28,12 @@ def test_classify_placement_generic_is_placement() -> None:
     assert retryable is True
 
 
+def test_classify_reconcile_lock_contended_is_retryable() -> None:
+    st, rb = classify_reconcile_failure("reconcile:advisory_lock_contended")
+    assert st == FailureStage.PLACEMENT
+    assert rb is True
+
+
 @pytest.mark.parametrize(
     "message,expected_stage,retryable",
     [

@@ -42,6 +42,14 @@ _probe_create_connection = socket.create_connection
 _probe_urlopen = urllib.request.urlopen
 
 
+def _ide_health_http_path() -> str:
+    """Configured code-server (IDE) health path; normalized to start with ``/``."""
+    from app.libs.common.config import get_settings  # noqa: PLC0415
+
+    p = (get_settings().devnest_workspace_ide_health_path or "/healthz").strip() or "/healthz"
+    return p if p.startswith("/") else f"/{p}"
+
+
 def _parse_non_negative_int(raw: str) -> int | None:
     try:
         v = int(str(raw).strip(), 10)
@@ -552,7 +560,7 @@ class DefaultProbeRunner(ProbeRunner):
         w = max(1, min(60, int(math.ceil(timeout_seconds))))
         runner = self._service_reachability_runner
         assert runner is not None
-        url = f"http://{ip}:{port}/"
+        url = f"http://{ip}:{port}{_ide_health_http_path()}"
         t0 = time.perf_counter()
         try:
             runner.run(["timeout", str(w), "curl", "-sf", "--max-time", str(w), url])
@@ -583,14 +591,14 @@ class DefaultProbeRunner(ProbeRunner):
         port: int = 8080,
         timeout_seconds: float = 5.0,
     ) -> ServiceProbeResult:
-        """HTTP GET ``http://workspace_ip:port/``; accept 2xx/3xx as HTTP-ready.
+        """HTTP GET to the configured IDE health path; accept 2xx/3xx as HTTP-ready.
 
         Uses ``urllib.request`` (stdlib-only; no new dependencies). TCP-level errors
         (connection refused, timeout, DNS failure) are treated as not-ready and the
         workspace stays in the probe loop until the service is fully initialised.
         """
         ip = (workspace_ip or "").strip()
-        url = f"http://{ip}:{port}/"
+        url = f"http://{ip}:{port}{_ide_health_http_path()}"
         try:
             req = urllib.request.Request(url, method="GET")
             with _probe_urlopen(req, timeout=timeout_seconds) as resp:

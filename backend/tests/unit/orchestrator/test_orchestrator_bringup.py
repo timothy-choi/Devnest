@@ -427,11 +427,66 @@ class TestBringUpProbeUnhealthy:
         assert out.issues == ["service:SERVICE_TIMEOUT:TCP timed out"]
         assert out.container_id == CONTAINER_ID
         assert out.netns_ref == NETNS_REF
+        assert out.rollback_attempted is True
+        assert out.rollback_succeeded is True
+        assert not out.rollback_issues
         mock_probe.check_workspace_health.assert_called_once()
-        mock_topology.detach_workspace.assert_called_once()
-        mock_runtime.stop_container.assert_called_once_with(container_id=CONTAINER_ID)
+        assert mock_topology.detach_workspace.call_count >= 1
+        assert mock_runtime.stop_container.call_count >= 1
         mock_topology.release_workspace_ip_lease.assert_called_once_with(
             topology_id=TOPOLOGY_ID,
             node_id=NODE_ID,
             workspace_id=int(WORKSPACE_ID),
         )
+
+    def test_probe_unhealthy_when_inner_stop_fails_after_retry(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        mock_probe.check_workspace_health.return_value = WorkspaceHealthResult(
+            workspace_id=int(WORKSPACE_ID),
+            healthy=False,
+            runtime_healthy=True,
+            topology_healthy=True,
+            service_healthy=False,
+            container_state="running",
+            workspace_ip=WORKSPACE_IP,
+            internal_endpoint=INTERNAL_ENDPOINT,
+            issues=(
+                HealthIssue(
+                    code="SERVICE_TIMEOUT",
+                    component="service",
+                    message="TCP timed out",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            ),
+        )
+        mock_topology.detach_workspace.return_value = DetachWorkspaceResult(
+            detached=True,
+            status=TopologyAttachmentStatus.DETACHED,
+            workspace_id=int(WORKSPACE_ID),
+            workspace_ip=WORKSPACE_IP,
+            released_ip=False,
+        )
+        mock_runtime.stop_container.return_value = RuntimeActionResult(
+            container_id=CONTAINER_ID,
+            container_state="running",
+            success=False,
+            message="engine refused stop",
+        )
+        mock_topology.release_workspace_ip_lease.return_value = True
+
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        out = svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
+
+        assert out.success is False
+        assert out.rollback_attempted is True
+        assert out.rollback_succeeded is False
+        assert out.rollback_issues
+        assert any("rollback:stop_incomplete" in x for x in (out.rollback_issues or []))
+        assert mock_runtime.stop_container.call_count >= 2

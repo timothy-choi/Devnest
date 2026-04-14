@@ -151,6 +151,59 @@ def test_stop_workspace_runtime_happy_path_integration(
         _remove_container(orchestrator_docker_client, None, name=container_name)
 
 
+def test_stop_workspace_runtime_with_none_container_id_uses_name_fallback(
+    db_session: Session,
+    orchestrator_docker_client,
+    orchestrator_integration_image: str,
+    runtime_adapter_integration: DockerRuntimeAdapter,
+    topology_adapter_integration: DbTopologyAdapter,
+    tmp_path,
+) -> None:
+    """Authoritative path: ``container_id=None`` resolves the deterministic engine name (persisted-ID parity)."""
+    tid = _seed_topology(
+        db_session,
+        spec={
+            "cidr": "10.99.89.0/24",
+            "gateway_ip": "10.99.89.1",
+            "bridge_name": "br-orch-stop-noncid",
+        },
+    )
+    node_id = "node-orch-stop-noncid"
+    ws_num = 8900 + (uuid.uuid4().int % 1000)
+    workspace_id = str(ws_num)
+    container_name = f"devnest-ws-{workspace_id}"
+    ws_int = int(workspace_id)
+
+    probe = DefaultProbeRunner(runtime=runtime_adapter_integration, topology=topology_adapter_integration)
+    ws_root = tmp_path / "orch-stop-noncid"
+    ws_root.mkdir(parents=True, exist_ok=True)
+
+    svc = DefaultOrchestratorService(
+        runtime_adapter_integration,
+        topology_adapter_integration,
+        probe,
+        topology_id=tid,
+        node_id=node_id,
+        workspace_projects_base=str(ws_root),
+        workspace_image=orchestrator_integration_image,
+    )
+
+    try:
+        with patch(
+            "app.libs.probes.probe_runner._probe_create_connection",
+            return_value=_FakeSock(),
+        ):
+            up = svc.bring_up_workspace_runtime(workspace_id=workspace_id)
+        assert up.success is True
+        stop_out = svc.stop_workspace_runtime(workspace_id=workspace_id, container_id=None)
+        assert stop_out.success is True
+        att = _fetch_attachment(db_session, topology_id=tid, node_id=node_id, workspace_id=ws_int)
+        assert att is not None
+        assert att.status == TopologyAttachmentStatus.DETACHED
+    finally:
+        _remove_container(orchestrator_docker_client, None, name=container_name)
+
+
 def test_stop_workspace_runtime_idempotent_second_call_no_crash(
     db_session: Session,
     orchestrator_docker_client,

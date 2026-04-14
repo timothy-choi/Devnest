@@ -379,6 +379,56 @@ def _apply_runtime_bringup_like(
     session.add(rt)
 
 
+def _sync_runtime_after_failed_bringup(session: Session, workspace_id: int, result: WorkspaceBringUpResult) -> None:
+    """Align ``WorkspaceRuntime`` with post-rollback reality after a failed bring-up result."""
+    if not result.rollback_attempted:
+        return
+    rt = session.exec(
+        select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
+    ).first()
+    if rt is None:
+        return
+    ts = _now()
+    if result.rollback_succeeded:
+        if result.container_id is not None:
+            rt.container_id = result.container_id
+        if result.container_state is not None:
+            rt.container_state = result.container_state
+        rt.internal_endpoint = result.internal_endpoint
+        rt.reserved_cpu = 0.0
+        rt.reserved_memory_mb = 0
+        rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
+    else:
+        rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
+    rt.updated_at = ts
+    session.add(rt)
+
+
+def _sync_runtime_after_bringup_exception(session: Session, workspace_id: int, exc: WorkspaceBringUpError) -> None:
+    """Persist rollback outcome when bring-up raised after compensating stop was attempted."""
+    if not exc.rollback_attempted:
+        return
+    rt = session.exec(
+        select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
+    ).first()
+    if rt is None:
+        return
+    ts = _now()
+    if exc.rollback_succeeded:
+        if exc.rollback_container_id is not None:
+            rt.container_id = exc.rollback_container_id
+        if exc.rollback_container_state is not None:
+            rt.container_state = exc.rollback_container_state
+        rt.internal_endpoint = None
+        rt.reserved_cpu = 0.0
+        rt.reserved_memory_mb = 0
+        rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
+    else:
+        rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
+    rt.updated_at = ts
+    session.add(rt)
+
+
 def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceStopResult) -> None:
     """Update runtime row after stop: container id/state if known; health unknown."""
     rt = _get_or_create_runtime(session, workspace_id)
@@ -684,7 +734,10 @@ def _finalize_bringup_result(
         )
         return
 
-    msg = _format_issues(result.issues) or "Bring-up completed without success"
+    _sync_runtime_after_failed_bringup(session, wid, result)
+    extra_rb = _format_issues(result.rollback_issues)
+    base_msg = _format_issues(result.issues) or "Bring-up completed without success"
+    msg = f"{base_msg}; rollback_failed: {extra_rb}" if (result.rollback_succeeded is False and extra_rb) else base_msg
     _resolve_orchestrator_result_failure(
         session,
         ws,
@@ -725,11 +778,15 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
             correlation_id=job.correlation_id,
             metadata={"job_type": job.job_type, "new_status": WorkspaceStatus.STOPPED.value},
         )
+        runtime_secs = 0
+        if ws.last_started is not None:
+            runtime_secs = max(0, int((_now() - ws.last_started).total_seconds()))
         record_usage(
             session,
             workspace_id=wid,
             owner_user_id=int(ws.owner_user_id),
             event_type=UsageEventType.WORKSPACE_STOPPED.value,
+            quantity=runtime_secs,
             job_id=job.workspace_job_id,
             correlation_id=job.correlation_id,
         )
@@ -1670,6 +1727,8 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
     try:
         _execute_job_body(session, orchestrator, ws, job)
     except _ORCHESTRATOR_EXCEPTIONS as e:
+        if isinstance(e, WorkspaceBringUpError) and e.rollback_attempted:
+            _sync_runtime_after_bringup_exception(session, wid, e)
         logger.warning(
             "workspace_job_orchestrator_exception",
             extra={
@@ -1677,9 +1736,15 @@ def _process_claimed_running_job(session: Session, orchestrator: OrchestratorSer
                 "workspace_job_id": jid,
                 "job_type": jt,
                 "error": str(e),
+                "bringup_rollback_attempted": getattr(e, "rollback_attempted", False),
+                "bringup_rollback_succeeded": getattr(e, "rollback_succeeded", None),
             },
         )
         msg = str(e)
+        if isinstance(e, WorkspaceBringUpError) and e.rollback_succeeded is False:
+            rb = _format_issues(e.rollback_issues)
+            if rb:
+                msg = f"{msg}; rollback_failed: {rb}"
         stage = (
             FailureStage.STORAGE
             if jt
