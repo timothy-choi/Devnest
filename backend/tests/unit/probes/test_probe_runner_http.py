@@ -247,6 +247,47 @@ class TestCheckWorkspaceHealthHttpIntegration:
         assert result.healthy is True
         assert result.service_healthy is True
 
+    def test_http_uses_execution_host_curl_when_reachability_runner_set(self):
+        """EC2/SSH/SSM: HTTP readiness must not use urllib from the control plane."""
+        recorded: list[list[str]] = []
+
+        class _RemoteRunner:
+            def run(self, cmd: list[str]) -> str:
+                recorded.append(list(cmd))
+                return ""
+
+        runner = DefaultProbeRunner(
+            runtime=MagicMock(),
+            topology=MagicMock(),
+            service_reachability_runner=_RemoteRunner(),
+        )
+        runner.check_container_running = MagicMock(
+            return_value=MagicMock(healthy=True, container_state="running", issues=()),
+        )
+        runner.check_topology_state = MagicMock(
+            return_value=MagicMock(
+                healthy=True,
+                workspace_ip="10.0.0.5",
+                internal_endpoint="10.0.0.5:8080",
+                workspace_id=1,
+                issues=(),
+            ),
+        )
+        settings = MagicMock()
+        settings.devnest_workspace_http_probe_enabled = True
+        settings.devnest_probe_assume_colocated_engine = True
+        with patch("app.libs.common.config.get_settings", return_value=settings):
+            with patch("app.libs.probes.probe_runner._probe_urlopen") as uo:
+                result = runner.check_workspace_health(
+                    workspace_id="1",
+                    topology_id="1",
+                    node_id="node-1",
+                    container_id="ctr-abc",
+                )
+        assert result.healthy is True
+        uo.assert_not_called()
+        assert any("curl" in c for c in recorded), recorded
+
 
 # ---------------------------------------------------------------------------
 # ProbeRunner ABC: default check_service_http is a pass-through

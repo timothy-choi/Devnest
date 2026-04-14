@@ -11,6 +11,23 @@
 
 ---
 
+## Deployment profiles
+
+These are **intended shapes**, not separate products. Pick the combination that matches where Docker and the topology layer run versus where Postgres/Redis and the API live.
+
+| Profile | Workspace Docker + Linux bridge / topology | API / worker | Backing services |
+|--------|---------------------------------------------|--------------|------------------|
+| **Local Docker (development)** | Same host as API; `local_docker` execution node | Same process or local worker | Local Postgres/Redis or Docker Compose |
+| **EC2 / VM execution** | One or more **instances** run Docker + `DbTopologyAdapter` Linux wiring (bridge/veth on the instance) | Control plane can be separate; workers must use `ssh_docker` or `ssm_docker` so runtime and `topology_command_runner` target the instance | RDS/ElastiCache (or self-managed) Postgres/Redis; object storage for snapshots (e.g. S3) |
+| **Cloud-backed data plane** | Unchanged vs EC2 profile — still **node-local** topology | Same | Prefer managed Postgres/Redis and S3-compatible snapshot storage instead of colocated containers |
+| **Future: ECS task–style runtimes** | **Not required** for the EC2 profile. Task ENI / Service Connect models differ from host bridge + netns; migrating would mean a new runtime/topology binding, not a mandate to drop the current adapter today. | TBD | Same managed-store direction |
+
+**Probes:** For EC2/SSH/SSM nodes, `NodeExecutionBundle.service_reachability_runner` runs TCP (`nc`) and HTTP (`curl`) **on the execution host**, so readiness matches real reachability. Set `DEVNEST_PROBE_ASSUME_COLOCATED_ENGINE=false` on any control-plane host that builds an orchestrator **without** that runner (so misconfiguration fails closed). Local dev keeps the default `true`.
+
+**Failed bring-up:** The orchestrator performs a **compensating rollback** (detach, stop container, release IP lease) when bring-up raises or when the health probe fails, so partial containers and leases are not left behind. `RECONCILE_RUNTIME` for workspaces in `ERROR` also stops the engine and releases the lease before gateway orphan cleanup.
+
+---
+
 ## Production Deployment Checklist
 
 ### 1. Environment Variables
@@ -87,6 +104,9 @@ DEVNEST_WORKSPACE_IMAGE=codercom/code-server:latest
 # After TCP connect on the workspace IDE port, perform HTTP GET to confirm the IDE is serving (code-server readiness).
 # Leave true in production. Integration/system tests disable this when workspace IPs are not routable from the API host.
 DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED=true
+# When false, TCP probes from this process require service_reachability_runner (execution node). Use on API-only hosts.
+# Default true for local/dev and workers that are co-located with Docker.
+DEVNEST_PROBE_ASSUME_COLOCATED_ENGINE=true
 
 # SSE: max latency for cross-worker event delivery (DB poll fallback when not on same gunicorn worker)
 DEVNEST_SSE_POLL_INTERVAL_SECONDS=2

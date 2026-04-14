@@ -24,10 +24,11 @@ from app.libs.topology.errors import (
     WorkspaceIPAllocationError,
 )
 from app.libs.topology.interfaces import TopologyAdapter
-from app.libs.topology.models.enums import TopologyRuntimeStatus
+from app.libs.topology.models.enums import TopologyAttachmentStatus, TopologyRuntimeStatus
 from app.libs.topology.results import (
     AllocateWorkspaceIPResult,
     AttachWorkspaceResult,
+    DetachWorkspaceResult,
     EnsureNodeTopologyResult,
 )
 from app.services.orchestrator_service import DefaultOrchestratorService
@@ -403,6 +404,20 @@ class TestBringUpProbeUnhealthy:
             internal_endpoint=INTERNAL_ENDPOINT,
             issues=(issue,),
         )
+        mock_topology.detach_workspace.return_value = DetachWorkspaceResult(
+            detached=True,
+            status=TopologyAttachmentStatus.DETACHED,
+            workspace_id=int(WORKSPACE_ID),
+            workspace_ip=WORKSPACE_IP,
+            released_ip=False,
+        )
+        mock_runtime.stop_container.return_value = RuntimeActionResult(
+            container_id=CONTAINER_ID,
+            container_state="exited",
+            success=True,
+            message=None,
+        )
+        mock_topology.release_workspace_ip_lease.return_value = True
 
         svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
         out = svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
@@ -413,3 +428,10 @@ class TestBringUpProbeUnhealthy:
         assert out.container_id == CONTAINER_ID
         assert out.netns_ref == NETNS_REF
         mock_probe.check_workspace_health.assert_called_once()
+        mock_topology.detach_workspace.assert_called_once()
+        mock_runtime.stop_container.assert_called_once_with(container_id=CONTAINER_ID)
+        mock_topology.release_workspace_ip_lease.assert_called_once_with(
+            topology_id=TOPOLOGY_ID,
+            node_id=NODE_ID,
+            workspace_id=int(WORKSPACE_ID),
+        )

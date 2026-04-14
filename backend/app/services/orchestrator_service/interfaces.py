@@ -41,11 +41,15 @@ class OrchestratorService(ABC):
         workspace_id: str,
         container_id: str | None = None,
         requested_by: str | None = None,
+        release_ip_lease: bool = False,
     ) -> WorkspaceStopResult:
         """Detach topology and stop the workspace container.
 
         ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
         when available. Falls back to deterministic name derivation when ``None``.
+
+        When ``release_ip_lease`` is true, an active DB IP lease for this workspace is released
+        after detach/stop (failed bring-up / ERROR reconcile); idempotent when no lease exists.
         """
 
     @abstractmethod

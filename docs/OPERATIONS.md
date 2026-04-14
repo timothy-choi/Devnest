@@ -74,6 +74,7 @@ Key metrics to alert on:
 | Metric | Alert condition |
 |---|---|
 | `workspace_jobs_total{status="error"}` rate | High error rate on workspace jobs |
+| `devnest_orchestrator_bringup_rollback_total` rate | Spikes in failed bring-ups (probe or exception path); correlate with `orchestrator.bringup.rollback` logs |
 | `workspace_reconcile_errors_total` rate | Sustained reconcile failures |
 | `http_request_duration_seconds{quantile="0.99"}` | P99 latency above threshold |
 | `rate_limit_exceeded_total` | Spike in rate-limit rejections |
@@ -89,6 +90,21 @@ All services log in structured JSON to stdout. Fields of interest:
 | `workspace_id` | UUID | Per-workspace trace |
 | `job_id` | UUID | Per-job trace |
 | `error` | exception message | Error detail |
+| `devnest_event` | `orchestrator.bringup.rollback` | Compensating cleanup after failed bring-up |
+
+---
+
+## Workspace bring-up and probes (EC2 / VM nodes)
+
+- **Rollback:** Failed bring-up emits `orchestrator.bringup.rollback` and increments `devnest_orchestrator_bringup_rollback_total`. The worker still records the job outcome from `WorkspaceBringUpResult`; the orchestrator is responsible for engine + topology lease cleanup.
+- **Probes:** SSH/SSM execution bundles set `service_reachability_runner` so TCP and HTTP readiness run on the **workspace host** (`nc` and `curl`). Do not rely on the API process opening TCP to workspace overlay IPs unless that host is co-located (`DEVNEST_PROBE_ASSUME_COLOCATED_ENGINE=true`, the default for local dev).
+- **Reconcile (`ERROR`):** Engine stop + IP lease release runs before gateway orphan deletion so `ERROR` does not imply leaked containers or addresses on the node.
+
+---
+
+## CI and test timeouts
+
+Backend `pytest.ini` sets a default **300s** per-test timeout when `pytest-timeout` is installed (declared in `backend/requirements.txt`). Hanging tests fail fast in CI and locally.
 
 ---
 

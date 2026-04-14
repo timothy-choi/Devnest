@@ -421,6 +421,26 @@ class DefaultProbeRunner(ProbeRunner):
                 ),
             )
 
+        if self._service_reachability_runner is None:
+            from app.libs.common.config import get_settings  # noqa: PLC0415
+
+            if not get_settings().devnest_probe_assume_colocated_engine:
+                return ServiceProbeResult(
+                    healthy=False,
+                    workspace_ip=ip,
+                    port=port,
+                    latency_ms=None,
+                    issues=_service_issue(
+                        code=ProbeIssueCode.SERVICE_CONNECT_ERROR,
+                        message=(
+                            "TCP probe from this process is disabled "
+                            "(devnest_probe_assume_colocated_engine=false); "
+                            "use execution_node SSH/SSM so service_reachability_runner runs checks "
+                            "on the workspace host, or enable colocated mode for local/dev."
+                        ),
+                    ),
+                )
+
         if self._service_reachability_runner is not None:
             return self._check_service_reachable_via_runner(
                 workspace_ip=ip,
@@ -503,6 +523,58 @@ class DefaultProbeRunner(ProbeRunner):
                     sock.close()
                 except OSError:
                     pass
+
+    def _check_service_http_via_runner(
+        self,
+        *,
+        workspace_ip: str,
+        port: int,
+        timeout_seconds: float,
+    ) -> ServiceProbeResult:
+        """HTTP GET from the execution host (same runner as TCP ``nc``); requires ``curl`` on the node."""
+        ip = (workspace_ip or "").strip()
+        try:
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip or None,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_HTTP_NOT_READY,
+                    message=(
+                        "remote HTTP probe requires IPv4 workspace_ip "
+                        f"(got {workspace_ip!r}); extend probe for IPv6 or use local HTTP check"
+                    ),
+                ),
+            )
+        w = max(1, min(60, int(math.ceil(timeout_seconds))))
+        runner = self._service_reachability_runner
+        assert runner is not None
+        url = f"http://{ip}:{port}/"
+        t0 = time.perf_counter()
+        try:
+            runner.run(["timeout", str(w), "curl", "-sf", "--max-time", str(w), url])
+        except RuntimeError as e:
+            return ServiceProbeResult(
+                healthy=False,
+                workspace_ip=ip,
+                port=port,
+                latency_ms=None,
+                issues=_service_issue(
+                    code=ProbeIssueCode.SERVICE_HTTP_NOT_READY,
+                    message=f"remote curl HTTP probe failed for {url!r}: {e}",
+                ),
+            )
+        t1 = time.perf_counter()
+        return ServiceProbeResult(
+            healthy=True,
+            workspace_ip=ip,
+            port=port,
+            latency_ms=(t1 - t0) * 1000.0,
+            issues=(),
+        )
 
     def check_service_http(
         self,
@@ -587,11 +659,18 @@ class DefaultProbeRunner(ProbeRunner):
                 from app.libs.common.config import get_settings  # noqa: PLC0415
 
                 if get_settings().devnest_workspace_http_probe_enabled:
-                    svc_http = self.check_service_http(
-                        workspace_ip=ws_ip,
-                        port=expected_port,
-                        timeout_seconds=timeout_seconds,
-                    )
+                    if self._service_reachability_runner is not None:
+                        svc_http = self._check_service_http_via_runner(
+                            workspace_ip=ws_ip,
+                            port=expected_port,
+                            timeout_seconds=timeout_seconds,
+                        )
+                    else:
+                        svc_http = self.check_service_http(
+                            workspace_ip=ws_ip,
+                            port=expected_port,
+                            timeout_seconds=timeout_seconds,
+                        )
                     service_healthy = svc_http.healthy
                     service_issues = (*svc.issues, *svc_http.issues)
                 else:

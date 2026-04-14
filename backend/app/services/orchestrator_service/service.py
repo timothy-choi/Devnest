@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.probes.interfaces import ProbeRunner
 from app.libs.runtime.errors import RuntimeAdapterError
@@ -128,12 +129,16 @@ def _stop_workspace_success_roll_up(
     ``detach_workspace`` returns ``detached=False`` for idempotent no-ops (no row or already
     ``DETACHED``) without appending issues. A real detach problem adds ``topology:detach_failed:``
     and sets ``topology_detached=False``.
+
+    IP lease release failures add ``topology:ip_release_failed:`` and fail the roll-up when present.
     """
     detach_explicit_failure = topology_detached is False and any(
         str(i).strip().startswith("topology:detach_failed:")
         for i in issues
     )
     if detach_explicit_failure:
+        return False
+    if any(str(i).strip().startswith("topology:ip_release_failed:") for i in issues):
         return False
     return bool(stop_success)
 
@@ -399,6 +404,41 @@ class DefaultOrchestratorService(OrchestratorService):
             issues=_issues_or_none(issue_msgs),
         )
 
+    def _bring_up_compensating_rollback(
+        self,
+        ctx: _BringUpContext,
+        running: EnsureRunningRuntimeResult | None,
+        *,
+        reason: str,
+    ) -> None:
+        """Best-effort: detach, stop engine, release IP lease (idempotent). Never raises."""
+        log_event(
+            logger,
+            LogEvent.ORCHESTRATOR_BRINGUP_ROLLBACK,
+            level=logging.WARNING,
+            workspace_id=ctx.wid,
+            reason=reason[:200],
+            topology_id=self._topology_id,
+            node_id=self._node_id,
+        )
+        metric_reason = "probe_unhealthy" if reason == "probe_unhealthy" else "exception"
+        devnest_metrics.record_bringup_rollback(reason=metric_reason)
+        cid = (running.container_id if running is not None else None) or None
+        if cid is not None:
+            cid = str(cid).strip() or None
+        try:
+            self.stop_workspace_runtime(
+                workspace_id=ctx.wid,
+                container_id=cid,
+                requested_by=None,
+                release_ip_lease=True,
+            )
+        except WorkspaceStopError as e:
+            logger.warning(
+                "orchestrator_bringup_rollback_stop_failed",
+                extra={"workspace_id": ctx.wid, "error": str(e)[:500]},
+            )
+
     def bring_up_workspace_runtime(
         self,
         *,
@@ -429,6 +469,7 @@ class DefaultOrchestratorService(OrchestratorService):
             cpu_limit_cores=cpu_limit_cores,
             memory_limit_mib=memory_limit_mib,
         )
+        running: EnsureRunningRuntimeResult | None = None
         try:
             running = self._bring_up_start_container(
                 ctx,
@@ -450,6 +491,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 workspace_id=ctx.wid,
                 error=str(e)[:500],
             )
+            self._bring_up_compensating_rollback(ctx, running, reason="exception")
             raise
         if result.success:
             log_event(
@@ -468,6 +510,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 probe_healthy=result.probe_healthy,
                 issues=(result.issues or [])[:5],
             )
+            self._bring_up_compensating_rollback(ctx, running, reason="probe_unhealthy")
         return result
 
     def _stop_load_inspection(
@@ -532,12 +575,15 @@ class DefaultOrchestratorService(OrchestratorService):
         workspace_id: str,
         container_id: str | None = None,
         requested_by: str | None = None,
+        release_ip_lease: bool = False,
     ) -> WorkspaceStopResult:
         """
         Detach topology (best-effort), stop container (best-effort).
 
         ``container_id`` should be the persisted engine ID from ``WorkspaceRuntime.container_id``
         when available. Falls back to deterministic name derivation when ``None``.
+
+        When ``release_ip_lease`` is true, releases the topology IP row after detach/stop (idempotent).
 
         Returns :class:`WorkspaceStopResult` for the worker to persist (e.g. cleared or stopped runtime).
         """
@@ -550,13 +596,28 @@ class DefaultOrchestratorService(OrchestratorService):
         container_ref = (container_id or "").strip() or _sanitize_container_name(wid)
         logger.info(
             "orchestrator_stop_start",
-            extra={"workspace_id": wid, "topology_id": self._topology_id, "node_id": self._node_id},
+            extra={
+                "workspace_id": wid,
+                "topology_id": self._topology_id,
+                "node_id": self._node_id,
+                "release_ip_lease": release_ip_lease,
+            },
         )
 
         issues: list[str] = []
         ws_int, container_id, container_state_before = self._stop_load_inspection(wid, container_ref)
         topology_detached = self._stop_detach_topology_best_effort(ws_int, issues)
         stop_success, stopped_state = self._stop_container_best_effort(container_id, issues)
+
+        if release_ip_lease:
+            try:
+                self._topology_service.release_workspace_ip_lease(
+                    topology_id=self._topology_id,
+                    node_id=self._node_id,
+                    workspace_id=ws_int,
+                )
+            except TopologyError as e:
+                issues.append(f"topology:ip_release_failed:{e}")
 
         # TODO: persist runtime stop outcome (container_state, timestamps) to Workspace_runtime.
 

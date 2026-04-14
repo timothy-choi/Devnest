@@ -8,7 +8,8 @@ disabled via ``apply_linux_bridge=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_B
 ``apply_linux_attachment=False`` or env ``DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT=1``.
 
 ``detach_workspace`` removes the host veth leg when Linux attachment is enabled (same flag/env);
-otherwise it updates attachment DB state only. IP leases are not released (V1).
+otherwise it updates attachment DB state only. IP leases are not released on detach (V1);
+:meth:`release_workspace_ip_lease` releases the DB lease explicitly (failed bring-up / reconcile).
 
 ``check_topology`` / ``check_attachment`` append ``linux: …`` issues when the corresponding
 ``apply_linux_*`` flag is enabled (see env ``DEVNEST_TOPOLOGY_SKIP_LINUX_*``); otherwise they
@@ -1107,6 +1108,32 @@ class DbTopologyAdapter(TopologyAdapter):
             workspace_ip=prev_ip,
             released_ip=False,
         )
+
+    def release_workspace_ip_lease(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> bool:
+        node_id = node_id.strip()[:128]
+        stmt = select(IpAllocation).where(
+            IpAllocation.topology_id == topology_id,
+            IpAllocation.node_id == node_id,
+            IpAllocation.workspace_id == workspace_id,
+            IpAllocation.released_at.is_(None),  # type: ignore[union-attr]
+        )
+        row = self._session.exec(stmt).first()
+        if row is None:
+            return False
+        row.released_at = datetime.now(timezone.utc)
+        self._session.add(row)
+        try:
+            self._session.commit()
+        except Exception as e:
+            self._session.rollback()
+            raise WorkspaceIPAllocationError(f"failed to release workspace IP lease: {e}") from e
+        return True
 
     def delete_topology(self, *, topology_id: int, node_id: str) -> None:
         if not node_id or not node_id.strip():

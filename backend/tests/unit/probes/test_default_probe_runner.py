@@ -342,6 +342,23 @@ class TestCheckServiceReachable:
         assert _issue_codes(out) == [ProbeIssueCode.SERVICE_CONNECT_ERROR.value]
 
 
+class TestCheckServiceReachableNonColocated:
+    def test_local_tcp_disabled_without_colocated_assumption(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+    ) -> None:
+        runner = DefaultProbeRunner(runtime=mock_runtime, topology=mock_topology)
+        with patch("app.libs.common.config.get_settings") as gs:
+            m = MagicMock()
+            m.devnest_probe_assume_colocated_engine = False
+            gs.return_value = m
+            out = runner.check_service_reachable(workspace_ip="10.0.0.1", port=8080)
+        assert not out.healthy
+        assert _issue_codes(out) == [ProbeIssueCode.SERVICE_CONNECT_ERROR.value]
+        assert "colocated" in out.issues[0].message.lower()
+
+
 class TestCheckWorkspaceHealth:
     def _healthy_container(self, mock_runtime: MagicMock) -> None:
         mock_runtime.inspect_container.return_value = ContainerInspectionResult(
