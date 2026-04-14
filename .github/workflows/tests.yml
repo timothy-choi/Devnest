@@ -245,7 +245,7 @@ jobs:
         run: python scripts/verify_pytest_timeout.py
 
       - name: Install coverage tools
-        run: pip install coverage pytest-cov
+        run: pip install coverage pytest-cov pytest-timeout
 
       - name: Run unit tests
         env:
@@ -312,7 +312,7 @@ jobs:
         run: python scripts/verify_pytest_timeout.py
 
       - name: Install coverage tools
-        run: pip install coverage pytest-cov
+        run: pip install coverage pytest-cov pytest-timeout
 
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -404,7 +404,7 @@ jobs:
         run: python scripts/verify_pytest_timeout.py
 
       - name: Install coverage tools
-        run: pip install coverage pytest-cov
+        run: pip install coverage pytest-cov pytest-timeout
 
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client

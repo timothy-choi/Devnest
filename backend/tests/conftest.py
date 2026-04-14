@@ -22,10 +22,16 @@ get_settings.cache_clear()
 reset_engine()
 
 
+def _pytest_timeout_active(config) -> bool:  # noqa: ANN001
+    """pytest-timeout registers as plugin name ``timeout`` (see ``pytest --trace-config``)."""
+    pm = config.pluginmanager
+    return bool(pm.has_plugin("timeout") or pm.has_plugin("pytest_timeout"))
+
+
 def pytest_configure(config):  # noqa: ANN001
     """Fail fast when CI requires wall-clock timeouts but pytest-timeout is missing."""
     if os.environ.get("DEVNEST_ENFORCE_TEST_TIMEOUTS", "").strip().lower() in ("1", "true", "yes", "on"):
-        if not config.pluginmanager.has_plugin("pytest_timeout"):
+        if not _pytest_timeout_active(config):
             raise RuntimeError(
                 "DEVNEST_ENFORCE_TEST_TIMEOUTS is set but pytest-timeout is not loaded. "
                 "Install backend/requirements.txt (includes pytest-timeout) before running pytest."
