@@ -1445,7 +1445,7 @@ def _execute_snapshot_restore_job(
 
 def _execute_job_body(
     session: Session,
-    orchestrator: OrchestratorService,
+    orchestrator: OrchestratorService | None,
     ws: Workspace,
     job: WorkspaceJob,
 ) -> None:
@@ -1456,6 +1456,12 @@ def _execute_job_body(
     requested_by = str(job.requested_by_user_id)
     jt = job.job_type
     cfg_v = int(job.requested_config_version)
+
+    if jt == WorkspaceJobType.REPO_IMPORT.value:
+        _execute_repo_import_job(session, ws, job)
+        return
+
+    assert orchestrator is not None
 
     if jt in (WorkspaceJobType.CREATE.value, WorkspaceJobType.START.value):
         # Load workspace config for resource limits and feature flags.
@@ -1535,10 +1541,6 @@ def _execute_job_body(
 
     if jt == WorkspaceJobType.SNAPSHOT_RESTORE.value:
         _execute_snapshot_restore_job(session, orchestrator, ws, job)
-        return
-
-    if jt == WorkspaceJobType.REPO_IMPORT.value:
-        _execute_repo_import_job(session, ws, job)
         return
 
     raise UnsupportedWorkspaceJobTypeError(f"Unsupported WorkspaceJob.type={jt!r}")
@@ -1701,7 +1703,11 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
             )
 
 
-def _process_claimed_running_job(session: Session, orchestrator: OrchestratorService, job: WorkspaceJob) -> None:
+def _process_claimed_running_job(
+    session: Session,
+    orchestrator: OrchestratorService | None,
+    job: WorkspaceJob,
+) -> None:
     """
     Execute a job row that is already ``RUNNING`` (claimed via ``FOR UPDATE SKIP LOCKED``).
 
@@ -1854,7 +1860,15 @@ def _process_next_queued_job_return_id(
             )
             return jid
         try:
-            orchestrator = get_orchestrator(session, ws, job)
+            if job.job_type == WorkspaceJobType.REPO_IMPORT.value:
+                from app.services.placement_service.orchestrator_binding import (
+                    resolve_orchestrator_placement,
+                )
+
+                resolve_orchestrator_placement(session, ws, job)
+                orchestrator = None
+            else:
+                orchestrator = get_orchestrator(session, ws, job)
         except PlacementError as e:
             if isinstance(e, NoSchedulableNodeError):
                 log_event(
@@ -2055,6 +2069,19 @@ def run_pending_jobs(
             raise
         finally:
             work.close()
+
+    cleanup_sess = sm()
+    try:
+        from app.services.cleanup_service import drain_pending_cleanup_tasks
+
+        drain_pending_cleanup_tasks(cleanup_sess, limit_workspaces=max(8, max(1, limit)))
+        cleanup_sess.commit()
+    except Exception:
+        cleanup_sess.rollback()
+        logger.warning("cleanup_drain_tick_failed", exc_info=True)
+    finally:
+        cleanup_sess.close()
+
     return WorkspaceJobWorkerTickResult(processed_count=processed, last_job_id=last_id)
 
 
@@ -2101,7 +2128,15 @@ def run_queued_workspace_job_by_id(
                 work.commit()
                 return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
             try:
-                orch = get_orchestrator(work, ws, job)
+                if job.job_type == WorkspaceJobType.REPO_IMPORT.value:
+                    from app.services.placement_service.orchestrator_binding import (
+                        resolve_orchestrator_placement,
+                    )
+
+                    resolve_orchestrator_placement(work, ws, job)
+                    orch = None
+                else:
+                    orch = get_orchestrator(work, ws, job)
             except PlacementError as e:
                 if isinstance(e, NoSchedulableNodeError):
                     log_event(

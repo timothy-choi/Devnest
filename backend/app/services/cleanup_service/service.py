@@ -10,6 +10,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.libs.observability import metrics as devnest_metrics
+from app.services.orchestrator_service.app_factory import build_default_orchestrator_for_session
 from app.services.orchestrator_service.interfaces import OrchestratorService
 from app.services.placement_service.runtime_policy import runtime_placement_row_complete
 from app.services.workspace_service.models import Workspace, WorkspaceCleanupTask, WorkspaceRuntime
@@ -160,3 +161,103 @@ def process_durable_cleanup_tasks_for_workspace(
             )
 
     return succeeded
+
+
+def _merge_cleanup_deferred_note(
+    tasks: list[WorkspaceCleanupTask],
+    *,
+    reason: str,
+    workspace_id: int,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Record why cleanup could not run (idempotent: skip if payload already matches)."""
+    extra = extra or {}
+    for task in tasks:
+        payload: dict[str, Any] = {}
+        if task.detail:
+            try:
+                payload = json.loads(task.detail)
+            except json.JSONDecodeError:
+                payload = {"previous_detail": (task.detail or "")[:512]}
+        if payload.get("deferred_reason") == reason and int(payload.get("deferred_workspace_id") or 0) == int(
+            workspace_id,
+        ):
+            continue
+        payload["deferred_reason"] = reason
+        payload["deferred_workspace_id"] = int(workspace_id)
+        payload.update(extra)
+        task.detail = json.dumps(payload, separators=(",", ":"))[:8192]
+        task.updated_at = _now()
+
+
+def drain_pending_cleanup_tasks(session: Session, *, limit_workspaces: int = 8) -> int:
+    """
+    Process pending durable cleanup for up to ``limit_workspaces`` distinct workspaces.
+
+    Runs on ordinary job-worker ticks as well as reconcile so cleanup debt is not tied to a single
+    control-plane path. When ``WorkspaceRuntime`` placement is incomplete, tasks keep ``PENDING`` and
+    receive a clear ``deferred_reason`` in ``detail`` (no fake success). Idempotent: succeeded tasks
+    are skipped by :func:`process_durable_cleanup_tasks_for_workspace`.
+    """
+    stmt = (
+        select(WorkspaceCleanupTask.workspace_id)
+        .where(WorkspaceCleanupTask.status == WorkspaceCleanupTaskStatus.PENDING.value)
+        .distinct()
+        .limit(max(1, int(limit_workspaces)))
+    )
+    raw_ids = session.exec(stmt).all()
+    workspace_ids: list[int] = []
+    for row in raw_ids:
+        workspace_ids.append(int(row[0]) if isinstance(row, tuple) else int(row))
+    total_succeeded = 0
+    for wid in workspace_ids:
+        ws = session.get(Workspace, wid)
+        if ws is None:
+            continue
+        tasks = list(
+            session.exec(
+                select(WorkspaceCleanupTask).where(
+                    WorkspaceCleanupTask.workspace_id == wid,
+                    WorkspaceCleanupTask.status == WorkspaceCleanupTaskStatus.PENDING.value,
+                ),
+            ).all(),
+        )
+        if not tasks:
+            continue
+        rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+        if not runtime_placement_row_complete(rt):
+            _merge_cleanup_deferred_note(
+                tasks,
+                reason="runtime_placement_incomplete",
+                workspace_id=wid,
+            )
+            session.add_all(tasks)
+            continue
+        assert rt is not None
+        try:
+            orch = build_default_orchestrator_for_session(
+                session,
+                execution_node_key=str(rt.node_id).strip(),
+                topology_id=int(rt.topology_id),  # type: ignore[arg-type]
+            )
+        except Exception as e:
+            logger.warning(
+                "cleanup_drain_orchestrator_binding_failed",
+                extra={"workspace_id": wid, "error": str(e)},
+                exc_info=True,
+            )
+            _merge_cleanup_deferred_note(
+                tasks,
+                reason="orchestrator_binding_failed",
+                workspace_id=wid,
+                extra={"error": str(e)[:500]},
+            )
+            session.add_all(tasks)
+            continue
+        total_succeeded += process_durable_cleanup_tasks_for_workspace(
+            session,
+            orch,
+            ws,
+            correlation_id="cleanup_drain",
+        )
+    return total_succeeded

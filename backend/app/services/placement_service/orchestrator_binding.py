@@ -8,7 +8,12 @@ bring-up. New placement for bring-up class jobs goes through :mod:`app.services.
 
 **Production:** placement is authoritative — :class:`~app.services.workspace_service.models.WorkspaceRuntime`
 must carry ``node_id`` and ``topology_id`` for every job that mutates or inspects runtime state,
-except ``CREATE`` (which schedules fresh) and ``START`` on a workspace with no runtime row yet(first start). Env-based ``DEVNEST_NODE_ID`` / ``DEVNEST_TOPOLOGY_ID`` fallback is **disabled**
+except ``CREATE`` (which schedules fresh) and ``START`` on a workspace with no runtime row yet (first start).
+``REPO_IMPORT`` also requires that persisted runtime (it runs git in the placed container via the node
+execution bundle; the worker resolves placement but does not build a full orchestrator for that job).
+New scheduling in staging/production requires ``ExecutionNode.default_topology_id``; env-based
+``DEVNEST_TOPOLOGY_ID`` is **not** used for new placement when strict mode is on. Legacy
+``DEVNEST_NODE_ID`` / ``DEVNEST_TOPOLOGY_ID`` fallback for *existing* incomplete rows is **disabled**
 unless ``DEVNEST_ENV=development`` and ``DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK=true``.
 
 """
@@ -49,7 +54,16 @@ def _schedule_workspace_placement(session: Session, workspace_id: int) -> tuple[
     if sch.execution_node is None:
         raise NoSchedulableNodeError(sch.message)
     node = sch.execution_node
-    topo = node.default_topology_id if node.default_topology_id is not None else _topology_id_from_env()
+    if placement_strict_enforced():
+        if node.default_topology_id is None:
+            raise InvalidPlacementParametersError(
+                "Strict production/staging placement requires execution_node.default_topology_id for new "
+                "workload placement; set it on the selected ExecutionNode (env-based DEVNEST_TOPOLOGY_ID "
+                "is not permitted for scheduling in this mode).",
+            )
+        topo = int(node.default_topology_id)
+    else:
+        topo = node.default_topology_id if node.default_topology_id is not None else _topology_id_from_env()
     return node.node_key, int(topo)
 
 
@@ -63,6 +77,7 @@ _JOBS_NEED_RUNTIME_PLACEMENT = frozenset(
         WorkspaceJobType.UPDATE.value,
         WorkspaceJobType.SNAPSHOT_CREATE.value,
         WorkspaceJobType.SNAPSHOT_RESTORE.value,
+        WorkspaceJobType.REPO_IMPORT.value,
     },
 )
 
@@ -78,7 +93,7 @@ def resolve_orchestrator_placement(
     - **CREATE** always calls the scheduler (new placement).
     - **START** reuses complete ``WorkspaceRuntime`` when present; otherwise schedules when there is
       no runtime row or (development only) an incomplete row may be replaced by a fresh schedule.
-    - **STOP / DELETE / RECONCILE / RESTART / UPDATE / snapshots** require complete runtime
+    - **STOP / DELETE / RECONCILE / RESTART / UPDATE / snapshots / REPO_IMPORT** require complete runtime
       placement in production; development may use env fallback when explicitly enabled.
     """
     wid = ws.workspace_id
