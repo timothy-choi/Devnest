@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
@@ -35,6 +36,26 @@ def _is_development_env() -> bool:
     return str(settings.devnest_env or "development").strip().lower() == "development"
 
 
+def _sync_topology_pk_sequence(session: Session) -> None:
+    """Advance PostgreSQL ``topology.topology_id`` sequence after explicit PK inserts.
+
+    Bootstrap inserts ``Topology(topology_id=DEVNEST_TOPOLOGY_ID)`` without bumping the
+    underlying sequence; the next INSERT that omits ``topology_id`` would still try ``1`` and
+    hit ``UniqueViolation``. SQLite tests skip this (no serial sequence).
+    """
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    session.execute(
+        text(
+            "SELECT setval("
+            "pg_get_serial_sequence('topology', 'topology_id'), "
+            "(SELECT COALESCE(MAX(topology_id), 1) FROM topology), "
+            "true)",
+        ),
+    )
+
+
 def ensure_topology_row_for_local_dev(session: Session, topology_id: int) -> None:
     """Ensure a ``Topology`` catalog row exists for ``topology_id`` in development.
 
@@ -44,20 +65,20 @@ def ensure_topology_row_for_local_dev(session: Session, topology_id: int) -> Non
     """
     if not _is_development_env():
         return
-    if session.get(Topology, topology_id) is not None:
-        return
-    now = datetime.now(timezone.utc)
-    session.add(
-        Topology(
-            topology_id=topology_id,
-            name=f"dev-local-topology-{topology_id}",
-            version="v1",
-            spec_json={},
-            created_at=now,
-            updated_at=now,
-        ),
-    )
-    session.flush()
+    if session.get(Topology, topology_id) is None:
+        now = datetime.now(timezone.utc)
+        session.add(
+            Topology(
+                topology_id=topology_id,
+                name=f"dev-local-topology-{topology_id}",
+                version="v1",
+                spec_json={},
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        session.flush()
+    _sync_topology_pk_sequence(session)
 
 
 def ensure_default_local_execution_node(session: Session) -> ExecutionNode:
