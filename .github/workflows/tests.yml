@@ -579,14 +579,12 @@ jobs:
   deploy-ec2-full-stack:
     name: Deploy full-stack to EC2
     needs: [linux-full-stack-integration]
-    if: >-
-      needs.linux-full-stack-integration.result == 'success' &&
-      secrets.EC2_HOST != '' &&
-      secrets.EC2_USER != '' &&
-      secrets.EC2_SSH_KEY != ''
+    # Job-level `if` cannot use `secrets` (GitHub limitation). Gate deploy/print on secrets per-step.
+    if: needs.linux-full-stack-integration.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to EC2
+        if: ${{ secrets.EC2_HOST != '' && secrets.EC2_USER != '' && secrets.EC2_SSH_KEY != '' }}
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -610,6 +608,7 @@ jobs:
             echo "Deployment complete."
 
       - name: Print DevNest URL
+        if: ${{ secrets.EC2_HOST != '' && secrets.EC2_USER != '' && secrets.EC2_SSH_KEY != '' }}
         run: |
           echo "DevNest (EC2) — open in browser (security group must allow ports 3000 and 8000):"
           echo "  UI:        http://${{ secrets.EC2_HOST }}:3000"
