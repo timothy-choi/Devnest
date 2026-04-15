@@ -234,10 +234,12 @@ def test_delete_topology_linux_failure_after_db_commit_runtime_stays_deleted(db_
 
 
 def test_delete_topology_preserves_ip_leases_and_does_not_touch_other_node(db_session: Session) -> None:
+    # No fixed topology spec CIDR: a single spec ``cidr`` applies to every node; the second
+    # ``ensure_node_topology`` would see the first node's runtime subnet as overlapping the spec.
     tid = _seed_topology(
         db_session,
         name="del-cross",
-        spec={"cidr": "10.88.85.0/24", "gateway_ip": "10.88.85.1"},
+        spec={},
     )
     adapter = DbTopologyAdapter(db_session)
     adapter.ensure_node_topology(topology_id=tid, node_id="n-a")

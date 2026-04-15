@@ -237,6 +237,52 @@ System tests are skipped in CI unless `DEVNEST_RUN_SYSTEM_TESTS=true` is set.
 
 ---
 
+## Core user flows — E2E / integration coverage
+
+This section maps **product-critical paths** to tests and CI tier. “E2E” here means **HTTP API → persisted jobs → worker/orchestrator outcome → DB state**, not browser automation.
+
+### Already well covered (merge-tier integration)
+
+| Flow | Where | Notes |
+|------|--------|--------|
+| Register + workspace create + job + RUNNING | `tests/integration/e2e/test_workspace_e2e.py` | Uses **real** `POST /auth/login` for the primary create flow; mocked orchestrator; `@pytest.mark.timeout(15)`. |
+| Stop / delete / attach / access / SSE polling | `tests/integration/e2e/test_workspace_e2e.py` | Attach asserts `runtime_ready` so “ready” is not only a status string. |
+| Workspace lifecycle (mock orchestrator) | `tests/integration/workspace/test_workspace_lifecycle_api.py` | Broad intent matrix. |
+| Repo import API + DB rows | `tests/integration/integrations/test_workspace_repos_api.py` | Uses login; proves 202 + `REPO_IMPORT` job (does not await clone completion). |
+| Snapshot HTTP + worker (service / DB) | `tests/integration/snapshots/test_snapshot_api_integration.py`, `test_snapshot_worker_integration.py` | List/create API; worker create+restore with mock orchestrator. |
+| Merge EC2 profile lifecycle (Docker present) | `tests/integration/workspace/merge_ec2/test_merge_ec2_profile_lifecycle.py` | create → RUNNING → stop → start → delete; **same** `node_id` / `topology_id` after stop/start (`db_session.expire_all()` after each internal job). |
+
+### New merge-tier proofs (`tests/integration/e2e/test_core_flows_e2e.py`)
+
+| Test | Tier | What it proves |
+|------|------|----------------|
+| `test_merge_tier_http_login_repo_import_enqueues_job` | **Merge** (`integration`, no `slow`) | Register + **`POST /auth/login`** + `POST .../import-repo` → `REPO_IMPORT` job row. |
+| `test_merge_tier_snapshot_create_restore_http_jobs` | **Merge** | Same login path; **HTTP** snapshot create + internal `process` + **HTTP** restore + `SNAPSHOT_RESTORE` success (mock export/import); `@pytest.mark.timeout(90)`. |
+| `test_merge_tier_create_failure_not_running_and_job_failed` | **Merge** | Failed bring-up → workspace **ERROR**, job **FAILED** after retries (zero backoff in-test); never RUNNING. |
+| `test_merge_tier_stop_failure_creates_durable_cleanup_debt` | **Merge** | Failed stop → **`WorkspaceCleanupTask`** `stop_incomplete` + workspace ERROR. |
+
+### Nightly / slow / system (heavier or real infra)
+
+| Flow | Where | Why not merge-default |
+|------|--------|------------------------|
+| Full EC2 profile E2E | `tests/integration/workspace/test_workspace_ec2_profile_e2e.py` | Marked **`slow`**; same lifecycle as merge EC2 with `_process_job(..., db_session)` so SQLAlchemy identity map does not lie about `STOPPED`. |
+| Real containers / gateway | `tests/system/` | Requires Docker + often `DEVNEST_RUN_SYSTEM_TESTS`; not in default CI. |
+| Deferred snapshot system notes | `tests/system/snapshots/test_snapshot_system_deferred.py` | Documents fuller RUNNING → snapshot → STOP → restore path for future system tier. |
+
+### Session / auth beyond MVP
+
+- **Refresh / logout**: covered at the route level in `tests/integration/auth/test_refresh_token_api.py` and `test_logout_api.py`; not duplicated in every workspace E2E file to keep runtime bounded.
+
+### Intentional remaining gaps
+
+| Gap | Reason |
+|-----|--------|
+| Real `git clone` completion in merge CI | Depends on network + GitHub; merge tier stops at **accepted job + DB row**; full clone belongs in nightly/system with hermetic git or a test double. |
+| Browser code-server UX | Out of scope for backend repo; merge tier uses **HTTP** readiness (`runtime_ready`, probes) and system tests for deeper runtime when enabled. |
+| Full “process restart” of API | Would require multi-process or k8s-style tests; persistence is proven via **DB + worker** and merge EC2 **stop/start** placement reuse. |
+
+---
+
 ## Known Limitations
 
 | Limitation | Notes |
