@@ -349,7 +349,7 @@ curl -fsS http://localhost:3000/
 | `EC2_SSH_KEY` | Private key PEM for that user (full key contents) |
 | `NGROK_AUTHTOKEN` | *(Optional)* Not wired in the workflow by default; use if you add a tunnel step for ephemeral preview hosts |
 
-If any of `EC2_HOST`, `EC2_USER`, or `EC2_SSH_KEY` is missing, the **Deploy to EC2** and **Print DevNest URL** steps are **skipped** (the job still runs after the full-stack smoke succeeds; GitHub does not allow `secrets` in job-level `if`, so gating is done per-step).
+If any of `EC2_HOST`, `EC2_USER`, or `EC2_SSH_KEY` is missing, the **Deploy to EC2** and **Print DevNest URL** steps are **skipped** (the job still runs after the full-stack smoke succeeds). GitHub does not allow the `secrets` context inside `if` expressions; the workflow maps secrets to job `env` and uses `env.*` in step `if` conditions instead.
 
 **EC2 instance expectations:** Docker and Docker Compose v2 installed; security group allows **TCP 3000** and **8000** (and **22** for SSH). The deploy script clones/updates **`https://github.com/timothy-choi/Devnest.git`** into **`~/Devnest`** on the instance.
 
