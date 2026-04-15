@@ -1,0 +1,45 @@
+import { WorkspaceCard } from "@/components/dashboard/workspace-card";
+import { Workspace } from "@/types/workspace";
+
+type WorkspaceGridProps = {
+  workspaces: Workspace[];
+  onStop: (id: string) => void;
+  onRestart: (id: string) => void;
+  onDelete: (id: string) => void;
+  onDownload: (id: string) => void;
+  onRunWorkflow: (id: string) => void;
+};
+
+export function WorkspaceGrid({
+  workspaces,
+  onStop,
+  onRestart,
+  onDelete,
+  onDownload,
+  onRunWorkflow,
+}: WorkspaceGridProps) {
+  if (workspaces.length === 0) {
+    return (
+      <div className="rounded-[28px] border border-dashed border-slate-300 bg-white/70 px-6 py-14 text-center shadow-[0_20px_50px_-40px_rgba(15,23,42,0.45)]">
+        <h2 className="text-xl font-semibold text-slate-900">No workspaces found</h2>
+        <p className="mt-2 text-sm text-slate-600">Try a different search or create a fresh workspace to populate the grid.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+      {workspaces.map((workspace) => (
+        <WorkspaceCard
+          key={workspace.id}
+          workspace={workspace}
+          onDelete={onDelete}
+          onDownload={onDownload}
+          onRestart={onRestart}
+          onRunWorkflow={onRunWorkflow}
+          onStop={onStop}
+        />
+      ))}
+    </div>
+  );
+}
