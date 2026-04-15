@@ -591,13 +591,28 @@ jobs:
       EC2_DEPLOY_USER: ${{ secrets.EC2_USER }}
       EC2_DEPLOY_KEY: ${{ secrets.EC2_SSH_KEY }}
     steps:
+      # Fails fast with a clearer message than ssh-action when SG/NACL block port 22.
+      - name: Preflight — TCP port 22 reachable
+        if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y netcat-openbsd
+          nc -zvw30 "$EC2_HOST" 22
+
+      # EC2_SSH_KEY must be the *private* key (PEM or OpenSSH: BEGIN … PRIVATE KEY … END).
+      # Not a .ppk (PuTTY); not the public key. Paste the full multiline key into the secret.
+      # If the key has a passphrase, add passphrase to appleboy/ssh-action (or use a key without one for deploy).
       - name: Deploy to EC2
         if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.2.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          timeout: 2m
+          command_timeout: 45m
           script_stop: true
           script: |
             set -euo pipefail
