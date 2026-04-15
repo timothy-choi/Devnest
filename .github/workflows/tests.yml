@@ -6,10 +6,12 @@ on:
       - "**"
     paths:
       - "backend/**"
+      - "frontend/**"
       - "devnest-gateway/**"
       - "traefik/**"
       - "docker-compose*.yml"
       - "docker-compose.system.yml"
+      - "docker-compose.integration.yml"
       - "backend/tests/system/**"
       - ".github/workflows/**"
   pull_request:
@@ -17,10 +19,12 @@ on:
       - "**"
     paths:
       - "backend/**"
+      - "frontend/**"
       - "devnest-gateway/**"
       - "traefik/**"
       - "docker-compose*.yml"
       - "docker-compose.system.yml"
+      - "docker-compose.integration.yml"
       - "backend/tests/system/**"
       - ".github/workflows/**"
 
@@ -62,6 +66,8 @@ jobs:
           filters: |
             backend:
               - 'backend/**'
+            frontend:
+              - 'frontend/**'
             gateway:
               - 'devnest-gateway/**'
               - 'traefik/**'
@@ -70,6 +76,8 @@ jobs:
               - 'backend/tests/system/gateway/**'
             tests_workflow:
               - '.github/workflows/**'
+              - 'docker-compose.integration.yml'
+              - 'frontend/Dockerfile.integration'
 
   gateway-tests:
     name: Gateway (data-plane)
@@ -176,10 +184,48 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.system.yml down -v
 
+  frontend-checks:
+    name: Frontend checks
+    needs: detect
+    if: |
+      needs.detect.outputs.frontend == 'true' ||
+      needs.detect.outputs.tests_workflow == 'true' ||
+      needs.detect.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint || true
+
+      - name: Type check frontend
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
   quality-checks:
     name: quality-checks
     needs: detect
-    if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.tests_workflow == 'true'
+    if: |
+      needs.detect.outputs.backend == 'true' ||
+      needs.detect.outputs.tests_workflow == 'true' ||
+      needs.detect.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     # Advisory only: lint/format/types/coverage do not block downstream test jobs.
     defaults:
@@ -463,3 +509,109 @@ jobs:
           name: coverage-system
           path: backend/coverage-system.xml
           if-no-files-found: error
+
+  # --- Full-stack Linux integration (after merge-tier tests) ---
+  # Brings up PostgreSQL + API + worker + frontend via docker-compose.integration.yml.
+  # Runner-local URLs are for logs only; persistent access requires EC2 deploy (see deploy-ec2-full-stack).
+
+  linux-full-stack-integration:
+    name: Linux full-stack (Docker Compose)
+    needs: [detect, unit-tests, integration-tests, system-tests, frontend-checks]
+    if: >-
+      always() &&
+      needs.unit-tests.result != 'failure' && needs.unit-tests.result != 'cancelled' &&
+      needs.integration-tests.result != 'failure' && needs.integration-tests.result != 'cancelled' &&
+      needs.system-tests.result != 'failure' && needs.system-tests.result != 'cancelled' &&
+      (needs.frontend-checks.result == 'success' || needs.frontend-checks.result == 'skipped') &&
+      needs.frontend-checks.result != 'failure' && needs.frontend-checks.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Start DevNest full-stack environment
+        run: docker compose -f docker-compose.integration.yml up -d --build
+
+      - name: Wait for backend readiness
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/health; then
+              echo "Backend is ready."
+              exit 0
+            fi
+            echo "Waiting for backend..."
+            sleep 5
+          done
+          echo "Backend failed to start."
+          docker compose -f docker-compose.integration.yml logs
+          exit 1
+
+      - name: Wait for frontend readiness
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:3000/; then
+              echo "Frontend is ready."
+              exit 0
+            fi
+            echo "Waiting for frontend..."
+            sleep 5
+          done
+          echo "Frontend failed to start."
+          docker compose -f docker-compose.integration.yml logs
+          exit 1
+
+      - name: Print runner-local stack URLs
+        run: |
+          echo "Full-stack smoke succeeded on the GitHub Actions runner (not reachable from the internet)."
+          echo "Frontend: http://localhost:3000"
+          echo "Backend API: http://localhost:8000"
+          echo "API docs: http://localhost:8000/docs"
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.integration.yml logs
+
+      - name: Stop full-stack environment
+        if: always()
+        run: docker compose -f docker-compose.integration.yml down -v
+
+  deploy-ec2-full-stack:
+    name: Deploy full-stack to EC2
+    needs: [linux-full-stack-integration]
+    if: >-
+      needs.linux-full-stack-integration.result == 'success' &&
+      secrets.EC2_HOST != '' &&
+      secrets.EC2_USER != '' &&
+      secrets.EC2_SSH_KEY != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            REPO_DIR="${HOME}/Devnest"
+            if [ ! -d "${REPO_DIR}/.git" ]; then
+              mkdir -p "$(dirname "${REPO_DIR}")"
+              git clone https://github.com/timothy-choi/Devnest.git "${REPO_DIR}"
+            fi
+            cd "${REPO_DIR}"
+            git fetch origin
+            git checkout main
+            git pull origin main
+            export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
+            docker compose -f docker-compose.integration.yml down || true
+            docker compose -f docker-compose.integration.yml up -d --build
+            echo "Deployment complete."
+
+      - name: Print DevNest URL
+        run: |
+          echo "DevNest (EC2) — open in browser (security group must allow ports 3000 and 8000):"
+          echo "  UI:        http://${{ secrets.EC2_HOST }}:3000"
+          echo "  API:       http://${{ secrets.EC2_HOST }}:8000"
+          echo "  API docs:  http://${{ secrets.EC2_HOST }}:8000/docs"
