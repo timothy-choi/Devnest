@@ -27,6 +27,7 @@ on:
       - "docker-compose.integration.yml"
       - "backend/tests/system/**"
       - ".github/workflows/**"
+  workflow_dispatch:
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
@@ -44,7 +45,10 @@ concurrency:
 # under .github/workflows/ runs both backend and gateway jobs.
 #
 # --- Nightly tier ---
-# See nightly.yml: full suite including heavy markers + topology_linux + workspace_image.
+# See nightly.yml: full suite including heavy markers + topology_linux + workspace_image,
+# frontend/quality/system-gateway jobs, Docker Compose full-stack smoke, and optional EC2 deploy.
+#
+# Manual run: Actions → Tests → Run workflow (workflow_dispatch).
 
 jobs:
   detect:
