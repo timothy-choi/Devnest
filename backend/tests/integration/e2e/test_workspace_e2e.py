@@ -5,7 +5,9 @@ All tests exercise the full HTTP path:
 
 No Docker required.  The orchestrator is replaced with a mock that returns realistic
 bring-up / stop / delete results.  The in-process worker is invoked synchronously via
-POST /internal/workspace-jobs/process.
+POST /internal/workspace-jobs/process.  Primary register→create flow uses **POST /auth/login**
+for the bearer token (see ``_register_and_login_token``); other tests may still use synthetic JWTs
+for speed when the auth path is not the subject under test.
 
 Each test is isolated (unique users + workspaces, DB cleaned between tests) and has
 a well-defined 15-second timeout via pytest-timeout marks.
@@ -69,6 +71,22 @@ def _register_and_token(client, *, username: str, email: str) -> tuple[int, str]
     assert r.status_code == status.HTTP_201_CREATED, r.text
     uid = r.json()["user_auth_id"]
     return uid, create_access_token(user_id=uid)
+
+
+def _register_and_login_token(client, *, username: str, email: str) -> tuple[int, str]:
+    """Register then obtain access token via POST /auth/login (real auth path, not token helpers)."""
+    r = client.post(
+        "/auth/register",
+        json={"username": username, "email": email, "password": "SecureE2EPass1!"},
+    )
+    assert r.status_code == status.HTTP_201_CREATED, r.text
+    uid = r.json()["user_auth_id"]
+    lr = client.post(
+        "/auth/login",
+        json={"username": username, "password": "SecureE2EPass1!"},
+    )
+    assert lr.status_code == status.HTTP_200_OK, lr.text
+    return uid, lr.json()["access_token"]
 
 
 def _create_workspace(client, token: str, *, name: str | None = None) -> tuple[int, int]:
@@ -330,6 +348,7 @@ def test_e2e_running_workspace_attach_returns_session_token(client, db_session: 
     assert data["workspace_id"] == wid
     assert data["session_token"] is not None
     assert len(data["session_token"]) > 10
+    assert data.get("runtime_ready") is True, "attach should only succeed when runtime is considered ready"
 
     # Verify session can be used for access (may return 200 if gateway enabled, or runtime metadata)
     r_access = client.get(

@@ -62,7 +62,7 @@ def _register_and_token(client, *, username: str, email: str) -> str:
     return create_access_token(user_id=uid)
 
 
-def _process_job(client, job_id: int) -> None:
+def _process_job(client, db_session: Session, job_id: int) -> None:
     r = client.post(
         "/internal/workspace-jobs/process",
         params={"job_id": job_id},
@@ -71,6 +71,7 @@ def _process_job(client, job_id: int) -> None:
     assert r.status_code == status.HTTP_200_OK, r.text
     body = r.json()
     assert body["processed_count"] == 1
+    db_session.expire_all()
 
 
 def test_ec2_profile_create_stop_start_delete_reuses_runtime_placement(
@@ -90,7 +91,7 @@ def test_ec2_profile_create_stop_start_delete_reuses_runtime_placement(
     assert r.status_code == status.HTTP_202_ACCEPTED, r.text
     wid = int(r.json()["workspace_id"])
     create_jid = int(r.json()["job_id"])
-    _process_job(client, create_jid)
+    _process_job(client, db_session, create_jid)
     ws = db_session.get(Workspace, wid)
     assert ws is not None
     assert ws.status == WorkspaceStatus.RUNNING.value
@@ -107,13 +108,13 @@ def test_ec2_profile_create_stop_start_delete_reuses_runtime_placement(
     r_stop = client.post(f"/workspaces/stop/{wid}", headers=_auth(token))
     assert r_stop.status_code == status.HTTP_202_ACCEPTED, r_stop.text
     stop_jid = int(r_stop.json()["job_id"])
-    _process_job(client, stop_jid)
+    _process_job(client, db_session, stop_jid)
     assert db_session.get(Workspace, wid).status == WorkspaceStatus.STOPPED.value
 
     r_start = client.post(f"/workspaces/start/{wid}", headers=_auth(token))
     assert r_start.status_code == status.HTTP_202_ACCEPTED, r_start.text
     start_jid = int(r_start.json()["job_id"])
-    _process_job(client, start_jid)
+    _process_job(client, db_session, start_jid)
     ws2 = db_session.get(Workspace, wid)
     assert ws2 is not None and ws2.status == WorkspaceStatus.RUNNING.value
     job_start = db_session.get(WorkspaceJob, start_jid)
@@ -123,6 +124,6 @@ def test_ec2_profile_create_stop_start_delete_reuses_runtime_placement(
     assert r_del.status_code == status.HTTP_202_ACCEPTED, r_del.text
     del_jid = int(r_del.json()["job_id"])
     assert r_del.json()["job_type"] == WorkspaceJobType.DELETE.value
-    _process_job(client, del_jid)
+    _process_job(client, db_session, del_jid)
     ws3 = db_session.get(Workspace, wid)
     assert ws3 is not None and ws3.status == WorkspaceStatus.DELETED.value

@@ -115,6 +115,11 @@ def test_merge_ec2_profile_create_stop_start_delete_reuses_runtime_placement(
     assert ws2 is not None and ws2.status == WorkspaceStatus.RUNNING.value
     job_start = db_session.get(WorkspaceJob, start_jid)
     assert job_start is not None and job_start.status == WorkspaceJobStatus.SUCCEEDED.value
+    rt_after = db_session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    assert rt_after is not None
+    assert rt_after.node_id == rt_run.node_id and rt_after.topology_id == rt_run.topology_id, (
+        "placement should persist across stop/start in merge-tier EC2 profile path"
+    )
 
     r_del = client.delete(f"/workspaces/{wid}", headers=_auth(token))
     assert r_del.status_code == status.HTTP_202_ACCEPTED, r_del.text
