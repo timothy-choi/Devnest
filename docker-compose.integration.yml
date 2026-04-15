@@ -42,6 +42,8 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_WORKER_ENABLED: "false"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
+      # Some CI runners provide a minimal PATH; console scripts live under /usr/local/bin.
+      PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -55,8 +57,11 @@ services:
       start_period: 60s
     cap_add:
       - NET_ADMIN
-    command: >
-      sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    # Use python -m so we do not rely on alembic/uvicorn entrypoint shims (avoids exit 127 if PATH is wrong).
+    command:
+      - sh
+      - -c
+      - python -m alembic upgrade head && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
   workspace-worker:
     build:
@@ -69,6 +74,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_RATE_LIMIT_ENABLED: "false"
+      PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
