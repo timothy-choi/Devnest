@@ -94,8 +94,15 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-test.txt
 
+      - name: Verify pytest-timeout
+        run: |
+          python -c "import pytest_timeout"
+          python -m pytest --help | grep -q -- --timeout
+
       - name: Pytest (config + compose + live whoami route)
-        run: pytest tests -v
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
+        run: pytest tests -v --timeout=300 --maxfail=0 -ra
 
   system-gateway-tests:
     name: system-gateway-tests
@@ -155,9 +162,15 @@ jobs:
       - name: Start system gateway stack (Traefik + route-admin + workspace-sim)
         run: docker compose -f docker-compose.system.yml up -d --build
 
+      - name: Verify pytest-timeout
+        working-directory: backend
+        run: python scripts/verify_pytest_timeout.py
+
       - name: Run backend system gateway tests
         working-directory: backend
-        run: pytest tests/system/gateway -v --timeout=300
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
+        run: pytest tests/system/gateway -v --timeout=300 --maxfail=0 -ra
 
       - name: Stop system gateway stack
         if: always()
@@ -210,7 +223,7 @@ jobs:
         env:
           DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
         # Unit tests only; integration/system need Postgres/Docker in downstream jobs.
-        run: pytest tests/unit -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
+        run: pytest tests/unit -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --maxfail=0 -ra --cov=app --cov-report=xml:coverage-quality.xml --cov-report=term-missing
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -223,6 +236,7 @@ jobs:
     name: Unit Tests
     needs: [detect, quality-checks]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: backend
@@ -250,7 +264,7 @@ jobs:
       - name: Run unit tests
         env:
           DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
-        run: pytest tests/unit -v -n auto -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
+        run: pytest tests/unit -v -n auto -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --maxfail=0 -ra --cov=app --cov-report=xml:coverage-unit.xml --cov-report=term-missing
 
       - name: Finalize unit coverage (combine workers if needed, then XML + report)
         run: |
@@ -272,6 +286,7 @@ jobs:
     name: Integration Tests
     needs: [detect, quality-checks]
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: backend
@@ -330,7 +345,7 @@ jobs:
       - name: Run integration tests
         env:
           DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
-        run: pytest tests/integration -v -n 2 -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
+        run: pytest tests/integration -v -n 2 -m "not slow and not topology_heavy and not concurrency and not failure_path and not topology_linux and not topology_linux_core" --timeout=300 --maxfail=0 -ra --cov=app --cov-report=xml:coverage-integration.xml --cov-report=term-missing
 
       - name: Merge-tier stress slice (worker/reconcile/topology janitor)
         env:
@@ -344,7 +359,7 @@ jobs:
             tests/integration/workspace/merge_ec2/test_merge_ec2_profile_lifecycle.py \
             tests/unit/cleanup_service/test_cleanup_drain.py \
             tests/unit/placement_service/test_orchestrator_binding_strict.py \
-            -v --timeout=300
+            -v --timeout=300 --maxfail=0 -ra
 
       - name: Finalize integration coverage (combine workers if needed, then XML + report)
         run: |
@@ -366,6 +381,7 @@ jobs:
     name: System Tests
     needs: [detect, quality-checks]
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: backend
@@ -428,12 +444,12 @@ jobs:
       - name: Run system tests (merge-time tier, non-sudo)
         env:
           DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
-        run: pytest tests/system -v -m "not topology_linux and not topology_linux_core and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path and not gateway" --timeout=300 --cov=app --cov-append --cov-report=term-missing
+        run: pytest tests/system -v -m "not topology_linux and not topology_linux_core and not workspace_image and not slow and not topology_heavy and not concurrency and not failure_path and not gateway" --timeout=300 --maxfail=0 -ra --cov=app --cov-append --cov-report=term-missing
 
       - name: Run Linux topology core happy-path (sudo, CAP_NET_ADMIN)
         env:
           DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
-        run: sudo -E "$(which python)" -m pytest tests/system/topology/test_runtime_topology_probe_happy_path.py -v -m "topology_linux_core" --timeout=300 --cov=app --cov-append --cov-report=term-missing
+        run: sudo -E "$(which python)" -m pytest tests/system/topology/test_runtime_topology_probe_happy_path.py -v -m "topology_linux_core" --timeout=300 --maxfail=0 -ra --cov=app --cov-append --cov-report=term-missing
 
       - name: Finalize system coverage (XML + report)
         run: |

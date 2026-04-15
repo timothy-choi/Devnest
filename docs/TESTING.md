@@ -5,17 +5,68 @@ and contribution guidelines.
 
 ---
 
+## Wall-clock timeouts (`pytest-timeout`)
+
+Every test must finish within a bounded time. Hanging tests **fail** with a timeout error; **`pytest` continues** with the next test thanks to `--maxfail=0` (no early abort of the whole run).
+
+| Layer | Behavior |
+|-------|----------|
+| **Plugin** | `pytest-timeout` is in `backend/requirements.txt` and `devnest-gateway/requirements-test.txt`. |
+| **Verification** | `python scripts/verify_pytest_timeout.py` (backend) asserts the package is importable **and** `pytest --help` lists `--timeout`. CI runs this before pytest jobs. |
+| **Global default** | `backend/pytest.ini`: `timeout = 300` seconds, `timeout_method = thread`, `addopts = -ra --maxfail=0 --timeout-method=thread`. |
+| **Unit tests** | `tests/conftest.py` adds `@pytest.mark.timeout(120, method="thread")` to collected tests under `tests/unit/` **unless** they already have `@pytest.mark.timeout`. |
+| **Overrides** | Use `@pytest.mark.timeout(N)` on a test (e.g. E2E in `tests/integration/e2e/`) or pass `--timeout=N` on the command line (CLI/inject wins over `pytest.ini` default where applicable; per-test marker takes precedence). |
+| **CI guard** | `DEVNEST_ENFORCE_TEST_TIMEOUTS=1` causes `tests/conftest.py` to **abort collection** if the timeout plugin is not loaded. **GitHub Actions** sets this automatically for backend `pytest` invocations when `GITHUB_ACTIONS` is set (in addition to workflow `env`). |
+| **Workflow ceiling** | Merge jobs use `timeout-minutes` on the job (e.g. 90–120m) so a stuck runner does not block indefinitely. Nightly full suite uses `timeout-minutes: 180`. |
+
+### Recognizing timeouts in output
+
+- Failed tests show in the short test summary as **`FAILED`** with a message containing `Timeout` / `SIGABRT` / plugin-specific text depending on OS.
+- `-ra` adds **skip / xfail / fail / deselected** reasons to the summary so you can distinguish **skipped** vs **failed** vs **timeout** (timeout counts as a failed test case).
+
+### Example commands
+
+```bash
+cd backend
+pip install -r requirements.txt
+python scripts/verify_pytest_timeout.py
+export DEVNEST_ENFORCE_TEST_TIMEOUTS=1   # optional: match CI
+
+# Unit (120s default per test via conftest, unless marked)
+pytest tests/unit -v --timeout=300 --maxfail=0 -ra
+
+# Integration / system (300s default from pytest.ini unless overridden)
+pytest tests/integration -v --timeout=300 --maxfail=0 -ra
+pytest tests/system -v --timeout=300 --maxfail=0 -ra
+
+# Nightly-style full backend tree (same as workflow; needs DB/Docker as appropriate)
+pytest tests -v --timeout=600 --maxfail=0 -ra
+
+# Gateway package
+cd ../devnest-gateway
+pip install -r requirements-test.txt
+pytest tests -v --timeout=300 --maxfail=0 -ra
+```
+
+### Async / Docker / WebSocket / workers
+
+- Prefer **bounded** `asyncio.wait_for`, socket `settimeout`, and fixture `finally` / `join(timeout=…)` for threads (see e.g. SMTP test server fixture).
+- If a test starts background workers, cancel or join them in teardown; add **`@pytest.mark.timeout`** if the scenario can still wedge.
+- **Pytest continues** after a timeout: one bad test does not stop the rest of the file or suite when `--maxfail=0` (default in `pytest.ini`).
+
+---
+
 ## Merge-time vs nightly (CI)
 
 - **Merge-time** (`.github/workflows/tests.yml`): Fast PR signal. Pytest excludes markers
   `slow`, `topology_heavy`, `concurrency`, `failure_path`, `topology_linux`, `topology_linux_core`
   for unit/integration/system (with additional system exclusions for `gateway`, `workspace_image`).
-  **`pytest-timeout`** is enforced (`--timeout=300`) on unit, integration, system, and quality jobs.
+  **`pytest-timeout`** is enforced (`--timeout=300`, `--maxfail=0`, `-ra`) on unit, integration, system, and quality jobs.
   A small **stress slice** reruns worker/reconcile/janitor-focused tests in the integration job,
   including **merge production-gate smoke** (`tests/integration/workspace/test_merge_production_gate_smoke.py`)
   and **merge EC2 lifecycle** (`tests/integration/workspace/merge_ec2/` — skips without Docker):
   full create → RUNNING → stop → start → delete on the same stack as the slow EC2 profile test.
-- **Nightly** (`.github/workflows/nightly.yml`): Full tree including heavy markers; pytest  `--timeout=600` for the main pass; privileged `topology_linux` runs under `sudo` in a follow-up step.
+- **Nightly** (`.github/workflows/nightly.yml`): Full tree including heavy markers; pytest `--timeout=600 --maxfail=0 -ra` for the main pass; privileged `topology_linux` runs under `sudo` with `--timeout=600` in a follow-up step.
 - **Heavy / slow examples:** `tests/integration/workspace/test_workspace_ec2_profile_e2e.py` (marked
   `slow`) — full create/stop/start/delete API path; intended for nightly or explicit local runs.
 
@@ -40,7 +91,6 @@ DevNest uses three test tiers:
 ```bash
 cd backend
 pip install -r requirements.txt
-pip install -r requirements-test.txt
 ```
 
 ### Unit tests (no dependencies)
@@ -49,7 +99,8 @@ pip install -r requirements-test.txt
 cd backend
 pip install -r requirements.txt   # includes pytest-timeout
 python scripts/verify_pytest_timeout.py
-pytest tests/unit/ -v
+export DEVNEST_ENFORCE_TEST_TIMEOUTS=1   # recommended to match CI
+pytest tests/unit/ -v --maxfail=0 -ra
 ```
 
 Expected: **~804 tests**, all pass. Runtime: < 60 s on a developer machine.

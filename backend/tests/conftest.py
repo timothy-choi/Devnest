@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 _DEFAULT_TEST_DB = os.getenv(
     "DATABASE_URL",
     "postgresql+psycopg://test:test@127.0.0.1:5432/devnest_test",
@@ -20,6 +22,28 @@ from app.libs.db.database import reset_engine  # noqa: E402
 
 get_settings.cache_clear()
 reset_engine()
+
+# In GitHub Actions, require pytest-timeout to be loaded so misconfigured jobs fail fast.
+if os.environ.get("GITHUB_ACTIONS", "").strip().lower() in ("1", "true", "yes") and not (
+    os.environ.get("DEVNEST_ENFORCE_TEST_TIMEOUTS", "").strip()
+):
+    os.environ["DEVNEST_ENFORCE_TEST_TIMEOUTS"] = "1"
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Apply a shorter default timeout to unit tests (unless overridden by @pytest.mark.timeout)."""
+    if getattr(config.option, "collectonly", False):
+        return
+    for item in items:
+        if item.get_closest_marker("timeout"):
+            continue
+        try:
+            path_s = str(item.path)
+        except Exception:
+            path_s = str(getattr(item, "fspath", ""))
+        norm = path_s.replace("\\", "/")
+        if "/tests/unit/" in norm:
+            item.add_marker(pytest.mark.timeout(120, method="thread"))
 
 
 def _pytest_timeout_active(config) -> bool:  # noqa: ANN001

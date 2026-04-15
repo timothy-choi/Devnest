@@ -89,6 +89,7 @@ jobs:
         run: |
           pytest tests -v -m "not topology_linux and not topology_linux_core and not gateway" \
             --timeout=600 \
+            --maxfail=0 -ra \
             --cov=app --cov-report=xml:nightly-full-tests-coverage.xml --cov-report=term-missing
 
       - name: Finalize suite coverage XML
@@ -102,7 +103,7 @@ jobs:
       - name: Run Linux topology tests (elevated privileges)
         env:
           DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
-        run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux or topology_linux_core"
+        run: sudo -E "$(which python)" -m pytest tests/system/topology -v -m "topology_linux or topology_linux_core" --timeout=600 --maxfail=0 -ra
 
       - name: Upload full-suite coverage artifact
         uses: actions/upload-artifact@v4
@@ -134,5 +135,12 @@ jobs:
       - name: Install gateway test dependencies
         run: pip install -r requirements-test.txt
 
+      - name: Verify pytest-timeout
+        run: |
+          python -c "import pytest_timeout"
+          python -m pytest --help | grep -q -- --timeout
+
       - name: Gateway pytest (config + compose + live route)
-        run: pytest tests -v
+        env:
+          DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
+        run: pytest tests -v --timeout=300 --maxfail=0 -ra
