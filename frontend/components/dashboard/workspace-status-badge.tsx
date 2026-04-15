@@ -1,7 +1,7 @@
 import { AlertTriangle, Loader2, PauseCircle, RotateCcw, Rocket } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { WorkspaceStatus } from "@/types/workspace";
+import { Workspace, WorkspaceStatus } from "@/types/workspace";
 
 const statusConfig: Record<
   WorkspaceStatus,
@@ -46,6 +46,18 @@ export function StatusBadge({ status }: { status: WorkspaceStatus }) {
     <Badge className={`gap-2 rounded-full px-3 py-1 font-medium ring-1 ring-inset ${config.className}`}>
       <Icon className={`h-3.5 w-3.5 ${status === "setting-up" || status === "restarting" ? "animate-spin" : ""}`} />
       {config.label}
+    </Badge>
+  );
+}
+
+export function DetailedStatusBadge({ workspace }: { workspace: Workspace }) {
+  const config = statusConfig[workspace.status];
+  const Icon = config.icon;
+
+  return (
+    <Badge className={`gap-2 rounded-full px-3 py-1 font-medium ring-1 ring-inset ${config.className}`}>
+      <Icon className={`h-3.5 w-3.5 ${workspace.isBusy ? "animate-spin" : ""}`} />
+      {workspace.statusLabel}
     </Badge>
   );
 }

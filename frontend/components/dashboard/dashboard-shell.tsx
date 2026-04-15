@@ -26,7 +26,7 @@ export function DashboardShell() {
                 <p className="text-sm font-medium text-sky-700">Workspace Dashboard</p>
                 <h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">All Workspaces</h1>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-                  A mock-driven shell for browsing workspace states, opening projects, and testing lifecycle interactions before backend wiring.
+                  Browse your real DevNest workspaces, manage lifecycle requests, and verify backend connectivity from the existing dashboard shell.
                 </p>
               </div>
               <div className="flex flex-col gap-3 sm:flex-row">
@@ -47,8 +47,23 @@ export function DashboardShell() {
             </div>
           </div>
 
+          {workspaceState.actionError ? (
+            <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-800 shadow-[0_18px_45px_-40px_rgba(15,23,42,0.45)]">
+              {workspaceState.actionError}
+            </div>
+          ) : null}
+
+          {workspaceState.hasBusyWorkspace ? (
+            <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 px-5 py-4 text-sm text-sky-900 shadow-[0_18px_45px_-40px_rgba(15,23,42,0.45)]">
+              Transitional workspace states are controlled by backend jobs. If a workspace stays in
+              <span className="font-medium"> CREATING</span> or another busy state, make sure the backend worker is running locally.
+            </div>
+          ) : null}
+
           <WorkspaceGrid
             workspaces={workspaceState.filteredWorkspaces}
+            isLoading={workspaceState.isLoading}
+            errorMessage={workspaceState.errorMessage}
             onDelete={workspaceState.deleteWorkspace}
             onRestart={workspaceState.restartWorkspace}
             onStop={workspaceState.stopWorkspace}
@@ -62,6 +77,8 @@ export function DashboardShell() {
         open={workspaceState.isCreateDialogOpen}
         onOpenChange={workspaceState.setCreateDialogOpen}
         onCreateWorkspace={workspaceState.createWorkspace}
+        isSubmitting={workspaceState.isCreating}
+        submitError={workspaceState.createError}
       />
     </main>
   );

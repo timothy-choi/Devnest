@@ -1,10 +1,27 @@
 import Link from "next/link";
 import { Bell, ChevronDown } from "lucide-react";
+import { useRouter } from "next/router";
 
+import { useAuth } from "@/hooks/use-auth";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 
 export function DashboardTopNav() {
+  const router = useRouter();
+  const { user, logout } = useAuth();
+  const initials = user?.displayName
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "DN";
+
   return (
     <header className="sticky top-0 z-20 border-b border-white/70 bg-white/80 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
@@ -26,19 +43,33 @@ export function DashboardTopNav() {
           <Button variant="secondary" size="icon" className="rounded-full border border-slate-200 bg-white">
             <Bell className="h-4 w-4" />
           </Button>
-          <button
-            type="button"
-            className="flex items-center gap-3 rounded-full border border-slate-200 bg-white px-2.5 py-2 shadow-sm transition hover:border-slate-300"
-          >
-            <Avatar className="h-9 w-9">
-              <AvatarFallback>TC</AvatarFallback>
-            </Avatar>
-            <div className="hidden text-left sm:block">
-              <p className="text-sm font-medium text-slate-900">Tim Choi</p>
-              <p className="text-xs text-slate-500">Frontend preview</p>
-            </div>
-            <ChevronDown className="hidden h-4 w-4 text-slate-500 sm:block" />
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="flex items-center gap-3 rounded-full border border-slate-200 bg-white px-2.5 py-2 shadow-sm transition hover:border-slate-300"
+              >
+                <Avatar className="h-9 w-9">
+                  <AvatarFallback>{initials}</AvatarFallback>
+                </Avatar>
+                <div className="hidden text-left sm:block">
+                  <p className="text-sm font-medium text-slate-900">{user?.displayName || user?.username || "DevNest user"}</p>
+                  <p className="text-xs text-slate-500">{user?.email || "Signed in"}</p>
+                </div>
+                <ChevronDown className="hidden h-4 w-4 text-slate-500 sm:block" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem
+                onClick={async () => {
+                  await logout();
+                  await router.push("/login");
+                }}
+              >
+                Sign out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </header>

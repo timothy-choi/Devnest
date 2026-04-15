@@ -20,13 +20,17 @@ import { Switch } from "@/components/ui/switch";
 type CreateWorkspaceDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreateWorkspace: (values: WorkspaceFormValues) => void;
+  onCreateWorkspace: (values: WorkspaceFormValues) => Promise<void>;
+  isSubmitting?: boolean;
+  submitError?: string | null;
 };
 
 export function CreateWorkspaceDialog({
   open,
   onOpenChange,
   onCreateWorkspace,
+  isSubmitting = false,
+  submitError = null,
 }: CreateWorkspaceDialogProps) {
   const form = useForm<WorkspaceFormValues>({
     resolver: zodResolver(workspaceFormSchema),
@@ -39,8 +43,8 @@ export function CreateWorkspaceDialog({
     },
   });
 
-  const onSubmit = (values: WorkspaceFormValues) => {
-    onCreateWorkspace(values);
+  const onSubmit = async (values: WorkspaceFormValues) => {
+    await onCreateWorkspace(values);
     onOpenChange(false);
     form.reset();
   };
@@ -74,7 +78,7 @@ export function CreateWorkspaceDialog({
             {form.formState.errors.repositoryUrl ? (
               <p className="text-sm text-rose-600">{form.formState.errors.repositoryUrl.message}</p>
             ) : (
-              <p className="text-sm text-slate-500">Optional for now. This stays mock-only in the current foundation step.</p>
+              <p className="text-sm text-slate-500">Optional. This is captured for the next repository integration step.</p>
             )}
           </div>
 
@@ -99,11 +103,15 @@ export function CreateWorkspaceDialog({
             />
           </div>
 
+          {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
+
           <DialogFooter className="sm:justify-between">
-            <Button type="button" variant="secondary" onClick={() => onOpenChange(false)}>
+            <Button type="button" variant="secondary" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
               Cancel
             </Button>
-            <Button type="submit">Create Workspace</Button>
+            <Button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? "Creating..." : "Create Workspace"}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

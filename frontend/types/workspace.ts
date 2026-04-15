@@ -1,16 +1,18 @@
 export type WorkspaceStatus = "setting-up" | "running" | "stopped" | "restarting" | "error";
 
 export type Workspace = {
-  id: string;
+  id: number;
   name: string;
   description: string;
   status: WorkspaceStatus;
+  rawStatus: string;
+  statusLabel: string;
+  statusDetail: string | null;
   lastOpenedLabel: string;
   lastModifiedLabel: string;
-  repositoryUrl: string;
-  features: {
-    ciCd: boolean;
-    aiTools: boolean;
-    terminal: boolean;
-  };
+  pendingAction: string | null;
+  isBusy: boolean;
+  canStop: boolean;
+  canRestart: boolean;
+  canDelete: boolean;
 };
