@@ -24,8 +24,40 @@ pytestmark = [
     pytest.mark.topology_heavy,
 ]
 
-# Cap worker count so we do not exhaust the SQLAlchemy pool (default pool is small on many setups).
-_MAX_POOL_WORKERS = 8
+
+def _run_pool_barrier(
+    *,
+    parties: int,
+    fn,
+    iterable,
+) -> None:
+    """Run ``fn`` once per ``iterable`` item with a pool sized for ``Barrier(parties)``.
+
+    A ``ThreadPoolExecutor`` with ``max_workers < parties`` deadlocks: every party must
+    reach ``Barrier.wait()`` before any proceed, but queued work cannot start while all
+    workers are blocked. After pytest-timeout, ``shutdown(wait=True)`` would hang forever
+    and block the rest of the test session.
+    """
+    pool = ThreadPoolExecutor(max_workers=parties)
+    try:
+        futs = [pool.submit(fn, item) for item in iterable]
+        for f in as_completed(futs):
+            f.result()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _map_pool_barrier(
+    *,
+    parties: int,
+    fn,
+    iterable,
+):
+    pool = ThreadPoolExecutor(max_workers=parties)
+    try:
+        return list(pool.map(fn, iterable))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _seed_topology(session: Session, *, name: str, spec: dict | None = None) -> int:
@@ -53,11 +85,7 @@ def test_concurrent_ensure_node_topology_auto_pool_unique_non_overlapping_cidrs(
         with Session(test_engine) as s2:
             DbTopologyAdapter(s2).ensure_node_topology(topology_id=tid, node_id=nid)
 
-    workers = min(_MAX_POOL_WORKERS, len(node_ids))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = [pool.submit(ensure_one, nid) for nid in node_ids]
-        for f in as_completed(futs):
-            f.result()  # propagate worker exceptions; barrier prevents partial completion hangs
+    _run_pool_barrier(parties=len(node_ids), fn=ensure_one, iterable=node_ids)
 
     with Session(test_engine) as s:
         rows = s.exec(
@@ -97,9 +125,7 @@ def test_concurrent_ensure_node_topology_same_node_idempotent(
             assert out.cidr == "10.88.50.0/24"
             return str(out.cidr)
 
-    workers = min(_MAX_POOL_WORKERS, n_calls)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        cidrs = list(pool.map(ensure_once, range(n_calls)))
+    cidrs = _map_pool_barrier(parties=n_calls, fn=ensure_once, iterable=range(n_calls))
 
     assert len(set(cidrs)) == 1
 
@@ -147,9 +173,11 @@ def test_concurrent_allocate_workspace_ip_distinct_active_ips(
             )
             return _AllocOutcome(wid, res.workspace_ip, res.leased_existing)
 
-    workers = min(_MAX_POOL_WORKERS, len(workspace_ids))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        outcomes = list(pool.map(allocate, workspace_ids))
+    outcomes = _map_pool_barrier(
+        parties=len(workspace_ids),
+        fn=allocate,
+        iterable=workspace_ids,
+    )
 
     assert [o.workspace_id for o in outcomes] == workspace_ids
     ips = [o.workspace_ip for o in outcomes]
@@ -198,9 +226,11 @@ def test_concurrent_allocate_workspace_ip_same_workspace_converges_single_ip(
             )
             return _AllocOutcome(wid, res.workspace_ip, res.leased_existing)
 
-    workers = min(_MAX_POOL_WORKERS, n_calls)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        outcomes = list(pool.map(allocate_same, range(n_calls)))
+    outcomes = _map_pool_barrier(
+        parties=n_calls,
+        fn=allocate_same,
+        iterable=range(n_calls),
+    )
 
     assert len({o.workspace_ip for o in outcomes}) == 1
     assert any(o.leased_existing for o in outcomes), "expected at least one reused lease after first commit"
