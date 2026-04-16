@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 import tarfile
@@ -43,6 +44,10 @@ from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResu
 from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
     ensure_host_path_owned_by_workspace_user,
+    stat_uid_gid,
+    verify_workspace_runtime_can_write_dir,
+    verify_workspace_runtime_owns_path,
+    workspace_container_uid_gid,
 )
 from app.services.placement_service.runtime_policy import authoritative_container_ref_required
 
@@ -278,24 +283,68 @@ class DefaultOrchestratorService(OrchestratorService):
         cs_base = os.path.join(base, wid_clean, "code-server")
         cfg_host = os.path.join(cs_base, "config")
         data_host = os.path.join(cs_base, "data")
+        uid, gid = workspace_container_uid_gid()
         try:
+            try:
+                euid = os.geteuid()
+            except AttributeError:
+                euid = -1
+            _strict_chown = euid == 0
+            logger.info(
+                "workspace_code_server_host_prepare_start",
+                extra={
+                    "workspace_id": wid_clean,
+                    "workspace_projects_base": base,
+                    "cs_base": cs_base,
+                    "cfg_host": cfg_host,
+                    "data_host": data_host,
+                    "target_uid": uid,
+                    "target_gid": gid,
+                    "control_plane_euid": euid,
+                },
+            )
             os.makedirs(cfg_host, exist_ok=True)
             os.makedirs(data_host, exist_ok=True)
-            # As root (typical Docker control plane): chown must succeed or we bind-mount root-owned dirs
-            # and code-server hits EACCES then exits (bogus netns downstream). Non-root dev (e.g. local
-            # pytest on macOS) cannot chown to 1000 — best-effort only.
-            _strict_chown = os.geteuid() == 0
-            ensure_host_path_owned_by_workspace_user(cfg_host, strict=_strict_chown)
-            ensure_host_path_owned_by_workspace_user(data_host, strict=_strict_chown)
+            # Chown the whole ``code-server`` tree (including intermediate dirs) in one pass.
+            ensure_host_path_owned_by_workspace_user(cs_base, strict=_strict_chown)
+            for label, host in (("config", cfg_host), ("data", data_host)):
+                verify_workspace_runtime_owns_path(host)
+                verify_workspace_runtime_can_write_dir(host)
+                su, sg = stat_uid_gid(host)
+                logger.info(
+                    "workspace_code_server_host_prepare_ok",
+                    extra={
+                        "workspace_id": wid_clean,
+                        "role": label,
+                        "host_path": host,
+                        "stat_uid": su,
+                        "stat_gid": sg,
+                        "target_uid": uid,
+                        "target_gid": gid,
+                        "chown_performed_under_cs_base": True,
+                        "chown_strict": _strict_chown,
+                        "writability_checked_with_privdrop": bool(
+                            (shutil.which("setpriv") or shutil.which("runuser")) and _strict_chown,
+                        ),
+                    },
+                )
         except OSError as e:
             logger.warning(
                 "orchestrator_code_server_bind_mount_mkdir_failed",
-                extra={"workspace_id": wid, "error": str(e)},
+                extra={
+                    "workspace_id": wid,
+                    "error": str(e),
+                    "cfg_host": cfg_host,
+                    "data_host": data_host,
+                    "target_uid": uid,
+                    "target_gid": gid,
+                },
             )
             raise WorkspaceBringUpError(
-                f"code-server persistence host paths are not usable (mkdir/chown failed for {cfg_host!r} "
-                f"or {data_host!r}): {e}. Fix ownership on WORKSPACE_PROJECTS_BASE or run the control "
-                "plane as root on the Docker host.",
+                "workspace host bind-mount path not writable by runtime user "
+                f"(prepare/verify failed for code-server dirs under {cs_base!r}): {e}. "
+                "Ensure WORKSPACE_PROJECTS_BASE is on the Docker host filesystem, the control plane "
+                "runs as root there so chown to the workspace UID/GID succeeds, or pre-chown these paths.",
             ) from e
         return [
             WorkspaceExtraBindMountSpec(
