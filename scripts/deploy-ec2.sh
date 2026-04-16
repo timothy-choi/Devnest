@@ -32,7 +32,8 @@ else
 fi
 
 docker compose -f "${COMPOSE}" down || true
-docker compose -f "${COMPOSE}" up -d --build
+# --force-recreate ensures services pick up compose changes (e.g. pid: host for Linux topology attach).
+docker compose -f "${COMPOSE}" up -d --build --force-recreate
 docker compose -f "${COMPOSE}" ps
 
 echo "--- deploy diagnostics ---"

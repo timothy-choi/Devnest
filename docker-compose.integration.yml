@@ -14,8 +14,16 @@
 # `pid: host` is required for topology veth attach: `ip link set … netns <pid>` and `nsenter -t <pid>`
 # must resolve Docker's State.Pid (host PID namespace). Without it, PIDs are invalid in the
 # container's isolated PID namespace → "Invalid netns value" / attach failures.
+#
+# Apply to every service that runs workspace jobs / orchestrator `ip` + `nsenter` (backend API if it
+# processes internal job ticks, and workspace-worker). After changing this, recreate containers:
+#   docker compose -f docker-compose.integration.yml up -d --build --force-recreate
 
 name: devnest-integration
+
+# Shared PID mode for control-plane containers that perform Linux topology attach (see header).
+x-pid-host: &pid_host
+  pid: "host"
 
 # Default workspace runtime for orchestrator bring-up (matches Dockerfile.workspace).
 x-workspace-image: &workspace_image
@@ -45,11 +53,11 @@ services:
       retries: 10
 
   backend:
+    <<: *pid_host
     build:
       context: ./backend
       dockerfile: Dockerfile
     user: "0:0"
-    pid: host
     ports:
       - "8000:8000"
     environment:
@@ -84,11 +92,11 @@ services:
       - python -m alembic upgrade head && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
   workspace-worker:
+    <<: *pid_host
     build:
       context: ./backend
       dockerfile: Dockerfile
     user: "0:0"
-    pid: host
     environment:
       DATABASE_URL: postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev
       DEVNEST_ENV: development
