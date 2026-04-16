@@ -193,11 +193,10 @@ class TestBringUpHappyPath:
         container_paths = [m.container_path for m in extra]
         assert "/home/coder/.config/code-server" in container_paths
         assert "/home/coder/.local/share/code-server" in container_paths
-        # Remaining calls in order
         assert mock_runtime.mock_calls[1] == call.start_container(container_id=CONTAINER_ID)
-        assert mock_runtime.mock_calls[2] == call.inspect_container(container_id=CONTAINER_ID)
-        assert mock_runtime.mock_calls[3] == call.get_container_netns_ref(container_id=CONTAINER_ID)
-        assert mock_runtime.mock_calls[4] == call.get_container_netns_ref(container_id=CONTAINER_ID)
+        names = [c[0] for c in mock_runtime.mock_calls]
+        assert names.count("get_container_netns_ref") == 2
+        assert names.count("inspect_container") >= 3  # post-start wait + two pre-topology liveness gates
 
         mock_topology.ensure_node_topology.assert_called_once_with(
             topology_id=TOPOLOGY_ID,
@@ -280,6 +279,41 @@ class TestBringUpRuntimeFailures:
         mock_probe.check_workspace_health.assert_not_called()
 
 
+class TestBringUpWorkspaceDeadBeforeTopology:
+    def test_exited_before_ensure_topology_skips_attach(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        ins_running = ContainerInspectionResult(
+            exists=True,
+            container_id=CONTAINER_ID,
+            container_state="running",
+            pid=12345,
+            ports=((32000, WORKSPACE_IDE_CONTAINER_PORT),),
+            mounts=(),
+        )
+        ins_exited = ContainerInspectionResult(
+            exists=True,
+            container_id=CONTAINER_ID,
+            container_state="exited",
+            pid=None,
+            ports=(),
+            mounts=(),
+        )
+        mock_runtime.inspect_container.side_effect = [ins_running, ins_exited]
+
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with pytest.raises(WorkspaceBringUpError, match="exited before topology attach"):
+            svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
+
+        mock_topology.ensure_node_topology.assert_not_called()
+        mock_probe.check_workspace_health.assert_not_called()
+
+
 class TestBringUpNetnsFailureBeforeAttach:
     def test_second_get_netns_ref_failure_skips_attach_and_probe(
         self,
@@ -307,7 +341,7 @@ class TestBringUpNetnsFailureBeforeAttach:
 
         svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
         # First call: ``ensure_running_runtime_only``; second: attach handoff — wrapped as bring-up error.
-        with pytest.raises(WorkspaceBringUpError, match="runtime topology handoff failed"):
+        with pytest.raises(WorkspaceBringUpError, match="workspace runtime not ready for topology"):
             svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
 
         mock_topology.ensure_node_topology.assert_called_once()

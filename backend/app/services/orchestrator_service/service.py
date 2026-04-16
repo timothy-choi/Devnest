@@ -338,6 +338,32 @@ class DefaultOrchestratorService(OrchestratorService):
         except RuntimeAdapterError as e:
             raise WorkspaceBringUpError(f"runtime bring-up failed: {e}") from e
 
+    def _bring_up_assert_workspace_alive_for_attach(self, running: EnsureRunningRuntimeResult) -> None:
+        """Do not run topology attach if the workspace is not running with a host PID (avoids downstream netns noise)."""
+        if _env_skip_linux_topology_attachment():
+            return
+        ins = self._runtime_adapter.inspect_container(container_id=running.container_id)
+        if not ins.exists:
+            raise WorkspaceBringUpError(
+                "workspace runtime startup failed: container missing before topology attach "
+                "(cannot resolve network namespace)",
+            )
+        if ins.container_state in ("exited", "dead"):
+            raise WorkspaceBringUpError(
+                "workspace runtime exited before topology attach (container is not running). "
+                "Check workspace logs first (e.g. EACCES on /home/coder/.config/code-server/config.yaml "
+                "or malformed image CMD/ENTRYPOINT); linux attach errors are often a follow-on symptom.",
+            )
+        if ins.container_state != "running":
+            raise WorkspaceBringUpError(
+                f"workspace runtime not running before topology attach (container_state={ins.container_state!r})",
+            )
+        if ins.pid is None or ins.pid <= 0:
+            raise WorkspaceBringUpError(
+                "workspace container has no host PID before topology attach; the runtime did not stay alive. "
+                "See workspace logs for startup failures — do not treat this as a primary topology failure.",
+            )
+
     def _bring_up_attach_topology(
         self,
         ctx: _BringUpContext,
@@ -345,6 +371,7 @@ class DefaultOrchestratorService(OrchestratorService):
     ) -> tuple[NetnsRefResult, AttachWorkspaceResult]:
         """Ensure node topology, allocate IP, attach workspace veth to bridge."""
         try:
+            self._bring_up_assert_workspace_alive_for_attach(running)
             self._topology_service.ensure_node_topology(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
@@ -354,6 +381,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 node_id=self._node_id,
                 workspace_id=ctx.ws_int,
             )
+            self._bring_up_assert_workspace_alive_for_attach(running)
             # When Linux veth attachment is disabled, ``ensure_running_runtime_only`` already used a
             # placeholder netns; reuse it (no second ``get_container_netns_ref``).
             if _env_skip_linux_topology_attachment():
@@ -373,9 +401,13 @@ class DefaultOrchestratorService(OrchestratorService):
                 workspace_ip=ip_res.workspace_ip,
             )
         except TopologyError as e:
-            raise WorkspaceBringUpError(f"topology bring-up failed: {e}") from e
+            raise WorkspaceBringUpError(
+                f"topology bring-up failed (after workspace runtime was running): {e}",
+            ) from e
         except RuntimeAdapterError as e:
-            raise WorkspaceBringUpError(f"runtime topology handoff failed: {e}") from e
+            raise WorkspaceBringUpError(
+                f"workspace runtime not ready for topology (PID/netns handoff): {e}",
+            ) from e
         return netns, attach_res
 
     def _bring_up_run_probe(

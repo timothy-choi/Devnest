@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 
 from .errors import ContainerCreateError, ContainerStartError
 from .interfaces import RuntimeAdapter
 from .models import (
+    ContainerInspectionResult,
     EnsureRunningRuntimeResult,
     NetnsRefResult,
     WorkspaceExtraBindMountSpec,
@@ -15,6 +17,40 @@ from .models import (
 
 # Placeholder when ``skip_netns_resolution=True`` (CI / dev: Linux veth attachment disabled).
 _SKIP_NETNS_PLACEHOLDER_REF = "/devnest-skip-linux-topology-attachment"
+
+
+def _wait_post_start_inspect(
+    runtime: RuntimeAdapter,
+    container_id: str,
+    *,
+    skip_netns_resolution: bool,
+) -> ContainerInspectionResult:
+    """
+    After ``start_container`` succeeds, detect an immediate crash and wait briefly for PID.
+
+    Surfaces workspace startup failures (e.g. code-server EACCES) before topology attach, instead of
+    only failing later with a misleading netns / attach error.
+    """
+    deadline = time.monotonic() + 2.0
+    last: ContainerInspectionResult | None = None
+    while time.monotonic() < deadline:
+        ins = runtime.inspect_container(container_id=container_id)
+        last = ins
+        if ins.container_state in ("exited", "dead"):
+            raise ContainerStartError(
+                f"workspace container exited immediately after start (state={ins.container_state!r}); "
+                "check code-server logs (e.g. EACCES on bind-mounted /home/coder/.config/code-server) "
+                "and workspace image ENTRYPOINT/CMD.",
+            )
+        if ins.container_state == "running":
+            if skip_netns_resolution:
+                return ins
+            if ins.pid is not None and ins.pid > 0:
+                return ins
+        time.sleep(0.05)
+    if last is None:
+        raise ContainerStartError("inspect_container returned no result after start")
+    return last
 
 
 def ensure_running_runtime_only(
@@ -66,7 +102,11 @@ def ensure_running_runtime_only(
     if not start_res.success:
         raise ContainerStartError(start_res.message or "container did not reach running state")
 
-    inspected = runtime.inspect_container(container_id=ensure_res.container_id)
+    inspected = _wait_post_start_inspect(
+        runtime,
+        ensure_res.container_id,
+        skip_netns_resolution=skip_netns_resolution,
+    )
     cid_for_netns = inspected.container_id or ensure_res.container_id
     if skip_netns_resolution:
         netns = NetnsRefResult(
