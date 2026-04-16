@@ -16,6 +16,7 @@ Failure injection mocks the orchestrator factory; ``success=False`` roll-ups sta
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from unittest.mock import create_autospec
 
@@ -84,16 +85,46 @@ def _create_workspace(client, token: str, *, name: str | None = None) -> tuple[i
     return int(data["workspace_id"]), int(data["job_id"])
 
 
-def _process_job(client, job_id: int) -> None:
-    r = client.post(
-        "/internal/workspace-jobs/process",
-        params={"job_id": job_id},
-        headers=_internal_headers(),
+def _process_job_to_workspace_status(
+    client,
+    db_session: Session,
+    workspace_id: int,
+    job_id: int,
+    *,
+    expected_workspace_status: str,
+    timeout_s: float = 120.0,
+) -> None:
+    """Drive ``job_id`` until it finishes and the workspace reaches ``expected_workspace_status``.
+
+    A single ``/process`` tick can leave the workspace in ``CREATING`` when a probe fails once and
+    the worker schedules a bounded retry (still ``processed_count == 1`` for that tick).
+    """
+    deadline = time.monotonic() + timeout_s
+    saw_process = False
+    while time.monotonic() < deadline:
+        r = client.post(
+            "/internal/workspace-jobs/process",
+            params={"job_id": job_id},
+            headers=_internal_headers(),
+        )
+        assert r.status_code == status.HTTP_200_OK, r.text
+        body = r.json()
+        if body["processed_count"] == 1:
+            assert body["last_job_id"] == job_id
+            saw_process = True
+        job = _reload_job(db_session, job_id)
+        ws = _reload_workspace(db_session, workspace_id)
+        if job is not None and job.status == WorkspaceJobStatus.FAILED.value:
+            pytest.fail(job.error_msg or "workspace job failed")
+        if job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value:
+            assert ws is not None and ws.status == expected_workspace_status
+            assert saw_process, "job succeeded without any processed tick"
+            return
+        time.sleep(0.15)
+    pytest.fail(
+        f"timeout waiting for job {job_id} to succeed "
+        f"and workspace {workspace_id} to reach {expected_workspace_status!r}",
     )
-    assert r.status_code == status.HTTP_200_OK, r.text
-    body = r.json()
-    assert body["processed_count"] == 1
-    assert body["last_job_id"] == job_id
 
 
 def _reload_workspace(db_session: Session, workspace_id: int) -> Workspace | None:
@@ -128,7 +159,13 @@ def test_create_workspace_provisions_runtime_end_to_end(client, db_session: Sess
     cfg = db_session.exec(select(WorkspaceConfig).where(WorkspaceConfig.workspace_id == wid)).first()
     assert cfg is not None and cfg.version == 1
 
-    _process_job(client, jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        jid,
+        expected_workspace_status=WorkspaceStatus.RUNNING.value,
+    )
 
     ws = _reload_workspace(db_session, wid)
     job = _reload_job(db_session, jid)
@@ -156,14 +193,26 @@ def test_stop_start_and_restart_lifecycle_end_to_end(client, db_session: Session
         email=f"cp_life_{uuid.uuid4().hex[:8]}@example.com",
     )
     wid, create_jid = _create_workspace(client, token)
-    _process_job(client, create_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        create_jid,
+        expected_workspace_status=WorkspaceStatus.RUNNING.value,
+    )
     assert _reload_workspace(db_session, wid).status == WorkspaceStatus.RUNNING.value
 
     r_stop = client.post(f"/workspaces/stop/{wid}", headers=_auth_header(token))
     assert r_stop.status_code == status.HTTP_202_ACCEPTED, r_stop.text
     stop_jid = int(r_stop.json()["job_id"])
     assert r_stop.json()["job_type"] == WorkspaceJobType.STOP.value
-    _process_job(client, stop_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        stop_jid,
+        expected_workspace_status=WorkspaceStatus.STOPPED.value,
+    )
     ws = _reload_workspace(db_session, wid)
     job = _reload_job(db_session, stop_jid)
     assert ws.status == WorkspaceStatus.STOPPED.value
@@ -172,7 +221,13 @@ def test_stop_start_and_restart_lifecycle_end_to_end(client, db_session: Session
     r_start = client.post(f"/workspaces/start/{wid}", headers=_auth_header(token))
     assert r_start.status_code == status.HTTP_202_ACCEPTED, r_start.text
     start_jid = int(r_start.json()["job_id"])
-    _process_job(client, start_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        start_jid,
+        expected_workspace_status=WorkspaceStatus.RUNNING.value,
+    )
     ws = _reload_workspace(db_session, wid)
     assert ws.status == WorkspaceStatus.RUNNING.value
     assert _reload_job(db_session, start_jid).status == WorkspaceJobStatus.SUCCEEDED.value
@@ -181,7 +236,13 @@ def test_stop_start_and_restart_lifecycle_end_to_end(client, db_session: Session
     assert r_restart.status_code == status.HTTP_202_ACCEPTED, r_restart.text
     restart_jid = int(r_restart.json()["job_id"])
     assert r_restart.json()["job_type"] == WorkspaceJobType.RESTART.value
-    _process_job(client, restart_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        restart_jid,
+        expected_workspace_status=WorkspaceStatus.RUNNING.value,
+    )
     ws = _reload_workspace(db_session, wid)
     job = _reload_job(db_session, restart_jid)
     assert ws.status == WorkspaceStatus.RUNNING.value
@@ -195,7 +256,13 @@ def test_update_workspace_config_end_to_end(client, db_session: Session) -> None
         email=f"cp_upd_{uuid.uuid4().hex[:8]}@example.com",
     )
     wid, create_jid = _create_workspace(client, token)
-    _process_job(client, create_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        create_jid,
+        expected_workspace_status=WorkspaceStatus.RUNNING.value,
+    )
 
     r_patch = client.patch(
         f"/workspaces/{wid}",
@@ -207,7 +274,13 @@ def test_update_workspace_config_end_to_end(client, db_session: Session) -> None
     up_jid = int(r_patch.json()["job_id"])
     assert r_patch.json()["job_type"] == WorkspaceJobType.UPDATE.value
 
-    _process_job(client, up_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        up_jid,
+        expected_workspace_status=WorkspaceStatus.RUNNING.value,
+    )
 
     ws = _reload_workspace(db_session, wid)
     job = _reload_job(db_session, up_jid)
@@ -229,14 +302,26 @@ def test_delete_workspace_end_to_end(client, db_session: Session) -> None:
         email=f"cp_del_{uuid.uuid4().hex[:8]}@example.com",
     )
     wid, create_jid = _create_workspace(client, token)
-    _process_job(client, create_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        create_jid,
+        expected_workspace_status=WorkspaceStatus.RUNNING.value,
+    )
 
     r_del = client.delete(f"/workspaces/{wid}", headers=_auth_header(token))
     assert r_del.status_code == status.HTTP_202_ACCEPTED, r_del.text
     del_jid = int(r_del.json()["job_id"])
     assert r_del.json()["job_type"] == WorkspaceJobType.DELETE.value
 
-    _process_job(client, del_jid)
+    _process_job_to_workspace_status(
+        client,
+        db_session,
+        wid,
+        del_jid,
+        expected_workspace_status=WorkspaceStatus.DELETED.value,
+    )
 
     ws = _reload_workspace(db_session, wid)
     job = _reload_job(db_session, del_jid)
