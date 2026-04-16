@@ -50,6 +50,14 @@ def _container_state_needs_engine_stop(container_state: str) -> bool:
     return container_state in frozenset({"running", "restarting", "paused"})
 
 
+def _image_cmd_hint_from_attrs(attrs: dict) -> str:
+    """Human-readable ``Config.Entrypoint`` / ``Config.Cmd`` for startup failure messages."""
+    cfg = attrs.get("Config") or {}
+    ep = cfg.get("Entrypoint")
+    cmd = cfg.get("Cmd")
+    return f"; image entrypoint={ep!r} cmd={cmd!r}"
+
+
 def _default_workspace_image() -> str:
     return os.environ.get("DEVNEST_WORKSPACE_IMAGE", _DEFAULT_WORKSPACE_IMAGE).strip() or _DEFAULT_WORKSPACE_IMAGE
 
@@ -538,13 +546,24 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             raise ContainerStartError(str(e)) from e
 
         after = self.inspect_container(container_id=container_id)
+        if after.container_state == "running":
+            return RuntimeActionResult(
+                container_id=after.container_id or container_id,
+                container_state=after.container_state,
+                success=True,
+                message=None,
+            )
+        hint = ""
+        try:
+            ctr = self._client.containers.get(container_id)
+            hint = _image_cmd_hint_from_attrs(ctr.attrs)
+        except Exception:
+            pass
         return RuntimeActionResult(
             container_id=after.container_id or container_id,
             container_state=after.container_state,
-            success=after.container_state == "running",
-            message=None
-            if after.container_state == "running"
-            else f"unexpected state after start: {after.container_state}",
+            success=False,
+            message=f"unexpected state after start: {after.container_state}{hint}",
         )
 
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
@@ -648,11 +667,24 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             raise ContainerNotFoundError(f"container not found after restart: {container_id!r}")
         cid_out = after.container_id or container_id
         ok = after.container_state == "running"
+        if ok:
+            return RuntimeActionResult(
+                container_id=cid_out,
+                container_state=after.container_state,
+                success=True,
+                message=None,
+            )
+        hint = ""
+        try:
+            ctr = self._client.containers.get(container_id)
+            hint = _image_cmd_hint_from_attrs(ctr.attrs)
+        except Exception:
+            pass
         return RuntimeActionResult(
             container_id=cid_out,
             container_state=after.container_state,
-            success=ok,
-            message=None if ok else f"unexpected state after restart: {after.container_state}",
+            success=False,
+            message=f"unexpected state after restart: {after.container_state}{hint}",
         )
 
     def delete_container(self, *, container_id: str) -> RuntimeActionResult:

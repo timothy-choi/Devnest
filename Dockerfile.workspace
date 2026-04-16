@@ -58,5 +58,10 @@ RUN code-server --install-extension ms-python.python \
 
 EXPOSE 8080
 
-# Listen on all interfaces for container/K8s networking; open project folder in the IDE
-CMD ["code-server", "--bind-addr", "0.0.0.0:8080", "/home/coder/project"]
+# codercom/code-server sets ENTRYPOINT to [entrypoint.sh, --bind-addr, 0.0.0.0:8080, .] and the script
+# runs: exec dumb-init /usr/bin/code-server "$@"  where "$@" is ENTRYPOINT+CMD combined. A child CMD
+# that repeats "code-server" or only replaces CMD therefore appends to those args and produces a
+# malformed argv (duplicate bind-addr, stray ".", duplicate "code-server"). Reset ENTRYPOINT to the
+# script alone, then pass only code-server CLI arguments (not the binary name).
+ENTRYPOINT ["/usr/bin/entrypoint.sh"]
+CMD ["--bind-addr", "0.0.0.0:8080", "/home/coder/project"]
