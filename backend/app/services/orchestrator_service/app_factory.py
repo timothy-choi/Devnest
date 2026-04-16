@@ -43,6 +43,12 @@ def build_default_orchestrator_for_session(
     For ``ssh_docker`` / ``ssm_docker``, ``workspace_projects_base`` must be an **absolute path on the
     remote Docker host**; workspace dirs are created there via SSH or SSM respectively.
 
+    For **local** Docker (socket only): ``workspace_projects_base`` must refer to a directory that
+    exists on the **Docker host** at the same path the control plane uses (typically a bind mount into
+    the API/worker container). Using only the default temp dir inside the control-plane container
+    breaks ``mkdir``/``chown`` for bind mounts — see ``WORKSPACE_PROJECTS_BASE`` in
+    ``docker-compose.integration.yml``.
+
     Raises:
         AppOrchestratorBindingError: if Docker / SSH / SSM binding fails.
     """

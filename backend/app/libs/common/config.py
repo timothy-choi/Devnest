@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     # DEVNEST_WORKSPACE_CONTAINER_IMAGE / DEVNEST_WORKSPACE_IMAGE then devnest/workspace:latest (see app_factory).
     workspace_container_image: str = ""
     # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
+    # When the API/worker runs in Docker with only docker.sock mounted, that default is /tmp/... *inside*
+    # the control plane container — mkdir/chown there do not fix host bind sources → set WORKSPACE_PROJECTS_BASE
+    # to a path mounted from the host (see docker-compose.integration.yml).
     workspace_projects_base: str = ""
     # Root directory for snapshot archives (local filesystem provider). Empty → system temp / devnest-snapshots.
     devnest_snapshot_storage_root: str = ""

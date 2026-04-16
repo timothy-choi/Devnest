@@ -8,7 +8,7 @@ FROM codercom/code-server:latest
 
 # Bumped when Dockerfile.workspace semantics change so `docker inspect` can prove which revision
 # is on the host (avoids “branch fixed it but EC2 still runs old :latest”).
-ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=3-entrypoint-cmd-reset
+ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=4-host-shared-workspace-projects
 LABEL devnest.workspace.dockerfile.revision="${DEVNEST_WORKSPACE_DOCKERFILE_REVISION}"
 
 USER root

@@ -12,6 +12,13 @@
 #   To force a rebuild after Dockerfile changes: bump DEVNEST_WORKSPACE_DOCKERFILE_REVISION or use
 #     docker compose -f docker-compose.integration.yml build --no-cache workspace-image
 #
+# Workspace bind mounts + permissions (IMPORTANT):
+#   Backend/worker only mount docker.sock by default. If WORKSPACE_PROJECTS_BASE is unset, the app
+#   uses /tmp/devnest-workspaces INSIDE the control-plane container — mkdir/chown there do NOT
+#   change the host paths Docker bind-mounts into workspace containers → root-owned host dirs →
+#   EACCES for coder (UID 1000). Mount a host directory at the SAME path and set WORKSPACE_PROJECTS_BASE
+#   (below) so orchestrator mkdir/chown apply to the real bind sources the daemon uses.
+#
 # EC2 / remote host (set public API URL for browser clients):
 #   NEXT_PUBLIC_API_BASE_URL=http://YOUR_PUBLIC_IP:8000 docker compose -f docker-compose.integration.yml up -d --build
 #
@@ -47,7 +54,7 @@ services:
       dockerfile: Dockerfile.workspace
       args:
         # Bump or export a new value to invalidate build cache when debugging stale EC2 images.
-        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-3-entrypoint-cmd-reset}
+        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-4-host-shared-workspace-projects}
     entrypoint: ["/bin/true"]
 
   postgres:
@@ -80,10 +87,13 @@ services:
       DEVNEST_WORKER_ENABLED: "false"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
       <<: *workspace_image
+      # Pydantic Settings: field workspace_projects_base → env WORKSPACE_PROJECTS_BASE.
+      WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       # Some CI runners provide a minimal PATH; console scripts live under /usr/local/bin.
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/devnest/workspace-projects:/var/lib/devnest/workspace-projects
     depends_on:
       postgres:
         condition: service_healthy
@@ -116,9 +126,11 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_RATE_LIMIT_ENABLED: "false"
       <<: *workspace_image
+      WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/devnest/workspace-projects:/var/lib/devnest/workspace-projects
     depends_on:
       postgres:
         condition: service_healthy
