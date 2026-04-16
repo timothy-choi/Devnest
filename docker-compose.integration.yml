@@ -3,6 +3,15 @@
 # Usage (repo root):
 #   docker compose -f docker-compose.integration.yml up -d --build
 #
+# Workspace runtime image (IMPORTANT):
+#   User workspace containers use image devnest/workspace:latest built from Dockerfile.workspace.
+#   The Docker API does NOT override ENTRYPOINT/CMD at container create time — Config.Entrypoint/Cmd
+#   always come from the image. If EC2 shows the old entrypoint (embedded --bind-addr and ".") and
+#   Cmd starting with "code-server", the host is running a STALE image: rebuild workspace-image and
+#   ensure backend/worker use the new image (see scripts/verify-workspace-image.sh).
+#   To force a rebuild after Dockerfile changes: bump DEVNEST_WORKSPACE_DOCKERFILE_REVISION or use
+#     docker compose -f docker-compose.integration.yml build --no-cache workspace-image
+#
 # EC2 / remote host (set public API URL for browser clients):
 #   NEXT_PUBLIC_API_BASE_URL=http://YOUR_PUBLIC_IP:8000 docker compose -f docker-compose.integration.yml up -d --build
 #
@@ -36,6 +45,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.workspace
+      args:
+        # Bump or export a new value to invalidate build cache when debugging stale EC2 images.
+        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-3-entrypoint-cmd-reset}
     entrypoint: ["/bin/true"]
 
   postgres:

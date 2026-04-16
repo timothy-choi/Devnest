@@ -32,9 +32,19 @@ else
 fi
 
 docker compose -f "${COMPOSE}" down || true
+# Build workspace-image explicitly so devnest/workspace:latest always reflects Dockerfile.workspace
+# on this host (Compose may otherwise reuse a stale :latest if cache is not invalidated).
+docker compose -f "${COMPOSE}" build workspace-image
 # --force-recreate ensures services pick up compose changes (e.g. pid: host for Linux topology attach).
 docker compose -f "${COMPOSE}" up -d --build --force-recreate
 docker compose -f "${COMPOSE}" ps
+
+echo "--- workspace image (expected: Entrypoint = [\"/usr/bin/entrypoint.sh\"] only; Cmd without code-server) ---"
+docker image inspect devnest/workspace:latest --format '{{json .Config.Labels}}' 2>/dev/null || true
+docker image inspect devnest/workspace:latest --format 'Entrypoint={{json .Config.Entrypoint}} Cmd={{json .Config.Cmd}}' 2>/dev/null || true
+if [[ -x "${REPO_DIR}/scripts/verify-workspace-image.sh" ]]; then
+  "${REPO_DIR}/scripts/verify-workspace-image.sh" devnest/workspace:latest || true
+fi
 
 echo "--- deploy diagnostics ---"
 git status || true
