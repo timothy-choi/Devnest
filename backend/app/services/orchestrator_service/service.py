@@ -42,6 +42,7 @@ from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResu
 
 from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
+    ensure_host_path_owned_by_workspace_user,
 )
 from app.services.placement_service.runtime_policy import authoritative_container_ref_required
 
@@ -278,6 +279,8 @@ class DefaultOrchestratorService(OrchestratorService):
         try:
             os.makedirs(cfg_host, exist_ok=True)
             os.makedirs(data_host, exist_ok=True)
+            ensure_host_path_owned_by_workspace_user(cfg_host)
+            ensure_host_path_owned_by_workspace_user(data_host)
         except OSError as e:
             logger.warning(
                 "orchestrator_code_server_bind_mount_mkdir_failed",

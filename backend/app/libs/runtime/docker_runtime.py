@@ -752,7 +752,23 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             time.sleep(0.1)
         ins = last_ins
         assert ins is not None
+        log_hint = ""
+        cid = ins.container_id or container_id
+        if ins.container_state == "exited":
+            try:
+                ctr = self._client.containers.get(cid)
+                raw = ctr.logs(tail=48).decode("utf-8", errors="replace").strip()
+                if raw:
+                    tail = raw[-2000:]
+                    log_hint = (
+                        "\n--- workspace container log tail (runtime startup; not topology) ---\n"
+                        f"{tail}"
+                    )
+            except Exception:
+                log_hint = ""
         raise NetnsRefError(
-            f"no host PID for container {ins.container_id!r} after waiting (state={ins.container_state!r}); "
-            f"is the workspace container still running?",
+            f"no host PID for container {cid!r} after waiting (state={ins.container_state!r}). "
+            "If the container exited immediately, this is usually a workspace runtime startup failure "
+            "(e.g. code-server cannot write bind-mounted config under /home/coder/.config/code-server), "
+            f"not a topology attachment issue.{log_hint}",
         )

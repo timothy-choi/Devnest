@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
@@ -9,7 +10,48 @@ from pathlib import Path
 
 from app.libs.topology.system.command_runner import CommandRunner
 
+logger = logging.getLogger(__name__)
+
 _WORKSPACE_ID_SAFE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+
+
+def workspace_container_uid_gid() -> tuple[int, int]:
+    """UID/GID of the non-root user inside the workspace image (bind mounts must match on the host)."""
+    uid_raw = os.environ.get("DEVNEST_WORKSPACE_CONTAINER_UID", "1000").strip()
+    gid_raw = os.environ.get("DEVNEST_WORKSPACE_CONTAINER_GID", "1000").strip()
+    try:
+        return int(uid_raw), int(gid_raw)
+    except ValueError:
+        return 1000, 1000
+
+
+def ensure_host_path_owned_by_workspace_user(path: str) -> None:
+    """
+    Recursively ``chown`` a host path tree to the workspace container user (default 1000:1000).
+
+    Orchestrator and API processes often run as root and create directories with root ownership.
+    Those paths are bind-mounted into the container where ``code-server`` runs as ``coder``; without
+    a matching UID/GID on the host, writes (e.g. ``config.yaml``) fail with EACCES.
+    """
+    root = Path(path).resolve()
+    if not root.exists():
+        return
+    uid, gid = workspace_container_uid_gid()
+    try:
+        if root.is_file():
+            os.chown(root, uid, gid, follow_symlinks=False)
+            return
+        for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+            for name in filenames:
+                os.chown(os.path.join(dirpath, name), uid, gid, follow_symlinks=False)
+            for name in dirnames:
+                os.chown(os.path.join(dirpath, name), uid, gid, follow_symlinks=False)
+        os.chown(root, uid, gid, follow_symlinks=False)
+    except OSError as e:
+        logger.warning(
+            "workspace_host_chown_failed",
+            extra={"path": str(root), "uid": uid, "gid": gid, "error": str(e)},
+        )
 
 
 def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id: str) -> str:
@@ -23,6 +65,7 @@ def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id:
         p.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         raise ValueError(f"cannot create workspace project directory {p}: {e}") from e
+    ensure_host_path_owned_by_workspace_user(str(p))
     return str(p)
 
 
