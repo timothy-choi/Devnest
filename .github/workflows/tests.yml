@@ -4,30 +4,13 @@ on:
   push:
     branches:
       - "**"
-    paths:
-      - "backend/**"
-      - "frontend/**"
-      - "devnest-gateway/**"
-      - "traefik/**"
-      - "docker-compose*.yml"
-      - "docker-compose.system.yml"
-      - "docker-compose.integration.yml"
-      - "backend/tests/system/**"
-      - ".github/workflows/**"
   pull_request:
     branches:
       - "**"
-    paths:
-      - "backend/**"
-      - "frontend/**"
-      - "devnest-gateway/**"
-      - "traefik/**"
-      - "docker-compose*.yml"
-      - "docker-compose.system.yml"
-      - "docker-compose.integration.yml"
-      - "backend/tests/system/**"
-      - ".github/workflows/**"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
@@ -43,6 +26,11 @@ concurrency:
 # Path filters (job `detect`): backend-only changes skip gateway tests; devnest-gateway-only
 # (or root compose / traefik) changes skip heavy backend jobs. Any workflow edit
 # under .github/workflows/ runs both backend and gateway jobs.
+#
+# Triggers: all branch pushes + all PRs + workflow_dispatch (no `on.push.paths` filter).
+#
+# EC2: after linux-full-stack-integration succeeds, deploy-staging (non-main push/dispatch) or
+# deploy-production (main) runs appleboy/ssh-action + scripts/deploy-ec2.sh. Pull requests never deploy.
 #
 # --- Nightly tier ---
 # See nightly.yml: full suite including heavy markers + topology_linux + workspace_image,
@@ -516,18 +504,33 @@ jobs:
 
   # --- Full-stack Linux integration (after merge-tier tests) ---
   # Brings up PostgreSQL + API + worker + frontend via docker-compose.integration.yml.
-  # Runner-local URLs are for logs only; persistent access requires EC2 deploy (see deploy-ec2-full-stack).
+  # Runner-local URLs are for logs only; persistent access requires EC2 deploy (deploy-staging / deploy-production).
 
   linux-full-stack-integration:
     name: Linux full-stack (Docker Compose)
-    needs: [detect, unit-tests, integration-tests, system-tests, frontend-checks]
+    needs:
+      - detect
+      - gateway-tests
+      - system-gateway-tests
+      - frontend-checks
+      - quality-checks
+      - unit-tests
+      - integration-tests
+      - system-tests
     if: >-
       always() &&
+      needs.detect.result == 'success' &&
       needs.unit-tests.result != 'failure' && needs.unit-tests.result != 'cancelled' &&
       needs.integration-tests.result != 'failure' && needs.integration-tests.result != 'cancelled' &&
       needs.system-tests.result != 'failure' && needs.system-tests.result != 'cancelled' &&
+      (needs.gateway-tests.result == 'success' || needs.gateway-tests.result == 'skipped') &&
+      (needs.system-gateway-tests.result == 'success' || needs.system-gateway-tests.result == 'skipped') &&
       (needs.frontend-checks.result == 'success' || needs.frontend-checks.result == 'skipped') &&
-      needs.frontend-checks.result != 'failure' && needs.frontend-checks.result != 'cancelled'
+      (needs.quality-checks.result == 'success' || needs.quality-checks.result == 'skipped') &&
+      needs.gateway-tests.result != 'failure' && needs.gateway-tests.result != 'cancelled' &&
+      needs.system-gateway-tests.result != 'failure' && needs.system-gateway-tests.result != 'cancelled' &&
+      needs.frontend-checks.result != 'failure' && needs.frontend-checks.result != 'cancelled' &&
+      needs.quality-checks.result != 'failure' && needs.quality-checks.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -580,18 +583,44 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.integration.yml down -v
 
-  deploy-ec2-full-stack:
-    name: Deploy full-stack to EC2
-    needs: [linux-full-stack-integration]
-    # `secrets` cannot be used in `if` (job or step). Map to `env` here, then gate with `env.*` in `if`.
-    if: needs.linux-full-stack-integration.result == 'success'
+  # Branch-based EC2 deploy: staging = non-main pushes (and manual dispatch on that ref);
+  # production = main only. Pull requests never deploy (event_name is pull_request).
+  deploy-staging:
+    name: Deploy to EC2 (staging)
+    needs:
+      - detect
+      - gateway-tests
+      - system-gateway-tests
+      - frontend-checks
+      - quality-checks
+      - unit-tests
+      - integration-tests
+      - system-tests
+      - linux-full-stack-integration
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref != 'refs/heads/main' &&
+      needs.linux-full-stack-integration.result == 'success' &&
+      needs.detect.result == 'success' &&
+      needs.unit-tests.result != 'failure' && needs.unit-tests.result != 'cancelled' &&
+      needs.integration-tests.result != 'failure' && needs.integration-tests.result != 'cancelled' &&
+      needs.system-tests.result != 'failure' && needs.system-tests.result != 'cancelled' &&
+      (needs.gateway-tests.result == 'success' || needs.gateway-tests.result == 'skipped') &&
+      (needs.system-gateway-tests.result == 'success' || needs.system-gateway-tests.result == 'skipped') &&
+      (needs.frontend-checks.result == 'success' || needs.frontend-checks.result == 'skipped') &&
+      (needs.quality-checks.result == 'success' || needs.quality-checks.result == 'skipped') &&
+      needs.gateway-tests.result != 'failure' && needs.gateway-tests.result != 'cancelled' &&
+      needs.system-gateway-tests.result != 'failure' && needs.system-gateway-tests.result != 'cancelled' &&
+      needs.frontend-checks.result != 'failure' && needs.frontend-checks.result != 'cancelled' &&
+      needs.quality-checks.result != 'failure' && needs.quality-checks.result != 'cancelled'
     runs-on: ubuntu-latest
     env:
       EC2_DEPLOY_HOST: ${{ secrets.EC2_HOST }}
       EC2_DEPLOY_USER: ${{ secrets.EC2_USER }}
       EC2_DEPLOY_KEY: ${{ secrets.EC2_SSH_KEY }}
     steps:
-      # Fails fast with a clearer message than ssh-action when SG/NACL block port 22.
       - name: Preflight — TCP port 22 reachable
         if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
         env:
@@ -600,10 +629,7 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y netcat-openbsd
           nc -zvw30 "$EC2_HOST" 22
 
-      # EC2_SSH_KEY must be the *private* key (PEM or OpenSSH: BEGIN … PRIVATE KEY … END).
-      # Not a .ppk (PuTTY); not the public key. Paste the full multiline key into the secret.
-      # If the key has a passphrase, add passphrase to appleboy/ssh-action (or use a key without one for deploy).
-      - name: Deploy to EC2
+      - name: Deploy staging branch to EC2
         if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
         uses: appleboy/ssh-action@v1.2.3
         with:
@@ -613,41 +639,106 @@ jobs:
           port: 22
           timeout: 2m
           command_timeout: 45m
-          script_stop: true
           script: |
-            set -euo pipefail
-            REPO_URL="https://github.com/timothy-choi/Devnest.git"
-            REPO_DIR="${HOME}/Devnest"
-            COMMIT_SHA="${{ github.sha }}"
-            COMPOSE="${REPO_DIR}/docker-compose.integration.yml"
-            if [ ! -d "${REPO_DIR}/.git" ]; then
-              mkdir -p "$(dirname "${REPO_DIR}")"
-              git clone "${REPO_URL}" "${REPO_DIR}"
-            fi
-            cd "${REPO_DIR}"
-            git remote set-url origin "${REPO_URL}"
-            git fetch origin --prune --tags
-            if ! git checkout -f "${COMMIT_SHA}"; then
-              echo "WARN: ${COMMIT_SHA} not in local repo yet; syncing main then retrying." >&2
-              git checkout -f main
-              git pull --ff-only origin main
-              git checkout -f "${COMMIT_SHA}"
-            fi
-            if [ ! -f "${COMPOSE}" ]; then
-              echo "Missing ${COMPOSE} (commit $(git rev-parse --short HEAD))." >&2
-              ls -la "${REPO_DIR}" >&2
-              git ls-tree -r HEAD --name-only | head -80 >&2
-              exit 1
-            fi
+            set -e
+            echo "Deploying branch: ${{ github.ref_name }}"
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
-            docker compose -f "${COMPOSE}" --project-directory "${REPO_DIR}" down || true
-            docker compose -f "${COMPOSE}" --project-directory "${REPO_DIR}" up -d --build
-            echo "Deployment complete."
+            export DEVNEST_DEPLOY_DIR="${HOME}/Devnest"
+            if [ ! -d "${DEVNEST_DEPLOY_DIR}/.git" ]; then
+              git clone https://github.com/timothy-choi/Devnest.git "${DEVNEST_DEPLOY_DIR}"
+            fi
+            cd "${DEVNEST_DEPLOY_DIR}"
+            git fetch origin
+            if [ ! -f scripts/deploy-ec2.sh ]; then
+              git checkout -f main
+              git reset --hard origin/main
+            fi
+            bash scripts/deploy-ec2.sh "${{ github.ref_name }}"
 
-      - name: Print DevNest URL
+      - name: Print DevNest URL (staging)
         if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
         run: |
-          echo "DevNest (EC2) — open in browser (security group must allow ports 3000 and 8000):"
+          echo "Staging deploy — DevNest (EC2); security group must allow TCP 22, 3000, 8000:"
           echo "  UI:        http://${{ env.EC2_DEPLOY_HOST }}:3000"
           echo "  API:       http://${{ env.EC2_DEPLOY_HOST }}:8000"
           echo "  API docs:  http://${{ env.EC2_DEPLOY_HOST }}:8000/docs"
+          echo "  Branch:    ${{ github.ref_name }}"
+
+  deploy-production:
+    name: Deploy to EC2 (production)
+    needs:
+      - detect
+      - gateway-tests
+      - system-gateway-tests
+      - frontend-checks
+      - quality-checks
+      - unit-tests
+      - integration-tests
+      - system-tests
+      - linux-full-stack-integration
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main' &&
+      needs.linux-full-stack-integration.result == 'success' &&
+      needs.detect.result == 'success' &&
+      needs.unit-tests.result != 'failure' && needs.unit-tests.result != 'cancelled' &&
+      needs.integration-tests.result != 'failure' && needs.integration-tests.result != 'cancelled' &&
+      needs.system-tests.result != 'failure' && needs.system-tests.result != 'cancelled' &&
+      (needs.gateway-tests.result == 'success' || needs.gateway-tests.result == 'skipped') &&
+      (needs.system-gateway-tests.result == 'success' || needs.system-gateway-tests.result == 'skipped') &&
+      (needs.frontend-checks.result == 'success' || needs.frontend-checks.result == 'skipped') &&
+      (needs.quality-checks.result == 'success' || needs.quality-checks.result == 'skipped') &&
+      needs.gateway-tests.result != 'failure' && needs.gateway-tests.result != 'cancelled' &&
+      needs.system-gateway-tests.result != 'failure' && needs.system-gateway-tests.result != 'cancelled' &&
+      needs.frontend-checks.result != 'failure' && needs.frontend-checks.result != 'cancelled' &&
+      needs.quality-checks.result != 'failure' && needs.quality-checks.result != 'cancelled'
+    runs-on: ubuntu-latest
+    env:
+      EC2_DEPLOY_HOST: ${{ secrets.EC2_HOST }}
+      EC2_DEPLOY_USER: ${{ secrets.EC2_USER }}
+      EC2_DEPLOY_KEY: ${{ secrets.EC2_SSH_KEY }}
+    steps:
+      - name: Preflight — TCP port 22 reachable
+        if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y netcat-openbsd
+          nc -zvw30 "$EC2_HOST" 22
+
+      - name: Deploy production (main) to EC2
+        if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
+        uses: appleboy/ssh-action@v1.2.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          timeout: 2m
+          command_timeout: 45m
+          script: |
+            set -e
+            echo "Deploying production branch: main"
+            export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
+            export DEVNEST_DEPLOY_DIR="${HOME}/Devnest"
+            if [ ! -d "${DEVNEST_DEPLOY_DIR}/.git" ]; then
+              git clone https://github.com/timothy-choi/Devnest.git "${DEVNEST_DEPLOY_DIR}"
+            fi
+            cd "${DEVNEST_DEPLOY_DIR}"
+            git fetch origin
+            if [ ! -f scripts/deploy-ec2.sh ]; then
+              git checkout -f main
+              git reset --hard origin/main
+            fi
+            bash scripts/deploy-ec2.sh main
+
+      - name: Print DevNest URL (production)
+        if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
+        run: |
+          echo "Production deploy — DevNest (EC2); security group must allow TCP 22, 3000, 8000:"
+          echo "  UI:        http://${{ env.EC2_DEPLOY_HOST }}:3000"
+          echo "  API:       http://${{ env.EC2_DEPLOY_HOST }}:8000"
+          echo "  API docs:  http://${{ env.EC2_DEPLOY_HOST }}:8000/docs"
+          echo "  Branch:    main"

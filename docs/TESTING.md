@@ -58,7 +58,7 @@ pytest tests -v --timeout=300 --maxfail=0 -ra
 
 ## Merge-time vs nightly (CI)
 
-- **Merge-time** (`.github/workflows/tests.yml`): Fast PR signal. Pytest excludes markers
+- **Merge-time** (`.github/workflows/tests.yml`): Runs on **every branch push**, **every PR**, and **`workflow_dispatch`** (no `paths` filter on the workflow trigger). Fast PR signal. Pytest excludes markers
   `slow`, `topology_heavy`, `concurrency`, `failure_path`, `topology_linux`, `topology_linux_core`
   for unit/integration/system (with additional system exclusions for `gateway`, `workspace_image`).
   **`pytest-timeout`** is enforced (`--timeout=300`, `--maxfail=0`, `-ra`) on unit, integration, system, and quality jobs.
@@ -298,37 +298,23 @@ This section maps **product-critical paths** to tests and CI tier. “E2E” her
 
 ## CI / GitHub Actions
 
-The CI pipeline runs unit tests on every push and PR:
+Workflow **`.github/workflows/tests.yml`** runs on **all branch pushes**, **all pull requests**, and **`workflow_dispatch`**. It keeps existing gates: **quality-checks**, **unit**, **integration**, **system**, **gateway**, **system-gateway**, **frontend-checks**, and **linux-full-stack-integration** (Compose smoke on the runner). **Nightly** coverage stays in **`nightly.yml`** (unchanged).
 
-```yaml
-- name: Run unit tests
-  run: |
-    cd backend
-    pytest tests/unit/ -v --tb=short
-```
+### Linux full-stack + EC2 (`tests.yml`)
 
-Integration tests run in CI against a PostgreSQL service container:
+1. **Path-based `detect`** still skips jobs when a change only touches unrelated areas (same as before).
+2. After required jobs succeed, **linux-full-stack-integration** brings up **`docker-compose.integration.yml`**, waits for **`http://localhost:8000/health`** and **`http://localhost:3000/`**, then tears the stack down.
+3. **Deploy** (only if secrets are set) uses **`appleboy/ssh-action@v1.2.3`** and the repo script **`scripts/deploy-ec2.sh`** (branch tip + compose rebuild; logs/`git` diagnostics at the end). **Pull requests never deploy.** **Push to non-`main`** → **deploy-staging**; **push to `main`** → **deploy-production**. **`workflow_dispatch`** follows the same rule using the selected ref.
 
-```yaml
-services:
-  postgres:
-    image: postgres:15
-    env:
-      POSTGRES_DB: devnest_test
-      POSTGRES_USER: devnest
-      POSTGRES_PASSWORD: devnest
-    ports:
-      - 5432:5432
-```
+| Secret | Purpose |
+|--------|---------|
+| `EC2_HOST` | Public DNS or IPv4 |
+| `EC2_USER` | SSH user |
+| `EC2_SSH_KEY` | Private key (full multiline PEM/OpenSSH) |
 
-### Linux full-stack workflow (`tests.yml`)
+Missing secrets → deploy jobs skip; tests can still pass. Job `if` conditions use `env.*` mapped from secrets (GitHub does not allow `secrets.*` in all `if:` contexts).
 
-The merge workflow **`.github/workflows/tests.yml`** also:
-
-1. Runs **frontend** checks (Node 20): `npm install`, `npm run lint || true`, `npx tsc --noEmit`, `npm run build`.
-2. After backend unit / integration / system jobs and frontend checks succeed, starts **`docker-compose.integration.yml`** on **`ubuntu-latest`**: PostgreSQL, FastAPI (Alembic + `uvicorn`), standalone workspace job poll loop, and Next.js (`frontend/Dockerfile.integration`). The backend image includes **`iproute2`** for Linux topology tooling; the compose stack mounts the host **Docker socket** and adds **`NET_ADMIN`** for workspace bring-up patterns.
-3. Waits for **`http://localhost:8000/health`** and **`http://localhost:3000/`** on the runner, then tears the stack down. Those URLs are **only valid inside the job**; they are printed for debugging.
-4. Optionally **deploys the same compose file to EC2** via **`appleboy/ssh-action@v1.0.3`** when repository secrets are set (see below). The remote build uses `NEXT_PUBLIC_API_BASE_URL=http://<EC2_HOST>:8000` so the browser UI can reach the API.
+**Verify a deploy:** open `http://<EC2_HOST>:3000` and `http://<EC2_HOST>:8000/health` after the workflow completes; check the **Deploy to EC2** job log for `git rev-parse HEAD` and `docker compose ps` output from the script.
 
 **Run the stack locally (Linux or Docker Desktop):**
 
@@ -340,18 +326,7 @@ curl -fsS http://localhost:8000/health
 curl -fsS http://localhost:3000/
 ```
 
-**GitHub Actions secrets (EC2 deploy):**
-
-| Secret | Purpose |
-|--------|---------|
-| `EC2_HOST` | Public DNS or IPv4 of the instance |
-| `EC2_USER` | SSH user (e.g. `ubuntu`, `ec2-user`) |
-| `EC2_SSH_KEY` | Private key PEM for that user (full key contents) |
-| `NGROK_AUTHTOKEN` | *(Optional)* Not wired in the workflow by default; use if you add a tunnel step for ephemeral preview hosts |
-
-If any of `EC2_HOST`, `EC2_USER`, or `EC2_SSH_KEY` is missing, the **Deploy to EC2** and **Print DevNest URL** steps are **skipped** (the job still runs after the full-stack smoke succeeds). GitHub does not allow the `secrets` context inside `if` expressions; the workflow maps secrets to job `env` and uses `env.*` in step `if` conditions instead.
-
-**EC2 instance expectations:** Docker and Docker Compose v2 installed; security group allows **TCP 3000** and **8000** (and **22** for SSH). The deploy script clones/updates **`https://github.com/timothy-choi/Devnest.git`** into **`~/Devnest`** on the instance.
+**EC2 instance expectations:** Docker and Docker Compose v2; Git; security group allows **TCP 22**, **3000**, and **8000**. Repo on instance: **`~/Devnest`** (clone of **`https://github.com/timothy-choi/Devnest.git`**).
 
 After a successful deploy, the workflow logs print:
 
@@ -359,7 +334,7 @@ After a successful deploy, the workflow logs print:
 - `http://<EC2_HOST>:8000` — API  
 - `http://<EC2_HOST>:8000/docs` — OpenAPI docs  
 
-The **exact** URL is your **`EC2_HOST`** secret value; it is not a fixed hostname in the repo.
+The **exact** host is the **`EC2_HOST`** secret; it is not hardcoded in the repo.
 
 ---
 

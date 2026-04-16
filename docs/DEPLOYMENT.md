@@ -368,14 +368,51 @@ docker compose -f docker-compose.dev.yml exec backend alembic upgrade head
 
 ## CI/CD (GitHub Actions)
 
-The CI pipeline (`tests.yml`) automatically:
+The CI pipeline (`.github/workflows/tests.yml`) runs on **every push to any branch**, **every pull request**, and **`workflow_dispatch`**. It runs quality checks, backend unit/integration/system tests, gateway tests, frontend checks, and a **Linux full-stack smoke** job (`docker-compose.integration.yml` on the runner).
 
-1. Spins up PostgreSQL as a service container.
-2. Installs Python dependencies.
-3. Runs `alembic upgrade head` against the test database.
-4. Runs unit, integration, and system test suites.
+### EC2: automatic deploy after tests
 
-To trigger locally:
+The same instance is used for **staging** (non-`main` branches) and **production** (`main`): the latest code that passed CI is checked out on the host and the integration compose stack is rebuilt. No manual SSH is required once secrets and the instance are configured.
+
+| Event | Tests | Deploy |
+|-------|--------|--------|
+| `push` to any branch except `main` | Yes | **Staging** — syncs `origin/<branch>` and `docker compose ... up -d --build` |
+| `push` or merge to `main` | Yes | **Production** — syncs `origin/main` |
+| `pull_request` | Yes | **No deploy** (PRs never run deploy jobs) |
+| `workflow_dispatch` | Yes | **Staging** if the selected ref is not `main`, else **production** |
+
+**Required repository secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Purpose |
+|--------|---------|
+| `EC2_HOST` | Public DNS or IPv4 of the instance |
+| `EC2_USER` | SSH user (e.g. `ubuntu`, `ec2-user`) |
+| `EC2_SSH_KEY` | **Private** key material (full PEM / OpenSSH block), not `.ppk` |
+
+If any of these is empty, deploy steps are skipped; the workflow still passes if tests succeed.
+
+**Remote behavior:** CI uses `appleboy/ssh-action@v1.2.3` (no unsupported inputs) and runs `scripts/deploy-ec2.sh` on the server. That script clones or updates `~/Devnest`, **checks out a branch by name** (`git reset --hard origin/<branch>`), sets `NEXT_PUBLIC_API_BASE_URL` from the workflow for the UI build, runs `docker compose -f docker-compose.integration.yml down` / `up -d --build`, then prints **git status**, **HEAD**, **compose ps**, and **compose logs** for debugging.
+
+**Why previous deploys failed:** (1) `git checkout <sha>` when the shallow or stale clone did not yet have that commit produced **“fatal: reference is not a tree”**; deploys now track **remote branch tips** (`origin/<branch>`). (2) `script_stop` is **not** an input on `appleboy/ssh-action@v1.2.3` and could cause confusion or tool errors; it was removed. (3) **Pull requests** used to look like non-`main` refs; deploy jobs now run only on **`push`** and **`workflow_dispatch`**, never on `pull_request`.
+
+**EC2 instance expectations:** Docker Engine + Compose v2; Git installed; security group allows **22**, **3000**, **8000**; outbound HTTPS for `git fetch` and image pulls.
+
+**Manual redeploy on the instance:**
+
+```bash
+export NEXT_PUBLIC_API_BASE_URL="http://<EC2_PUBLIC_IP>:8000"
+bash ~/Devnest/scripts/deploy-ec2.sh main          # production
+# or
+bash ~/Devnest/scripts/deploy-ec2.sh <branch-name> # staging
+```
+
+**URLs after deploy** (replace with your `EC2_HOST`):
+
+- UI: `http://<EC2_HOST>:3000`
+- API: `http://<EC2_HOST>:8000`
+- OpenAPI: `http://<EC2_HOST>:8000/docs`
+
+To trigger tests locally:
 
 ```bash
 # Integration tests
