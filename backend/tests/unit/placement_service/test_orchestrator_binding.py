@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from app.libs.topology.models import Topology  # noqa: F401 — register metadata for create_all
 from app.services.auth_service.models import UserAuth
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 from app.services.placement_service.orchestrator_binding import resolve_orchestrator_placement
@@ -77,6 +78,23 @@ def _seed_workspace_and_job(
     return ws, job
 
 
+def _seed_topology(session: Session, topology_id: int) -> None:
+    if session.get(Topology, topology_id) is not None:
+        return
+    now = datetime.now(timezone.utc)
+    session.add(
+        Topology(
+            topology_id=topology_id,
+            name=f"test-topology-{topology_id}",
+            version="v1",
+            spec_json={},
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    session.commit()
+
+
 def _add_node(session: Session, *, key: str, alloc_cpu: float = 4.0, alloc_mem: int = 8192) -> None:
     total_cpu = max(4.0, float(alloc_cpu))
     total_memory_mb = max(8192, int(alloc_mem))
@@ -99,6 +117,7 @@ def _add_node(session: Session, *, key: str, alloc_cpu: float = 4.0, alloc_mem: 
 def test_create_selects_highest_capacity_node(bind_engine: Engine) -> None:
     with Session(bind_engine) as session:
         uid = _seed_user(session)
+        _seed_topology(session, 1)
         _add_node(session, key="small", alloc_cpu=2.0)
         _add_node(session, key="big", alloc_cpu=8.0)
         ws, job = _seed_workspace_and_job(session, owner_id=uid, job_type=WorkspaceJobType.CREATE.value)
@@ -136,6 +155,7 @@ def test_stop_reuses_runtime_node_and_topology(bind_engine: Engine) -> None:
 def test_fallback_to_env_when_no_runtime_and_not_placement_job(bind_engine: Engine) -> None:
     with Session(bind_engine) as session:
         uid = _seed_user(session)
+        _seed_topology(session, 7)
         _add_node(session, key="only", alloc_cpu=4.0)
         ws, job = _seed_workspace_and_job(
             session,

@@ -24,6 +24,7 @@ import os
 
 from sqlmodel import Session, select
 
+from app.libs.topology.models import Topology
 from app.services.scheduler_service.service import schedule_workspace
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceJobType, WorkspaceRuntime
 
@@ -47,6 +48,18 @@ def _runtime_row(session: Session, workspace_id: int) -> WorkspaceRuntime | None
     return session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id)).first()
 
 
+def _validate_topology_catalog_exists(session: Session, topology_id: int) -> None:
+    """Fail placement early if the topology catalog has no row for this id (misconfigured DB)."""
+    row = session.get(Topology, int(topology_id))
+    if row is None:
+        raise InvalidPlacementParametersError(
+            f"topology id {int(topology_id)} has no Topology catalog row. "
+            "Run database migrations and bootstrap (init_db seeds a default topology in development), "
+            "or insert a topology row for this id. "
+            "Check ExecutionNode.default_topology_id and DEVNEST_TOPOLOGY_ID match an existing topology.",
+        )
+
+
 def _schedule_workspace_placement(session: Session, workspace_id: int) -> tuple[str, int]:
     sch = schedule_workspace(session, workspace_id=workspace_id)
     if sch.invalid_request:
@@ -64,7 +77,9 @@ def _schedule_workspace_placement(session: Session, workspace_id: int) -> tuple[
         topo = int(node.default_topology_id)
     else:
         topo = node.default_topology_id if node.default_topology_id is not None else _topology_id_from_env()
-    return node.node_key, int(topo)
+    tid = int(topo)
+    _validate_topology_catalog_exists(session, tid)
+    return node.node_key, tid
 
 
 _JOBS_NEED_RUNTIME_PLACEMENT = frozenset(
@@ -107,7 +122,9 @@ def resolve_orchestrator_placement(
 
     if jt not in _JOBS_NEED_RUNTIME_PLACEMENT:
         if runtime_env_fallback_allowed():
-            return _node_key_from_env(), _topology_id_from_env()
+            nk, tid = _node_key_from_env(), _topology_id_from_env()
+            _validate_topology_catalog_exists(session, int(tid))
+            return nk, int(tid)
         raise AuthoritativePlacementError(
             f"Job type {jt!r} has no authoritative placement rule; set DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK=true "
             "in development or extend resolve_orchestrator_placement.",
@@ -132,7 +149,9 @@ def resolve_orchestrator_placement(
         )
 
     if runtime_env_fallback_allowed():
-        return _node_key_from_env(), _topology_id_from_env()
+        nk, tid = _node_key_from_env(), _topology_id_from_env()
+        _validate_topology_catalog_exists(session, int(tid))
+        return nk, int(tid)
 
     raise AuthoritativePlacementError(
         "WorkspaceRuntime placement is incomplete and env fallback is disabled "

@@ -1,0 +1,18 @@
+export type WorkspaceStatus = "setting-up" | "running" | "stopped" | "restarting" | "error";
+
+export type Workspace = {
+  id: number;
+  name: string;
+  description: string;
+  status: WorkspaceStatus;
+  rawStatus: string;
+  statusLabel: string;
+  statusDetail: string | null;
+  lastOpenedLabel: string;
+  lastModifiedLabel: string;
+  pendingAction: string | null;
+  isBusy: boolean;
+  canStop: boolean;
+  canRestart: boolean;
+  canDelete: boolean;
+};

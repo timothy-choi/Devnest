@@ -321,6 +321,46 @@ services:
       - 5432:5432
 ```
 
+### Linux full-stack workflow (`tests.yml`)
+
+The merge workflow **`.github/workflows/tests.yml`** also:
+
+1. Runs **frontend** checks (Node 20): `npm install`, `npm run lint || true`, `npx tsc --noEmit`, `npm run build`.
+2. After backend unit / integration / system jobs and frontend checks succeed, starts **`docker-compose.integration.yml`** on **`ubuntu-latest`**: PostgreSQL, FastAPI (Alembic + `uvicorn`), standalone workspace job poll loop, and Next.js (`frontend/Dockerfile.integration`). The backend image includes **`iproute2`** for Linux topology tooling; the compose stack mounts the host **Docker socket** and adds **`NET_ADMIN`** for workspace bring-up patterns.
+3. Waits for **`http://localhost:8000/health`** and **`http://localhost:3000/`** on the runner, then tears the stack down. Those URLs are **only valid inside the job**; they are printed for debugging.
+4. Optionally **deploys the same compose file to EC2** via **`appleboy/ssh-action@v1.0.3`** when repository secrets are set (see below). The remote build uses `NEXT_PUBLIC_API_BASE_URL=http://<EC2_HOST>:8000` so the browser UI can reach the API.
+
+**Run the stack locally (Linux or Docker Desktop):**
+
+```bash
+# From repo root; optional: point the UI at your machine’s API URL when testing from another device
+export NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000
+docker compose -f docker-compose.integration.yml up -d --build
+curl -fsS http://localhost:8000/health
+curl -fsS http://localhost:3000/
+```
+
+**GitHub Actions secrets (EC2 deploy):**
+
+| Secret | Purpose |
+|--------|---------|
+| `EC2_HOST` | Public DNS or IPv4 of the instance |
+| `EC2_USER` | SSH user (e.g. `ubuntu`, `ec2-user`) |
+| `EC2_SSH_KEY` | Private key PEM for that user (full key contents) |
+| `NGROK_AUTHTOKEN` | *(Optional)* Not wired in the workflow by default; use if you add a tunnel step for ephemeral preview hosts |
+
+If any of `EC2_HOST`, `EC2_USER`, or `EC2_SSH_KEY` is missing, the **Deploy to EC2** and **Print DevNest URL** steps are **skipped** (the job still runs after the full-stack smoke succeeds). GitHub does not allow the `secrets` context inside `if` expressions; the workflow maps secrets to job `env` and uses `env.*` in step `if` conditions instead.
+
+**EC2 instance expectations:** Docker and Docker Compose v2 installed; security group allows **TCP 3000** and **8000** (and **22** for SSH). The deploy script clones/updates **`https://github.com/timothy-choi/Devnest.git`** into **`~/Devnest`** on the instance.
+
+After a successful deploy, the workflow logs print:
+
+- `http://<EC2_HOST>:3000` — web UI  
+- `http://<EC2_HOST>:8000` — API  
+- `http://<EC2_HOST>:8000/docs` — OpenAPI docs  
+
+The **exact** URL is your **`EC2_HOST`** secret value; it is not a fixed hostname in the repo.
+
 ---
 
 ## Writing New Tests

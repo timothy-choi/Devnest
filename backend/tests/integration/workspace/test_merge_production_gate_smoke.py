@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 from sqlmodel import Session, select
 
+from app.libs.topology.models import Topology
 from app.services.auth_service.models import UserAuth
 from app.services.cleanup_service import CLEANUP_SCOPE_BRINGUP_ROLLBACK, drain_pending_cleanup_tasks, ensure_durable_cleanup_task
 from app.services.placement_service.errors import AuthoritativePlacementError
@@ -42,6 +43,23 @@ def _strict_prod_settings() -> object:
             "devnest_allow_runtime_env_fallback": False,
         },
     )()
+
+
+def _ensure_topology_row(session: Session, topology_id: int) -> None:
+    if session.get(Topology, topology_id) is not None:
+        return
+    now = datetime.now(timezone.utc)
+    session.add(
+        Topology(
+            topology_id=topology_id,
+            name=f"merge-gate-topology-{topology_id}",
+            version="v1",
+            spec_json={},
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    session.commit()
 
 
 def _seed_owner(session: Session) -> int:
@@ -125,6 +143,7 @@ def test_merge_smoke_repo_import_strict_ok_with_runtime(db_session: Session) -> 
     db_session.refresh(ws)
     db_session.refresh(job)
 
+    _ensure_topology_row(db_session, 42)
     with patch("app.services.placement_service.runtime_policy.get_settings", return_value=_strict_prod_settings()):
         nk, tid = resolve_orchestrator_placement(db_session, ws, job)
     assert nk == "node-1"
@@ -217,6 +236,7 @@ def test_merge_smoke_ec2_like_node_strict_stop_uses_runtime(db_session: Session)
     db_session.refresh(ws)
     db_session.refresh(job)
 
+    _ensure_topology_row(db_session, 100)
     with patch("app.services.placement_service.runtime_policy.get_settings", return_value=_strict_prod_settings()):
         nk, tid = resolve_orchestrator_placement(db_session, ws, job)
     assert nk == "ec2-merge-1"

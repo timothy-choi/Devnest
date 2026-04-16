@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.libs.topology.models import Topology  # noqa: F401 — register metadata for create_all
 from app.services.placement_service.bootstrap import default_local_node_key, ensure_default_local_execution_node
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 
@@ -38,3 +39,6 @@ def test_ensure_default_idempotent() -> None:
             assert a.default_topology_id == 1
             rows = list(session.exec(select(ExecutionNode)).all())
             assert len(rows) == 1
+            topo = session.get(Topology, 1)
+            assert topo is not None
+            assert topo.name.startswith("dev-local-topology")

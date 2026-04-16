@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
+from app.libs.topology.models import Topology  # noqa: F401 — register metadata for create_all
 from app.services.auth_service.models import UserAuth
 from app.services.placement_service.errors import AuthoritativePlacementError, InvalidPlacementParametersError
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
@@ -42,6 +43,23 @@ def _seed_user(session: Session) -> int:
     session.refresh(u)
     assert u.user_auth_id is not None
     return u.user_auth_id
+
+
+def _seed_topology(session: Session, topology_id: int) -> None:
+    if session.get(Topology, topology_id) is not None:
+        return
+    now = datetime.now(timezone.utc)
+    session.add(
+        Topology(
+            topology_id=topology_id,
+            name=f"strict-topology-{topology_id}",
+            version="v1",
+            spec_json={},
+            created_at=now,
+            updated_at=now,
+        ),
+    )
+    session.commit()
 
 
 def _add_node(session: Session, *, default_topology_id: int | None = 99) -> None:
@@ -156,6 +174,7 @@ def test_start_with_partial_runtime_raises_when_strict(bind_engine: Engine) -> N
 def test_repo_import_reuses_complete_runtime_when_strict(bind_engine: Engine) -> None:
     with Session(bind_engine) as session:
         uid = _seed_user(session)
+        _seed_topology(session, 55)
         _add_node(session)
         ws, job = _ws_job(session, uid, WorkspaceJobType.REPO_IMPORT.value)
         wid = ws.workspace_id

@@ -45,6 +45,8 @@ def _workspace_control_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Hermetic placement / execution for parallel CI (xdist): avoid stale env forcing ec2-only or SSM.
     monkeypatch.setenv("DEVNEST_NODE_PROVIDER", "all")
     monkeypatch.delenv("DEVNEST_EXECUTION_MODE", raising=False)
+    # If a probe fails once, allow an immediate re-claim on the next /process poll in tests.
+    monkeypatch.setenv("WORKSPACE_JOB_RETRY_BACKOFF_SECONDS", "0")
     from app.libs.common.config import get_settings
 
     get_settings.cache_clear()
