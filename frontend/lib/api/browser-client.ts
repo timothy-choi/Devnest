@@ -58,6 +58,12 @@ export type CreateWorkspaceInput = {
   enableTerminal: boolean;
 };
 
+export type SignupSuccess = {
+  message: string;
+  username: string;
+  email: string;
+};
+
 export const browserApi = {
   auth: {
     async me() {
@@ -70,7 +76,7 @@ export const browserApi = {
       });
     },
     async signup(payload: SignupInput) {
-      return request<{ user: AuthUser }>("/api/auth/signup", {
+      return request<SignupSuccess>("/api/auth/signup", {
         method: "POST",
         body: JSON.stringify(payload),
       });

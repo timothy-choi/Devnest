@@ -10,6 +10,7 @@ import {
   type AuthUser,
   type LoginInput,
   type SignupInput,
+  type SignupSuccess,
 } from "@/lib/api/browser-client";
 import type { CurrentUser } from "@/types/auth";
 
@@ -19,7 +20,7 @@ type AuthContextValue = {
   isCheckingSession: boolean;
   isAuthenticated: boolean;
   login: (values: LoginInput) => Promise<CurrentUser>;
-  signup: (values: SignupInput) => Promise<CurrentUser>;
+  signup: (values: SignupInput) => Promise<SignupSuccess>;
   logout: () => Promise<void>;
 };
 
@@ -60,12 +61,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const signupMutation = useMutation({
-    mutationFn: async (values: SignupInput) => {
-      const response = await browserApi.auth.signup(values);
-      return normalizeUser(response.user);
-    },
-    onSuccess: (user) => {
-      queryClient.setQueryData(AUTH_QUERY_KEY, user);
+    mutationFn: (values: SignupInput) => browserApi.auth.signup(values),
+    onSuccess: () => {
+      queryClient.setQueryData(AUTH_QUERY_KEY, null);
+      void queryClient.invalidateQueries({ queryKey: AUTH_QUERY_KEY });
     },
   });
 
@@ -87,7 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isCheckingSession: authQuery.fetchStatus === "fetching",
         isAuthenticated: Boolean(authQuery.data),
         login: async (values) => loginMutation.mutateAsync(values),
-        signup: async (values) => signupMutation.mutateAsync(values),
+        signup: (values) => signupMutation.mutateAsync(values),
         logout: async () => logoutMutation.mutateAsync(),
       }}
     >

@@ -6,11 +6,19 @@ const REFRESH_TOKEN_COOKIE = "devnest_refresh_token";
 const ACCESS_TOKEN_MAX_AGE_SECONDS = 60 * 30;
 const REFRESH_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 14;
 
+/**
+ * Browsers ignore Secure cookies on plain HTTP. Production Next on EC2 (http://host:3000)
+ * must not set Secure unless the site is HTTPS. Opt in with AUTH_COOKIE_SECURE=true.
+ */
+function cookieSecureFlag() {
+  return process.env.AUTH_COOKIE_SECURE === "true";
+}
+
 function buildCookie(name: string, value: string, maxAge: number) {
   return serialize(name, value, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: cookieSecureFlag(),
     path: "/",
     maxAge,
   });

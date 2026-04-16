@@ -1,8 +1,14 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import loginHandler from "@/pages/api/auth/login";
 import { readBackendJson, backendRequest } from "@/lib/server/backend-client";
 import { forwardJson, sendMethodNotAllowed } from "@/lib/server/http";
+
+type RegisterOk = {
+  user_auth_id: number;
+  username: string;
+  email: string;
+  created_at: string;
+};
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== "POST") {
@@ -30,17 +36,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     retryOnUnauthorized: false,
   });
 
-  const registerData = await readBackendJson(registerResponse);
+  const registerData = await readBackendJson<RegisterOk | { detail: string }>(registerResponse);
 
   if (!registerResponse.ok) {
     forwardJson(res, registerResponse.status, registerData);
     return;
   }
 
-  req.body = {
-    username,
-    password,
-  };
+  const created = registerData as RegisterOk;
 
-  await loginHandler(req, res);
+  res.status(201).json({
+    message: "Account created successfully. Please log in.",
+    username: created.username,
+    email: created.email,
+  });
 }

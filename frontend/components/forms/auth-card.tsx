@@ -68,6 +68,9 @@ export function AuthCard({
 
   const isSubmitting = form.formState.isSubmitting;
 
+  const showRegisteredMessage =
+    router.isReady && mode === "login" && router.query.registered === "1";
+
   const handleSubmit = form.handleSubmit(async (values) => {
     setSubmitError(null);
 
@@ -78,13 +81,14 @@ export function AuthCard({
           email: values.email || "",
           password: values.password,
         });
-      } else {
-        await login({
-          username: values.username,
-          password: values.password,
-        });
+        await router.replace("/login?registered=1");
+        return;
       }
 
+      await login({
+        username: values.username,
+        password: values.password,
+      });
       await router.push("/dashboard");
     } catch (error) {
       setSubmitError(error instanceof ApiError ? error.detail : "Unable to complete authentication.");
@@ -126,6 +130,12 @@ export function AuthCard({
             </div>
 
             <form className="space-y-4" onSubmit={handleSubmit}>
+              {showRegisteredMessage ? (
+                <p className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                  Account created successfully. Please log in.
+                </p>
+              ) : null}
+
               <div className="space-y-2">
                 <Label htmlFor="username">Username</Label>
                 <Input id="username" placeholder="timchoi" {...form.register("username")} />
