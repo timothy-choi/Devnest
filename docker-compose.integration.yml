@@ -10,6 +10,10 @@
 # Gateway (Traefik) is optional for this stack; add docker-compose.system.yml-style services if you need data-plane routing.
 #
 # Backend uses the host Docker socket for workspace containers; NET_ADMIN helps topology bring-up on Linux.
+#
+# `pid: host` is required for topology veth attach: `ip link set … netns <pid>` and `nsenter -t <pid>`
+# must resolve Docker's State.Pid (host PID namespace). Without it, PIDs are invalid in the
+# container's isolated PID namespace → "Invalid netns value" / attach failures.
 
 name: devnest-integration
 
@@ -45,6 +49,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     user: "0:0"
+    pid: host
     ports:
       - "8000:8000"
     environment:
@@ -83,6 +88,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     user: "0:0"
+    pid: host
     environment:
       DATABASE_URL: postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev
       DEVNEST_ENV: development

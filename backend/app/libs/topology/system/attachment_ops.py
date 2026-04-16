@@ -9,9 +9,34 @@ All execution goes through ``CommandRunner`` for mocking in tests.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
+import sys
 
 from .command_runner import CommandRunner
+
+
+def _assert_netns_target_pid_visible(pid: str) -> None:
+    """
+    ``ip link set … netns <pid>`` and ``nsenter -t <pid>`` resolve ``pid`` in the **caller's PID namespace**.
+
+    Docker's ``State.Pid`` is the workspace init **host** PID. If the control plane runs in a
+    container without ``pid: host``, ``/proc/<pid>`` is missing and the kernel rejects the netns
+    with errors like ``Invalid "netns" value``.
+    """
+    if not re.fullmatch(r"\d+", pid):
+        return
+    if sys.platform != "linux":
+        return
+    proc_path = f"/proc/{pid}"
+    if not os.path.isdir(proc_path):
+        raise RuntimeError(
+            f"target PID {pid} for netns move is not visible ({proc_path} missing). "
+            "If the API/worker runs in Docker, set `pid: host` on that service so host PIDs from "
+            "Docker inspect match this process namespace. If /proc is missing because the "
+            "workspace container already exited, bring-up raced teardown — retry after the "
+            "workspace container is running."
+        )
 
 
 def _validate_ifname(name: str, *, label: str = "interface") -> str:
@@ -67,6 +92,7 @@ def validate_netns_ref(netns_ref: str) -> str:
 def _netns_prefix(netns_ref: str) -> list[str]:
     """``nsenter`` argv prefix to run a command in the target network namespace."""
     pid = _pid_from_netns_ref(netns_ref)
+    _assert_netns_target_pid_visible(pid)
     return ["nsenter", "-n", "-t", pid, "--"]
 
 
@@ -161,8 +187,19 @@ def move_container_if_to_netns(container_if: str, netns_ref: str, *, runner: Com
     """
     c = _validate_ifname(container_if, label="container_if")
     pid = _pid_from_netns_ref(netns_ref)
+    _assert_netns_target_pid_visible(pid)
     r = runner or CommandRunner()
-    r.run(["ip", "link", "set", "dev", c, "netns", pid])
+    try:
+        r.run(["ip", "link", "set", "dev", c, "netns", pid])
+    except RuntimeError as e:
+        err = str(e).lower()
+        if "invalid" in err and "netns" in err:
+            raise RuntimeError(
+                f"ip link set dev {c} netns {pid} failed: {e}. "
+                "Usually host PID from Docker is not visible in this PID namespace (use `pid: host` "
+                "for the control-plane container) or the workspace init process exited before attach."
+            ) from e
+        raise
 
 
 def assign_ip_in_netns(

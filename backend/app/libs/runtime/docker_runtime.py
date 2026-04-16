@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import time
 from collections.abc import Mapping, Sequence
 
 import docker
@@ -255,7 +257,12 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
     if raw_pid is None or raw_pid == 0:
         pid = None
     else:
-        pid = int(raw_pid)
+        try:
+            p = int(raw_pid)
+        except (TypeError, ValueError):
+            pid = None
+        else:
+            pid = None if p <= 0 else p
 
     cid = attrs.get("Id")
     if cid is None:
@@ -719,16 +726,33 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         Uses Docker ``State.Pid`` (host PID namespace, container init) per Engine API; ``netns_ref``
         is the Linux path ``/proc/<pid>/ns/net`` on the Docker host.
 
+        Retries briefly while the engine reports running but PID is not yet visible (startup race).
+
         Raises:
             NetnsRefError: Missing container, or no valid host PID (typically when not running).
         """
-        ins = self.inspect_container(container_id=container_id)
-        if not ins.exists or not ins.container_id:
-            raise NetnsRefError(f"container not found: {container_id!r}")
-        if ins.pid is None or ins.pid <= 0:
-            raise NetnsRefError(
-                f"no host PID for container {ins.container_id!r} (is the container running?)",
-            )
-        # Engine reports init PID in the host PID namespace for running containers.
-        ref = f"/proc/{ins.pid}/ns/net"
-        return NetnsRefResult(container_id=ins.container_id, pid=ins.pid, netns_ref=ref)
+        last_ins: ContainerInspectionResult | None = None
+        for _ in range(50):
+            ins = self.inspect_container(container_id=container_id)
+            last_ins = ins
+            if not ins.exists or not ins.container_id:
+                raise NetnsRefError(f"container not found: {container_id!r}")
+            if ins.pid is not None and ins.pid > 0:
+                # /proc only exists on Linux; topology attach is Linux-only in production.
+                if sys.platform != "linux" or os.path.isdir(f"/proc/{ins.pid}"):
+                    ref = f"/proc/{ins.pid}/ns/net"
+                    return NetnsRefResult(container_id=ins.container_id, pid=ins.pid, netns_ref=ref)
+                raise NetnsRefError(
+                    f"host PID {ins.pid} for container {ins.container_id!r} is not visible under "
+                    f"/proc/{ins.pid} in this process namespace — run the control plane with "
+                    f"`pid: host` (Docker Compose) so `ip link set … netns` can resolve workspace PIDs",
+                )
+            if ins.container_state not in ("running", "restarting", "created", "paused"):
+                break
+            time.sleep(0.1)
+        ins = last_ins
+        assert ins is not None
+        raise NetnsRefError(
+            f"no host PID for container {ins.container_id!r} after waiting (state={ins.container_state!r}); "
+            f"is the workspace container still running?",
+        )
