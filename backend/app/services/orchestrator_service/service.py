@@ -273,20 +273,30 @@ class DefaultOrchestratorService(OrchestratorService):
         wid_clean = (wid or "").strip()
         if not wid_clean:
             return []
-        cs_base = os.path.join(base, f"ws-{wid_clean}", "code-server")
+        # Same layout as the project bind: ``{workspace_projects_base}/{workspace_id}/code-server/…``
+        # (not ``ws-{id}``, which split state from the project tree and confused host permissions).
+        cs_base = os.path.join(base, wid_clean, "code-server")
         cfg_host = os.path.join(cs_base, "config")
         data_host = os.path.join(cs_base, "data")
         try:
             os.makedirs(cfg_host, exist_ok=True)
             os.makedirs(data_host, exist_ok=True)
-            ensure_host_path_owned_by_workspace_user(cfg_host)
-            ensure_host_path_owned_by_workspace_user(data_host)
+            # As root (typical Docker control plane): chown must succeed or we bind-mount root-owned dirs
+            # and code-server hits EACCES then exits (bogus netns downstream). Non-root dev (e.g. local
+            # pytest on macOS) cannot chown to 1000 — best-effort only.
+            _strict_chown = os.geteuid() == 0
+            ensure_host_path_owned_by_workspace_user(cfg_host, strict=_strict_chown)
+            ensure_host_path_owned_by_workspace_user(data_host, strict=_strict_chown)
         except OSError as e:
             logger.warning(
                 "orchestrator_code_server_bind_mount_mkdir_failed",
                 extra={"workspace_id": wid, "error": str(e)},
             )
-            return []
+            raise WorkspaceBringUpError(
+                f"code-server persistence host paths are not usable (mkdir/chown failed for {cfg_host!r} "
+                f"or {data_host!r}): {e}. Fix ownership on WORKSPACE_PROJECTS_BASE or run the control "
+                "plane as root on the Docker host.",
+            ) from e
         return [
             WorkspaceExtraBindMountSpec(
                 host_path=cfg_host,

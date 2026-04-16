@@ -18,6 +18,7 @@
 #   change the host paths Docker bind-mounts into workspace containers → root-owned host dirs →
 #   EACCES for coder (UID 1000). Mount a host directory at the SAME path and set WORKSPACE_PROJECTS_BASE
 #   (below) so orchestrator mkdir/chown apply to the real bind sources the daemon uses.
+#   Per-workspace layout on that base: ``{id}/`` (project) and ``{id}/code-server/{config,data}/``.
 #
 # EC2 / remote host (set public API URL for browser clients):
 #   NEXT_PUBLIC_API_BASE_URL=http://YOUR_PUBLIC_IP:8000 docker compose -f docker-compose.integration.yml up -d --build
@@ -54,7 +55,7 @@ services:
       dockerfile: Dockerfile.workspace
       args:
         # Bump or export a new value to invalidate build cache when debugging stale EC2 images.
-        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-4-host-shared-workspace-projects}
+        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-5-coder-config-dirs}
     entrypoint: ["/bin/true"]
 
   postgres:

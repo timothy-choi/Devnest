@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, call
 
+import pytest
+
 from app.libs.runtime.models import (
     ContainerInspectionResult,
     NetnsRefResult,
@@ -78,3 +80,40 @@ def test_skip_netns_resolution_omits_get_container_netns_ref() -> None:
     assert out.pid == 0
     assert out.netns_ref == "/devnest-skip-linux-topology-attachment"
     assert out.container_id == "abc123"
+
+
+def test_post_start_inspect_requires_host_pid_when_netns_enabled() -> None:
+    """If the engine never reports a positive PID, fail before get_container_netns_ref."""
+    from app.libs.runtime.errors import ContainerStartError
+
+    ensure = RuntimeEnsureResult(
+        container_id="abc123",
+        exists=True,
+        created_new=True,
+        container_state="created",
+        resolved_ports=((8080, 8080),),
+        node_id="test-node",
+    )
+    start = RuntimeActionResult(
+        container_id="abc123",
+        container_state="running",
+        success=True,
+        message=None,
+    )
+    inspect = ContainerInspectionResult(
+        exists=True,
+        container_id="abc123",
+        container_state="running",
+        pid=0,
+        ports=((18080, 8080),),
+        mounts=(),
+    )
+    runtime = MagicMock()
+    runtime.ensure_container.return_value = ensure
+    runtime.start_container.return_value = start
+    runtime.inspect_container.return_value = inspect
+
+    with pytest.raises(ContainerStartError, match="host PID"):
+        ensure_running_runtime_only(runtime, name="w", workspace_host_path="/host", skip_netns_resolution=False)
+
+    runtime.get_container_netns_ref.assert_not_called()

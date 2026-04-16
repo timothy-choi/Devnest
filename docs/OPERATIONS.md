@@ -216,7 +216,7 @@ Check that bind mounts are present before starting a workspace:
 
 ```bash
 ls -la /data/devnest-workspaces/<workspace_id>/
-ls -la /data/devnest-workspaces/ws-<workspace_id>/code-server/
+ls -la /data/devnest-workspaces/<workspace_id>/code-server/
 ```
 
 If the project directory is missing but files should exist, check snapshots:

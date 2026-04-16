@@ -25,13 +25,16 @@ def workspace_container_uid_gid() -> tuple[int, int]:
         return 1000, 1000
 
 
-def ensure_host_path_owned_by_workspace_user(path: str) -> None:
+def ensure_host_path_owned_by_workspace_user(path: str, *, strict: bool = False) -> None:
     """
     Recursively ``chown`` a host path tree to the workspace container user (default 1000:1000).
 
     Orchestrator and API processes often run as root and create directories with root ownership.
     Those paths are bind-mounted into the container where ``code-server`` runs as ``coder``; without
     a matching UID/GID on the host, writes (e.g. ``config.yaml``) fail with EACCES.
+
+    When ``strict`` is True, ``OSError`` from ``chown`` is re-raised after logging so callers do not
+    bind-mount root-owned trees that will crash code-server and surface as misleading netns errors.
     """
     root = Path(path).resolve()
     if not root.exists():
@@ -50,8 +53,10 @@ def ensure_host_path_owned_by_workspace_user(path: str) -> None:
     except OSError as e:
         logger.warning(
             "workspace_host_chown_failed",
-            extra={"path": str(root), "uid": uid, "gid": gid, "error": str(e)},
+            extra={"path": str(root), "uid": uid, "gid": gid, "error": str(e), "strict": strict},
         )
+        if strict:
+            raise
 
 
 def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id: str) -> str:

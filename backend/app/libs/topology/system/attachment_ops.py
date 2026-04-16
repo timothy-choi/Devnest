@@ -89,6 +89,17 @@ def validate_netns_ref(netns_ref: str) -> str:
     return s
 
 
+def assert_netns_attach_target_visible(netns_ref: str) -> None:
+    """
+    Validate ``netns_ref`` and ensure ``/proc/<pid>`` is visible in this PID namespace.
+
+    Call before expensive veth creation so attach fails fast with a clear message when the
+    workspace init PID is missing (exited container or control plane without ``pid: host``).
+    """
+    s = validate_netns_ref(netns_ref)
+    _assert_netns_target_pid_visible(_pid_from_netns_ref(s))
+
+
 def _netns_prefix(netns_ref: str) -> list[str]:
     """``nsenter`` argv prefix to run a command in the target network namespace."""
     pid = _pid_from_netns_ref(netns_ref)

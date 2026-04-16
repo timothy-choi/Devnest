@@ -50,6 +50,19 @@ def _wait_post_start_inspect(
         time.sleep(0.05)
     if last is None:
         raise ContainerStartError("inspect_container returned no result after start")
+    if not skip_netns_resolution:
+        if last.container_state in ("exited", "dead"):
+            raise ContainerStartError(
+                f"workspace container exited after start (state={last.container_state!r}); "
+                "check code-server logs (often EACCES on bind-mounted /home/coder/.config/code-server) "
+                "and image ENTRYPOINT/CMD.",
+            )
+        if last.container_state != "running" or last.pid is None or last.pid <= 0:
+            raise ContainerStartError(
+                f"workspace container did not reach running with a host PID within the post-start window "
+                f"(state={last.container_state!r}, pid={last.pid!r}). "
+                "Topology attach requires a live init PID — fix workspace startup first, then retry.",
+            )
     return last
 
 

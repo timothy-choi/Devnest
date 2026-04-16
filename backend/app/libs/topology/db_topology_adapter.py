@@ -491,6 +491,7 @@ class DbTopologyAdapter(TopologyAdapter):
         from .system.command_runner import CommandRunner
 
         r = self._command_runner or CommandRunner()
+        ao.assert_netns_attach_target_visible(netns_ref)
         try:
             ao.create_veth_pair(host_if, container_if, runner=r)
             ao.attach_host_if_to_bridge(host_if, bridge_name, runner=r)
@@ -943,7 +944,15 @@ class DbTopologyAdapter(TopologyAdapter):
                 release_ip=att_was_new,
                 error=f"linux attach failed: {e}",
             )
-            raise WorkspaceAttachmentError(f"linux attach failed: {e}") from e
+            hint = ""
+            el = str(e).lower()
+            if "invalid" in el and "netns" in el:
+                hint = (
+                    " (Often the workspace container already exited: verify `docker inspect` State.Status "
+                    "and logs for code-server EACCES on bind-mounted config/data; use `pid: host` on the "
+                    "control plane if /proc/<pid> is missing while the container is running.)"
+                )
+            raise WorkspaceAttachmentError(f"linux attach failed: {e}{hint}") from e
 
         try:
             att.status = TopologyAttachmentStatus.ATTACHED

@@ -190,6 +190,9 @@ class TestCodeServerBringUp:
         container_paths = {m.container_path for m in extra}
         assert CODE_SERVER_CONFIG_CONTAINER_PATH in container_paths
         assert CODE_SERVER_DATA_CONTAINER_PATH in container_paths
+        host_paths = {m.host_path for m in extra}
+        assert any(str(p).replace("\\", "/").endswith(f"/{WORKSPACE_ID}/code-server/config") for p in host_paths)
+        assert any(str(p).replace("\\", "/").endswith(f"/{WORKSPACE_ID}/code-server/data") for p in host_paths)
 
     def test_bring_up_merges_caller_env_over_defaults(self, tmp_path: Path) -> None:
         """Caller-supplied env overrides code-server defaults."""

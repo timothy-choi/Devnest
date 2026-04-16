@@ -8,7 +8,7 @@ FROM codercom/code-server:latest
 
 # Bumped when Dockerfile.workspace semantics change so `docker inspect` can prove which revision
 # is on the host (avoids “branch fixed it but EC2 still runs old :latest”).
-ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=4-host-shared-workspace-projects
+ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=5-coder-config-dirs
 LABEL devnest.workspace.dockerfile.revision="${DEVNEST_WORKSPACE_DOCKERFILE_REVISION}"
 
 USER root
@@ -50,6 +50,10 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
 # Workspace mount / open folder (orchestrator can bind-mount over this)
 RUN mkdir -p /home/coder/project \
     && chown -R coder:coder /home/coder/project
+
+# Writable XDG-style dirs when optional binds are absent; bind mounts must still be 1000:1000 on host.
+RUN mkdir -p /home/coder/.config/code-server /home/coder/.local/share/code-server \
+    && chown -R coder:coder /home/coder/.config /home/coder/.local
 
 USER coder
 WORKDIR /home/coder/project
