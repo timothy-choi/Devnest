@@ -3,7 +3,16 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# CI/registry flakiness (ECONNRESET): bump retries and re-run npm ci a few times before failing.
+RUN npm config set fetch-retries 10 \
+    && npm config set fetch-retry-mintimeout 15000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && for i in 1 2 3 4; do \
+         npm ci && exit 0; \
+         echo "npm ci failed (attempt $i/4), retrying in 15s..."; \
+         sleep 15; \
+       done; \
+       exit 1
 
 FROM node:20-alpine AS builder
 WORKDIR /app
@@ -20,6 +29,14 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/package-lock.json ./package-lock.json
-RUN npm ci --omit=dev
+RUN npm config set fetch-retries 10 \
+    && npm config set fetch-retry-mintimeout 15000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && for i in 1 2 3 4; do \
+         npm ci --omit=dev && exit 0; \
+         echo "npm ci --omit=dev failed (attempt $i/4), retrying in 15s..."; \
+         sleep 15; \
+       done; \
+       exit 1
 EXPOSE 3000
 CMD ["npm", "run", "start", "--", "-p", "3000", "-H", "0.0.0.0"]
