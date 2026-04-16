@@ -13,7 +13,19 @@
 
 name: devnest-integration
 
+# Default workspace runtime for orchestrator bring-up (matches Dockerfile.workspace).
+x-workspace-image: &workspace_image
+  DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-devnest/workspace:latest}
+
 services:
+  # Build-only helper: tags devnest/workspace:latest so backend/worker can start user workspaces.
+  workspace-image:
+    image: devnest/workspace:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.workspace
+    entrypoint: ["/bin/true"]
+
   postgres:
     image: postgres:15
     environment:
@@ -42,6 +54,7 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_WORKER_ENABLED: "false"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
+      <<: *workspace_image
       # Some CI runners provide a minimal PATH; console scripts live under /usr/local/bin.
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
@@ -49,6 +62,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      workspace-image:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
       interval: 10s
@@ -74,6 +89,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_RATE_LIMIT_ENABLED: "false"
+      <<: *workspace_image
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -82,8 +98,13 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+      workspace-image:
+        condition: service_completed_successfully
     cap_add:
       - NET_ADMIN
+    # Backend Dockerfile HEALTHCHECK curls :8000/ready; the poll loop does not listen on 8000 — disable it.
+    healthcheck:
+      disable: true
     command: ["python", "-m", "app.workers.workspace_job_poll_loop", "--poll-interval", "2", "--jobs-per-tick", "2"]
 
   frontend:

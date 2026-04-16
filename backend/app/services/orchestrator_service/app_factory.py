@@ -56,7 +56,10 @@ def build_default_orchestrator_for_session(
     if not image:
         image = (os.environ.get("DEVNEST_WORKSPACE_CONTAINER_IMAGE", "") or "").strip()
     if not image:
-        image = "nginx:alpine"
+        # Align with docker_runtime.DockerRuntimeAdapter (DEVNEST_WORKSPACE_IMAGE → devnest/workspace:latest).
+        image = (os.environ.get("DEVNEST_WORKSPACE_IMAGE", "") or "").strip()
+    if not image:
+        image = "devnest/workspace:latest"
 
     base = (settings.workspace_projects_base or "").strip()
     if not base:

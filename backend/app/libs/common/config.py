@@ -57,7 +57,8 @@ class Settings(BaseSettings):
     # Default 0 disables (local/CI). Production: set via DEVNEST_INTERNAL_API_KEY_MIN_LENGTH (e.g. 24).
     devnest_internal_api_key_min_length: int = 0
 
-    # Workspace orchestrator (Docker): image for workspace containers; empty falls back to env then nginx:alpine.
+    # Workspace orchestrator (Docker): image for workspace containers; empty falls back to
+    # DEVNEST_WORKSPACE_CONTAINER_IMAGE / DEVNEST_WORKSPACE_IMAGE then devnest/workspace:latest (see app_factory).
     workspace_container_image: str = ""
     # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
     workspace_projects_base: str = ""
