@@ -14,7 +14,7 @@ def test_prefixes_ip_with_nsenter_pid1() -> None:
     out = r.run(["ip", "link", "show", "dev", "eth0"])
     assert out == "ok"
     inner.run.assert_called_once_with(
-        ["nsenter", "-t", "1", "-m", "-n", "-p", "--", "ip", "link", "show", "dev", "eth0"],
+        ["nsenter", "-t", "1", "-n", "--", "ip", "link", "show", "dev", "eth0"],
     )
 
 

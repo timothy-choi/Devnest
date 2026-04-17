@@ -501,9 +501,23 @@ class DbTopologyAdapter(TopologyAdapter):
             row.status = TopologyRuntimeStatus.DEGRADED
             row.last_error_code = "BRIDGE_OS"
             row.last_error_message = str(e)[:2048]
+            err_l = (row.last_error_message or "").lower()
+            remediation: str | None = None
+            if "nsenter" in err_l and ("not permitted" in err_l or "operation not permitted" in err_l):
+                remediation = (
+                    "nsenter/setns denied: ensure topology runs in workspace-worker with pid:host, "
+                    "cap_add [NET_ADMIN, SYS_ADMIN], DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=true, and "
+                    "HostPid1NsenterRunner using `nsenter -t 1 -n` (not -m). See docker-compose.integration.yml."
+                )
             logger.warning(
                 "topology_runtime_bridge_sync_degraded",
-                extra={**log_ctx, "failure": "BRIDGE_OS", "error": row.last_error_message},
+                extra={
+                    **log_ctx,
+                    "failure": "BRIDGE_OS",
+                    "error": row.last_error_message,
+                    "topology_runner": "HostPid1NsenterRunner+CommandRunner when DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1",
+                    "remediation_hint": remediation,
+                },
             )
         else:
             row.status = TopologyRuntimeStatus.READY

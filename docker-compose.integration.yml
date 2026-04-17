@@ -32,6 +32,10 @@
 # must resolve Docker's State.Pid (host PID namespace). Without it, PIDs are invalid in the
 # container's isolated PID namespace → "Invalid netns value" / attach failures.
 #
+# `workspace-worker` also needs `SYS_ADMIN` so `nsenter -t 1 -n -- ip …` (host netns for bridge
+# sync when DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=true) can setns into PID 1's network namespace;
+# `NET_ADMIN` alone is not always sufficient on hardened Docker/AppArmor hosts.
+#
 # Apply to every service that runs workspace jobs / orchestrator `ip` + `nsenter` (backend API if it
 # processes internal job ticks, and workspace-worker). After changing this, recreate containers:
 #   docker compose -f docker-compose.integration.yml up -d --build --force-recreate
@@ -145,6 +149,7 @@ services:
         condition: service_completed_successfully
     cap_add:
       - NET_ADMIN
+      - SYS_ADMIN
     # Backend Dockerfile HEALTHCHECK curls :8000/ready; the poll loop does not listen on 8000 — disable it.
     healthcheck:
       disable: true
