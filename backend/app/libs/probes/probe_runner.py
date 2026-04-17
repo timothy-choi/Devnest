@@ -96,6 +96,42 @@ def _service_issue(
     )
 
 
+def _missing_probe_binary_from_runner_error(exc: BaseException) -> str | None:
+    """
+    Return ``nc`` / ``timeout`` / ``curl`` when :class:`~app.libs.topology.system.command_runner.CommandRunner`
+    failed because the executable was missing (ENOENT / exit 127), as in::
+
+        timeout: failed to run command 'nc': No such file or directory
+    """
+    t = str(exc)
+    low = t.lower()
+    if "no such file or directory" not in low and "exit=127)" not in t:
+        return None
+    for name in ("nc", "timeout", "curl"):
+        if f"'{name}'" in t or f"`{name}`" in t:
+            return name
+    return None
+
+
+def _probe_runtime_binary_issue(*, binary: str, exc: BaseException) -> tuple[HealthIssue, ...]:
+    hint = (
+        "install netcat-openbsd (nc) on the backend/workspace-worker image"
+        if binary == "nc"
+        else "install the missing package on the probe image"
+    )
+    return (
+        HealthIssue(
+            code=ProbeIssueCode.PROBE_RUNTIME_BINARY_MISSING.value,
+            component="probe",
+            message=(
+                f"probe runtime missing required binary: {binary} ({hint}). "
+                f"Details: {exc!s}"[:2400]
+            ),
+            severity=HealthIssueSeverity.ERROR,
+        ),
+    )
+
+
 class DefaultProbeRunner(ProbeRunner):
     """Probe runner backed by ``RuntimeAdapter`` and ``TopologyAdapter`` for inspection-only checks."""
 
@@ -368,6 +404,15 @@ class DefaultProbeRunner(ProbeRunner):
         try:
             runner.run(["timeout", str(w), "nc", "-z", ip, str(port)])
         except RuntimeError as e:
+            missing = _missing_probe_binary_from_runner_error(e)
+            if missing:
+                return ServiceProbeResult(
+                    healthy=False,
+                    workspace_ip=ip,
+                    port=port,
+                    latency_ms=None,
+                    issues=_probe_runtime_binary_issue(binary=missing, exc=e),
+                )
             return ServiceProbeResult(
                 healthy=False,
                 workspace_ip=ip,
@@ -565,6 +610,15 @@ class DefaultProbeRunner(ProbeRunner):
         try:
             runner.run(["timeout", str(w), "curl", "-sf", "--max-time", str(w), url])
         except RuntimeError as e:
+            missing = _missing_probe_binary_from_runner_error(e)
+            if missing:
+                return ServiceProbeResult(
+                    healthy=False,
+                    workspace_ip=ip,
+                    port=port,
+                    latency_ms=None,
+                    issues=_probe_runtime_binary_issue(binary=missing, exc=e),
+                )
             return ServiceProbeResult(
                 healthy=False,
                 workspace_ip=ip,

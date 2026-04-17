@@ -21,7 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     util-linux \
     coreutils \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
+
+# netcat-openbsd provides ``nc`` for host-netns reachability probes (workspace-worker / integration).
 
 WORKDIR /app
 
