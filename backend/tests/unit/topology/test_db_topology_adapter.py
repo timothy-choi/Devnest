@@ -1504,8 +1504,10 @@ class TestCheckAttachment:
 
         class GoodRunner:
             def run(self, cmd: list[str]) -> str:
+                # PID must exist under /proc on Linux: ``_netns_prefix`` calls
+                # ``_assert_netns_target_pid_visible`` before ``nsenter``.
                 if cmd[:3] == ["docker", "inspect", "-f"]:
-                    return "99\n"
+                    return "1\n"
                 if cmd[:4] == ["ip", "link", "show", "dev"]:
                     if len(cmd) >= 5 and cmd[4] == host_if:
                         return (
