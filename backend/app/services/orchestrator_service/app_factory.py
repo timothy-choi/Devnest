@@ -9,11 +9,14 @@ Image and paths are configurable via settings / env; see :func:`build_default_or
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from pathlib import Path
 
 from sqlmodel import Session
+
+logger = logging.getLogger(__name__)
 
 from app.libs.common.config import get_settings
 from app.libs.probes.probe_runner import DefaultProbeRunner
@@ -68,8 +71,26 @@ def build_default_orchestrator_for_session(
         image = "devnest/workspace:latest"
 
     base = (settings.workspace_projects_base or "").strip()
+    base_source = "settings.workspace_projects_base"
+    if not base:
+        base = (os.environ.get("WORKSPACE_PROJECTS_BASE", "") or "").strip()
+        base_source = "env.WORKSPACE_PROJECTS_BASE"
     if not base:
         base = str(Path(tempfile.gettempdir()) / "devnest-workspaces")
+        base_source = "temp_default"
+        logger.warning(
+            "workspace_projects_base_using_temp_default",
+            extra={
+                "resolved_base": base,
+                "hint": "Set WORKSPACE_PROJECTS_BASE (or settings.workspace_projects_base) to a host "
+                "directory bind-mounted into the control plane so mkdir/chown apply to Docker bind sources.",
+            },
+        )
+    base = os.path.realpath(os.path.expanduser(base))
+    logger.info(
+        "orchestrator_workspace_projects_base",
+        extra={"workspace_projects_base": base, "source": base_source},
+    )
 
     if topology_id is None:
         topology_id_raw = os.environ.get("DEVNEST_TOPOLOGY_ID", "1").strip()

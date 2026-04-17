@@ -42,8 +42,9 @@ from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
 from app.services.node_execution_service.workspace_project_dir import (
+    chown_tree_for_workspace_runtime,
     default_local_ensure_workspace_project_dir,
-    ensure_host_path_owned_by_workspace_user,
+    stat_mode_octal,
     stat_uid_gid,
     verify_workspace_runtime_can_write_dir,
     verify_workspace_runtime_owns_path,
@@ -272,7 +273,7 @@ class DefaultOrchestratorService(OrchestratorService):
         constructed (non-blocking; the workspace will still start without persistence for
         those dirs).
         """
-        base = (self._workspace_projects_base or "").strip()
+        base = os.path.realpath(os.path.expanduser((self._workspace_projects_base or "").strip()))
         if not base:
             return []
         wid_clean = (wid or "").strip()
@@ -305,8 +306,10 @@ class DefaultOrchestratorService(OrchestratorService):
             )
             os.makedirs(cfg_host, exist_ok=True)
             os.makedirs(data_host, exist_ok=True)
-            # Chown the whole ``code-server`` tree (including intermediate dirs) in one pass.
-            ensure_host_path_owned_by_workspace_user(cs_base, strict=_strict_chown)
+            cfg_host = os.path.realpath(cfg_host)
+            data_host = os.path.realpath(data_host)
+            # Chown the whole ``code-server`` tree (``chown -R`` as root; Python walk fallback).
+            chown_tree_for_workspace_runtime(cs_base, strict=_strict_chown)
             for label, host in (("config", cfg_host), ("data", data_host)):
                 verify_workspace_runtime_owns_path(host)
                 verify_workspace_runtime_can_write_dir(host)
@@ -321,8 +324,10 @@ class DefaultOrchestratorService(OrchestratorService):
                         "stat_gid": sg,
                         "target_uid": uid,
                         "target_gid": gid,
+                        "mode_oct": stat_mode_octal(host),
                         "chown_performed_under_cs_base": True,
                         "chown_strict": _strict_chown,
+                        "pre_start_writability_ok": True,
                         "writability_checked_with_privdrop": bool(
                             (shutil.which("setpriv") or shutil.which("runuser")) and _strict_chown,
                         ),
@@ -379,6 +384,39 @@ class DefaultOrchestratorService(OrchestratorService):
 
         # Add code-server persistence bind mounts.
         cs_extra_mounts = self._code_server_extra_bind_mounts(ctx.wid)
+        for spec in cs_extra_mounts or []:
+            hp = (spec.host_path or "").strip()
+            if not hp:
+                continue
+            try:
+                verify_workspace_runtime_owns_path(hp)
+                verify_workspace_runtime_can_write_dir(hp)
+            except OSError as e:
+                raise WorkspaceBringUpError(
+                    "workspace host path not writable by runtime user "
+                    f"(pre-container final check failed for bind source {hp!r} → {spec.container_path!r}): {e}",
+                ) from e
+
+        proj = (ctx.workspace_host_path or "").strip()
+        if proj:
+            try:
+                verify_workspace_runtime_owns_path(proj)
+                verify_workspace_runtime_can_write_dir(proj)
+                logger.info(
+                    "workspace_project_host_pre_start_ok",
+                    extra={
+                        "workspace_id": ctx.wid,
+                        "host_path": proj,
+                        "stat_uid": stat_uid_gid(proj)[0],
+                        "stat_gid": stat_uid_gid(proj)[1],
+                        "mode_oct": stat_mode_octal(proj),
+                    },
+                )
+            except OSError as e:
+                raise WorkspaceBringUpError(
+                    "workspace host path not writable by runtime user "
+                    f"(pre-container final check failed for project bind {proj!r}): {e}",
+                ) from e
 
         try:
             return ensure_running_runtime_only(

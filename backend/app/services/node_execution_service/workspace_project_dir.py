@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -32,6 +33,66 @@ def workspace_container_uid_gid() -> tuple[int, int]:
 def stat_uid_gid(path: str) -> tuple[int, int]:
     st = os.stat(path, follow_symlinks=False)
     return int(st.st_uid), int(st.st_gid)
+
+
+def stat_mode_octal(path: str) -> str:
+    """POSIX permission bits (e.g. ``0o755``) for logging."""
+    st = os.stat(path, follow_symlinks=False)
+    return oct(stat.S_IMODE(st.st_mode))
+
+
+def chown_tree_for_workspace_runtime(path: str, *, strict: bool) -> None:
+    """
+    Recursively set ownership to :func:`workspace_container_uid_gid`.
+
+    On Linux as root, prefer ``chown -R`` (coreutils) so the same code path matches manual EC2 fixes
+    and handles odd trees more reliably than a pure-Python walk alone.
+    """
+    root = os.path.realpath(os.path.expanduser(str(path)))
+    if not os.path.lexists(root):
+        if strict:
+            raise OSError(errno.ENOENT, f"workspace host path missing for chown: {root!r}")
+        return
+    uid, gid = workspace_container_uid_gid()
+    try:
+        euid = os.geteuid()
+    except AttributeError:
+        euid = -1
+    if euid == 0 and shutil.which("chown"):
+        try:
+            cp = subprocess.run(
+                ["chown", "-R", f"{uid}:{gid}", root],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            logger.info(
+                "workspace_host_chown_shell_ok",
+                extra={
+                    "path": root,
+                    "uid": uid,
+                    "gid": gid,
+                    "stderr": (cp.stderr or "").strip()[:500],
+                },
+            )
+            return
+        except subprocess.CalledProcessError as e:
+            err = (e.stderr or e.stdout or "").strip()
+            logger.warning(
+                "workspace_host_chown_shell_failed",
+                extra={"path": root, "uid": uid, "gid": gid, "error": str(e), "stderr": err[:500]},
+            )
+            if strict:
+                raise OSError(
+                    errno.EACCES,
+                    f"chown -R {uid}:{gid} failed for {root!r}: {e}; stderr={err!r}",
+                ) from e
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning("workspace_host_chown_shell_failed", extra={"path": root, "error": str(e)})
+            if strict:
+                raise OSError(errno.EACCES, f"chown -R failed for {root!r}: {e}") from e
+    ensure_host_path_owned_by_workspace_user(root, strict=strict)
 
 
 def verify_workspace_runtime_owns_path(path: str) -> None:
@@ -151,7 +212,7 @@ def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id:
     base = (projects_base or "").strip()
     if not base:
         base = os.path.join(tempfile.gettempdir(), "devnest-workspaces")
-    p = Path(base).expanduser().resolve() / wid
+    p = Path(os.path.realpath(os.path.expanduser(str(Path(base) / wid))))
     try:
         p.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -162,7 +223,7 @@ def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id:
         _strict_chown = os.geteuid() == 0  # type: ignore[attr-defined]
     except AttributeError:
         _strict_chown = False
-    ensure_host_path_owned_by_workspace_user(p_str, strict=_strict_chown)
+    chown_tree_for_workspace_runtime(p_str, strict=_strict_chown)
     verify_workspace_runtime_owns_path(p_str)
     verify_workspace_runtime_can_write_dir(p_str)
     logger.info(
@@ -175,6 +236,8 @@ def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id:
             "chown_strict": _strict_chown,
             "stat_uid": stat_uid_gid(p_str)[0],
             "stat_gid": stat_uid_gid(p_str)[1],
+            "mode_oct": stat_mode_octal(p_str),
+            "pre_start_writability_ok": True,
         },
     )
     return p_str
