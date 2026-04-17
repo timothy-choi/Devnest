@@ -56,6 +56,7 @@ class _RecordingLinuxRunner:
         self._veth_ctr: str | None = None
         self._master: tuple[str, str] | None = None
         self._ctr_addrs: dict[str, str] = {}
+        self._default_gw: str | None = None
 
     def run(self, cmd: list[str]) -> str:
         argv = list(cmd)
@@ -95,6 +96,33 @@ class _RecordingLinuxRunner:
             di = argv.index("dev", ai)
             ifn = argv[di + 1]
             self._ctr_addrs[ifn] = spec
+            return ""
+
+        # ``ensure_default_route_in_netns``: nsenter … -- ip route replace default via GW
+        if argv and argv[0] == "nsenter" and "route" in argv and "replace" in argv and "via" in argv:
+            vi = argv.index("via")
+            if vi + 1 < len(argv):
+                self._default_gw = argv[vi + 1]
+            return ""
+
+        # ``topology_attach_plumbing_failures``: default route check
+        if (
+            argv
+            and argv[0] == "nsenter"
+            and argv[-5:] == ["ip", "-brief", "route", "show", "default"]
+            and self._default_gw
+        ):
+            return f"default via {self._default_gw} dev vc0 proto kernel\n"
+
+        # nsenter … ip link show dev <ctr_if> (workspace netns)
+        if (
+            len(argv) >= 8
+            and argv[0] == "nsenter"
+            and argv[-4:] == ["ip", "link", "show", "dev"]
+        ):
+            ifn = argv[-1]
+            if self._veth_ctr and ifn == self._veth_ctr:
+                return f"2: {ifn}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
             return ""
 
         # Post-attach: nsenter … ip -brief addr show dev IF
@@ -1467,12 +1495,19 @@ class TestCheckAttachment:
             topo_session,
             spec={"cidr": "10.77.63.0/24", "gateway_ip": "10.77.63.1", "bridge_name": "br-veth"},
         )
-        host_if, _ = _veth_pair_names(tid, "n1", 63)
+        host_if, ctr_if = _veth_pair_names(tid, "n1", 63)
+        gw = "10.77.63.1"
+
+        adapter = DbTopologyAdapter(topo_session)
+        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
+        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=63)
 
         class GoodRunner:
             def run(self, cmd: list[str]) -> str:
+                if cmd[:3] == ["docker", "inspect", "-f"]:
+                    return "99\n"
                 if cmd[:4] == ["ip", "link", "show", "dev"]:
-                    if cmd[4] == host_if:
+                    if len(cmd) >= 5 and cmd[4] == host_if:
                         return (
                             f"9: {host_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
                             f"qdisc noqueue master br-veth state UP mode DEFAULT group default\n"
@@ -1482,11 +1517,21 @@ class TestCheckAttachment:
                         f"9: {host_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
                         f"master br-veth state UP\n"
                     )
+                if len(cmd) >= 9 and cmd[0] == "nsenter" and cmd[-5:] == ["ip", "link", "show", "dev", ctr_if]:
+                    return f"2: {ctr_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                if (
+                    len(cmd) >= 11
+                    and cmd[0] == "nsenter"
+                    and cmd[-6:] == ["ip", "-brief", "addr", "show", "dev", ctr_if]
+                ):
+                    return f"{ctr_if}            UP             {ip.workspace_ip}/24 \n"
+                if (
+                    len(cmd) >= 10
+                    and cmd[0] == "nsenter"
+                    and cmd[-5:] == ["ip", "-brief", "route", "show", "default"]
+                ):
+                    return f"default via {gw} dev {ctr_if} proto kernel\n"
                 raise AssertionError(f"unexpected cmd: {cmd}")
-
-        adapter = DbTopologyAdapter(topo_session)
-        adapter.ensure_node_topology(topology_id=tid, node_id="n1")
-        ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=63)
         adapter.attach_workspace(
             topology_id=tid,
             node_id="n1",
