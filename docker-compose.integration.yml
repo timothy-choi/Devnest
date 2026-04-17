@@ -32,9 +32,12 @@
 # must resolve Docker's State.Pid (host PID namespace). Without it, PIDs are invalid in the
 # container's isolated PID namespace → "Invalid netns value" / attach failures.
 #
-# `workspace-worker` also needs `SYS_ADMIN` so `nsenter -t 1 -n -- ip …` (host netns for bridge
-# sync when DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=true) can setns into PID 1's network namespace;
-# `NET_ADMIN` alone is not always sufficient on hardened Docker/AppArmor hosts.
+# `workspace-worker` runs `nsenter -t 1 -n -- ip …` (DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=true) so
+# bridge/veth `ip` targets the Docker host netns. Docker Engine's default seccomp profile still
+# rejects that `setns` path with "reassociate to namespaces failed: Operation not permitted" even
+# with `pid: host` + `cap_add: [NET_ADMIN, SYS_ADMIN]`. For integration/EC2, `workspace-worker`
+# is therefore `privileged: true` (disables default seccomp for that container). Narrower option if
+# policy allows: only `security_opt: [seccomp:unconfined]` instead of full privileged.
 #
 # Apply to every service that runs workspace jobs / orchestrator `ip` + `nsenter` (backend API if it
 # processes internal job ticks, and workspace-worker). After changing this, recreate containers:
@@ -150,6 +153,8 @@ services:
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
+    # Required for `nsenter -t 1 -n` bridge sync against default Docker seccomp (see header).
+    privileged: true
     # Backend Dockerfile HEALTHCHECK curls :8000/ready; the poll loop does not listen on 8000 — disable it.
     healthcheck:
       disable: true

@@ -505,9 +505,11 @@ class DbTopologyAdapter(TopologyAdapter):
             remediation: str | None = None
             if "nsenter" in err_l and ("not permitted" in err_l or "operation not permitted" in err_l):
                 remediation = (
-                    "nsenter/setns denied: ensure topology runs in workspace-worker with pid:host, "
-                    "cap_add [NET_ADMIN, SYS_ADMIN], DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=true, and "
-                    "HostPid1NsenterRunner using `nsenter -t 1 -n` (not -m). See docker-compose.integration.yml."
+                    "service=workspace-job worker (compose: workspace-worker): nsenter/setns into PID 1 "
+                    "netns is blocked by Docker default seccomp/LSM despite pid:host and NET_ADMIN+SYS_ADMIN. "
+                    "Set `privileged: true` on that service (integration: docker-compose.integration.yml) or "
+                    "try narrower `security_opt: [seccomp:unconfined]`. Command uses HostPid1NsenterRunner "
+                    "when DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1."
                 )
             logger.warning(
                 "topology_runtime_bridge_sync_degraded",
@@ -515,7 +517,8 @@ class DbTopologyAdapter(TopologyAdapter):
                     **log_ctx,
                     "failure": "BRIDGE_OS",
                     "error": row.last_error_message,
-                    "topology_runner": "HostPid1NsenterRunner+CommandRunner when DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1",
+                    "topology_service": "workspace-worker (local_docker + DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER)",
+                    "topology_runner": "HostPid1NsenterRunner+CommandRunner",
                     "remediation_hint": remediation,
                 },
             )
