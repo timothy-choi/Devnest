@@ -386,6 +386,16 @@ def _apply_linux_attachment_env_default() -> bool:
     )
 
 
+def _topology_runtime_not_ready_detail(runtime: TopologyRuntime) -> str:
+    """Human + machine-readable context persisted when bridge sync marks the runtime DEGRADED."""
+    parts: list[str] = [f"status={runtime.status.value!r}"]
+    if runtime.last_error_code:
+        parts.append(f"last_error_code={runtime.last_error_code!r}")
+    if runtime.last_error_message:
+        parts.append(f"last_error_message={runtime.last_error_message!r}")
+    return ", ".join(parts)
+
+
 def _veth_pair_names(topology_id: int, node_id: str, workspace_id: int) -> tuple[str, str]:
     """Deterministic Linux interface names (≤15 chars) for host leg and container peer."""
     h = hashlib.sha256(f"{topology_id}:{node_id}:{workspace_id}".encode("utf-8")).hexdigest()[:6]
@@ -430,7 +440,18 @@ class DbTopologyAdapter(TopologyAdapter):
         now = datetime.now(timezone.utc)
         runner = self._command_runner or CommandRunner()
 
+        br_raw, cidr_raw, gw_raw = row.bridge_name, row.cidr, row.gateway_ip
+        log_ctx: dict[str, object | None] = {
+            "topology_id": row.topology_id,
+            "node_id": row.node_id,
+            "apply_linux_bridge": self._apply_linux_bridge,
+            "bridge_name": br_raw,
+            "cidr": cidr_raw,
+            "gateway_ip": gw_raw,
+        }
+
         if not self._apply_linux_bridge:
+            logger.info("topology_runtime_bridge_sync_skipped", extra=log_ctx)
             row.status = TopologyRuntimeStatus.READY
             row.last_error_code = None
             row.last_error_message = None
@@ -441,8 +462,12 @@ class DbTopologyAdapter(TopologyAdapter):
             self._session.refresh(row)
             return
 
-        br, cidr, gw = row.bridge_name, row.cidr, row.gateway_ip
+        br, cidr, gw = br_raw, cidr_raw, gw_raw
         if not (br and str(br).strip() and cidr and str(cidr).strip() and gw and str(gw).strip()):
+            logger.warning(
+                "topology_runtime_bridge_sync_incomplete_row",
+                extra={**log_ctx, "reason": "missing bridge_name, cidr, or gateway_ip"},
+            )
             row.status = TopologyRuntimeStatus.DEGRADED
             row.last_error_code = "INCOMPLETE_RUNTIME"
             row.last_error_message = "topology runtime missing bridge_name, cidr, or gateway_ip"
@@ -453,22 +478,38 @@ class DbTopologyAdapter(TopologyAdapter):
             self._session.refresh(row)
             return
 
+        log_ctx["bridge_name"] = str(br).strip()
+        log_ctx["cidr"] = str(cidr).strip()
+        log_ctx["gateway_ip"] = str(gw).strip()
+        logger.info("topology_runtime_bridge_sync_begin", extra=log_ctx)
         try:
+            logger.info("topology_runtime_bridge_sync_step", extra={**log_ctx, "step": "ensure_bridge_exists"})
             ensure_bridge_exists(br, runner=runner)
+            logger.info("topology_runtime_bridge_sync_step", extra={**log_ctx, "step": "ensure_bridge_up"})
             ensure_bridge_up(br, runner=runner)
+            logger.info("topology_runtime_bridge_sync_step", extra={**log_ctx, "step": "ensure_bridge_address"})
             ensure_bridge_address(br, str(gw).strip(), str(cidr).strip(), runner=runner)
         except ValueError as e:
             row.status = TopologyRuntimeStatus.DEGRADED
             row.last_error_code = "BRIDGE_CONFIG"
             row.last_error_message = str(e)[:2048]
+            logger.warning(
+                "topology_runtime_bridge_sync_degraded",
+                extra={**log_ctx, "failure": "BRIDGE_CONFIG", "error": row.last_error_message},
+            )
         except RuntimeError as e:
             row.status = TopologyRuntimeStatus.DEGRADED
             row.last_error_code = "BRIDGE_OS"
             row.last_error_message = str(e)[:2048]
+            logger.warning(
+                "topology_runtime_bridge_sync_degraded",
+                extra={**log_ctx, "failure": "BRIDGE_OS", "error": row.last_error_message},
+            )
         else:
             row.status = TopologyRuntimeStatus.READY
             row.last_error_code = None
             row.last_error_message = None
+            logger.info("topology_runtime_bridge_sync_ready", extra=log_ctx)
 
         row.last_checked_at = now
         row.updated_at = now
@@ -670,8 +711,8 @@ class DbTopologyAdapter(TopologyAdapter):
             )
         if runtime.status != TopologyRuntimeStatus.READY:
             raise WorkspaceIPAllocationError(
-                f"topology runtime is not READY (status={runtime.status.value}); "
-                "cannot allocate workspace IP until bridge/sync is healthy",
+                "topology runtime is not READY; cannot allocate workspace IP until bridge/sync is healthy "
+                f"({_topology_runtime_not_ready_detail(runtime)})",
             )
         if not runtime.cidr or not runtime.gateway_ip:
             raise WorkspaceIPAllocationError("topology runtime missing cidr or gateway_ip")
@@ -694,8 +735,8 @@ class DbTopologyAdapter(TopologyAdapter):
                     ) from exc
                 if runtime.status != TopologyRuntimeStatus.READY:
                     raise WorkspaceIPAllocationError(
-                        f"topology runtime is not READY (status={runtime.status.value}); "
-                        "cannot allocate workspace IP until bridge/sync is healthy",
+                        "topology runtime is not READY; cannot allocate workspace IP until bridge/sync is healthy "
+                        f"({_topology_runtime_not_ready_detail(runtime)})",
                     ) from exc
                 if not runtime.cidr or not runtime.gateway_ip:
                     raise WorkspaceIPAllocationError(
@@ -733,8 +774,8 @@ class DbTopologyAdapter(TopologyAdapter):
         runtime = fresh
         if runtime.status != TopologyRuntimeStatus.READY:
             raise WorkspaceIPAllocationError(
-                f"topology runtime is not READY (status={runtime.status.value}); "
-                "cannot allocate workspace IP until bridge/sync is healthy",
+                "topology runtime is not READY; cannot allocate workspace IP until bridge/sync is healthy "
+                f"({_topology_runtime_not_ready_detail(runtime)})",
             )
         if not runtime.cidr or not runtime.gateway_ip:
             raise WorkspaceIPAllocationError("topology runtime missing cidr or gateway_ip")
@@ -826,7 +867,8 @@ class DbTopologyAdapter(TopologyAdapter):
             )
         if runtime.status != TopologyRuntimeStatus.READY:
             raise WorkspaceAttachmentError(
-                f"topology runtime is not READY (status={runtime.status.value}); cannot attach workspace",
+                "topology runtime is not READY; cannot attach workspace "
+                f"({_topology_runtime_not_ready_detail(runtime)})",
             )
         if not (runtime.bridge_name and str(runtime.bridge_name).strip()):
             raise WorkspaceAttachmentError("topology runtime missing bridge_name")
