@@ -475,6 +475,10 @@ class DefaultOrchestratorService(OrchestratorService):
 
         Surfaces ``workspace runtime exited before topology attach`` before ``ip link set … netns``,
         so invalid netns errors are not the first surfaced failure when the runtime is already dead.
+
+        This wait intentionally does **not** require ``/proc/<pid>`` to exist: unit tests and some
+        split-brain setups use non-local inspect PIDs. Linux ``/proc`` visibility for attach is
+        enforced separately via ``assert_netns_attach_target_visible`` before ``attach_workspace``.
         """
         if _env_skip_linux_topology_attachment():
             ins = self._runtime_adapter.inspect_container(container_id=running.container_id)
@@ -513,8 +517,7 @@ class DefaultOrchestratorService(OrchestratorService):
                     f"docker log tail:\n{tail or '(empty)'}",
                 )
             if ins.container_state == "running" and ins.pid is not None and ins.pid > 0:
-                if sys.platform != "linux" or os.path.isdir(f"/proc/{ins.pid}"):
-                    return ins
+                return ins
             now = time.monotonic()
             if now >= deadline:
                 break

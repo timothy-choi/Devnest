@@ -61,6 +61,7 @@ def _make_runtime() -> MagicMock:
     rt.get_container_netns_ref.return_value = NetnsRefResult(
         container_id=CONTAINER_ID, pid=99999, netns_ref=NETNS_REF
     )
+    rt.fetch_container_log_tail.return_value = ""
     return rt
 
 
