@@ -259,6 +259,65 @@ def assign_ip_in_netns(
     r.run([*prefix, "ip", "link", "set", "dev", ifn, "up"])
 
 
+def check_bridge_master_list_contains_if(
+    host_if: str,
+    bridge_name: str,
+    *,
+    runner: CommandRunner | None = None,
+) -> bool:
+    """
+    Return True if ``ip link show master <bridge>`` lists ``host_if`` as a bridge port.
+
+    Stronger than reading ``master`` only on the veth: confirms the bridge's forwarding view
+    includes this interface (catches stale / divergent state).
+    """
+    h = _validate_ifname(host_if, label="host_if")
+    br = _validate_ifname(bridge_name, label="bridge_name")
+    r = runner or CommandRunner()
+    try:
+        out = r.run(["ip", "link", "show", "master", br])
+    except RuntimeError:
+        return False
+    for line in out.splitlines():
+        m = re.match(r"^\d+:\s*([^:@\s]+)(?:@|:)", line.strip())
+        if m and m.group(1) == h:
+            return True
+    return False
+
+
+def check_workspace_ipv4_assigned_on_iface(
+    netns_ref: str,
+    container_if: str,
+    workspace_ip: str,
+    cidr: str,
+    *,
+    runner: CommandRunner | None = None,
+) -> bool:
+    """Return True if ``workspace_ip/<cidr prefix>`` appears on ``container_if`` inside ``netns_ref``."""
+    ifn = _validate_ifname(container_if, label="container_if")
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    if not isinstance(net, ipaddress.IPv4Network):
+        return False
+    try:
+        ip = ipaddress.ip_address(workspace_ip.strip())
+    except ValueError:
+        return False
+    if not isinstance(ip, ipaddress.IPv4Address):
+        return False
+    if ip not in net:
+        return False
+    expect = f"{ip}/{net.prefixlen}"
+    r = runner or CommandRunner()
+    try:
+        out = r.run([*_netns_prefix(netns_ref), "ip", "-brief", "addr", "show", "dev", ifn])
+    except RuntimeError:
+        return False
+    return expect in out
+
+
 def ensure_default_route_in_netns(
     netns_ref: str,
     gateway_ip: str,

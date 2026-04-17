@@ -413,6 +413,15 @@ class DefaultProbeRunner(ProbeRunner):
                     latency_ms=None,
                     issues=_probe_runtime_binary_issue(binary=missing, exc=e),
                 )
+            msg = f"remote nc probe failed for {ip!r}:{port}: {e}"
+            es = str(e)
+            if "exit=1)" in es and "nc" in es.lower():
+                msg += (
+                    " [hint: netcat-openbsd often uses exit 1 for TCP refused or failed connect; "
+                    "if the topology bridge is NO-CARRIER with no `ip link show master <bridge>` ports, "
+                    "host L2 to the workspace netns is broken despite DB ATTACHED — see "
+                    "topology_linux_attach_* logs / attach fast-path stale plumbing warning.]"
+                )
             return ServiceProbeResult(
                 healthy=False,
                 workspace_ip=ip,
@@ -420,7 +429,7 @@ class DefaultProbeRunner(ProbeRunner):
                 latency_ms=None,
                 issues=_service_issue(
                     code=ProbeIssueCode.SERVICE_UNREACHABLE,
-                    message=f"remote nc probe failed for {ip!r}:{port}: {e}",
+                    message=msg,
                 ),
             )
         t1 = time.perf_counter()
