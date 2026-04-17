@@ -46,6 +46,7 @@ from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResu
 from app.services.node_execution_service.workspace_project_dir import (
     chown_tree_for_workspace_runtime,
     default_local_ensure_workspace_project_dir,
+    ensure_code_server_bind_auth_proxy_config,
     stat_mode_octal,
     stat_uid_gid,
     verify_workspace_runtime_can_write_dir,
@@ -257,6 +258,9 @@ class DefaultOrchestratorService(OrchestratorService):
         - ``CS_DISABLE_GETTING_STARTED_OVERRIDE``: suppress the welcome page.
         - ``CODE_SERVER_AUTH``: "none" means no password (auth handled by DevNest gateway sessions).
         - ``PORT``: in-container listen port (must match ``WORKSPACE_IDE_CONTAINER_PORT``).
+
+        Bind-mounted ``config.yaml`` is seeded/patched by :func:`ensure_code_server_bind_auth_proxy_config`
+        so persisted ``auth: password`` and missing ``trusted-origins`` cannot override this contract.
         """
         return {
             "CS_DISABLE_GETTING_STARTED_OVERRIDE": "1",
@@ -310,6 +314,8 @@ class DefaultOrchestratorService(OrchestratorService):
             os.makedirs(data_host, exist_ok=True)
             cfg_host = os.path.realpath(cfg_host)
             data_host = os.path.realpath(data_host)
+            # Seed ``config.yaml`` before chown so the workspace user can read it (auth/proxy contract).
+            ensure_code_server_bind_auth_proxy_config(cfg_host)
             # Chown the whole ``code-server`` tree (``chown -R`` as root; Python walk fallback).
             chown_tree_for_workspace_runtime(cs_base, strict=_strict_chown)
             for label, host in (("config", cfg_host), ("data", data_host)):

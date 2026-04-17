@@ -23,6 +23,9 @@ WORKSPACE_SESSION_TOKEN_PREFIX = "dnws_"
 
 # HTTP header clients send on GET /workspaces/{id}/access (after POST /attach).
 WORKSPACE_SESSION_HTTP_HEADER = "X-DevNest-Workspace-Session"
+# HttpOnly cookie (optional): browsers cannot set custom headers on top-level navigations to the
+# workspace gateway host; Traefik ForwardAuth reads this cookie when gateway auth is enabled.
+WORKSPACE_SESSION_COOKIE_NAME = "devnest_ws_session"
 
 
 def _now() -> datetime:

@@ -11,6 +11,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
+  if (req.method === "GET") {
+    const response = await backendRequest({
+      req,
+      res,
+      path: `/workspaces/${workspaceId}`,
+    });
+    const data = await readBackendJson(response);
+    forwardJson(res, response.status, data);
+    return;
+  }
+
   if (req.method === "DELETE") {
     const response = await backendRequest({
       req,
@@ -24,5 +35,5 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
-  sendMethodNotAllowed(res, ["DELETE"]);
+  sendMethodNotAllowed(res, ["GET", "DELETE"]);
 }

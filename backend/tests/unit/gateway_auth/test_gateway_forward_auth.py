@@ -34,6 +34,7 @@ from app.services.workspace_service.models.enums import (
     WorkspaceStatus,
 )
 from app.services.workspace_service.services.workspace_session_service import (
+    WORKSPACE_SESSION_COOKIE_NAME,
     WORKSPACE_SESSION_HTTP_HEADER,
     generate_workspace_session_token,
     hash_workspace_session_token,
@@ -181,6 +182,41 @@ def test_valid_session_running_workspace_allows(engine):
     """Valid session + RUNNING workspace → 200."""
     ws_id, token = _seed_data(engine, ws_status=WorkspaceStatus.RUNNING.value)
     host = f"ws-{ws_id}.{BASE_DOMAIN}"
+
+    with patch(
+        "app.services.workspace_service.api.routers.internal_gateway_auth.get_settings",
+        return_value=_settings_auth_enabled(),
+    ):
+        client = TestClient(_make_app(engine))
+        resp = client.get(
+            "/internal/gateway/auth",
+            headers={
+                "X-Forwarded-Host": host,
+                WORKSPACE_SESSION_HTTP_HEADER: token,
+            },
+        )
+        assert resp.status_code == 200, f"body={resp.text!r}"
+
+
+def test_valid_session_cookie_allows(engine):
+    """HttpOnly workspace session cookie (browser gateway navigations) → 200."""
+    ws_id, token = _seed_data(engine, ws_status=WorkspaceStatus.RUNNING.value)
+    host = f"ws-{ws_id}.{BASE_DOMAIN}"
+
+    with patch(
+        "app.services.workspace_service.api.routers.internal_gateway_auth.get_settings",
+        return_value=_settings_auth_enabled(),
+    ):
+        client = TestClient(_make_app(engine))
+        client.cookies.set(WORKSPACE_SESSION_COOKIE_NAME, token)
+        resp = client.get("/internal/gateway/auth", headers={"X-Forwarded-Host": host})
+        assert resp.status_code == 200, f"body={resp.text!r}"
+
+
+def test_legacy_numeric_host_allows(engine):
+    """Legacy ``{id}.{base}`` forwarded host still resolves for ForwardAuth."""
+    ws_id, token = _seed_data(engine, ws_status=WorkspaceStatus.RUNNING.value)
+    host = f"{ws_id}.{BASE_DOMAIN}"
 
     with patch(
         "app.services.workspace_service.api.routers.internal_gateway_auth.get_settings",

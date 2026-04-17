@@ -267,6 +267,63 @@ def ssh_remote_ensure_workspace_project_dir(
 remote_shell_ensure_workspace_project_dir = ssh_remote_ensure_workspace_project_dir
 
 
+def ensure_code_server_bind_auth_proxy_config(cfg_host: str) -> None:
+    """Seed or patch bind-mounted ``config.yaml`` for gateway + Traefik access.
+
+    - ``auth: none``: DevNest ForwardAuth / sessions own access control; persisted ``password`` auth
+      prompts users and fights the intended model.
+    - ``trusted-origins``: avoids VS Code origin checks hanging when the browser ``Host`` is the
+      public workspace hostname behind a reverse proxy.
+    """
+    host_dir = (cfg_host or "").strip()
+    if not host_dir:
+        return
+    try:
+        os.makedirs(host_dir, exist_ok=True)
+    except OSError as e:
+        logger.warning(
+            "workspace_code_server_config_dir_unusable",
+            extra={"cfg_host": host_dir, "error": str(e)},
+        )
+        return
+    path = os.path.join(host_dir, "config.yaml")
+    minimal = (
+        "# DevNest: auth delegated to gateway; trusted origins for reverse-proxy access.\n"
+        "auth: none\n"
+        "trusted-origins:\n"
+        "  - '*'\n"
+    )
+    try:
+        if not os.path.isfile(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(minimal)
+            logger.info("workspace_code_server_config_seeded", extra={"path": path})
+            return
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        changed = False
+        new_content, n_subs = re.subn(
+            r"(?mi)^(\s*)auth:\s*password\b.*$",
+            r"\1auth: none",
+            content,
+        )
+        if n_subs:
+            content = new_content
+            changed = True
+        if not re.search(r"(?mi)^\s*trusted-origins\s*:", content):
+            content = content.rstrip() + "\n\ntrusted-origins:\n  - '*'\n"
+            changed = True
+        if changed:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("workspace_code_server_config_patched", extra={"path": path})
+    except OSError as e:
+        logger.warning(
+            "workspace_code_server_config_seed_failed",
+            extra={"path": path, "error": str(e)},
+        )
+
+
 def _validate_workspace_id_for_path(workspace_id: str) -> str:
     wid = (workspace_id or "").strip()
     if not wid or not _WORKSPACE_ID_SAFE.match(wid):

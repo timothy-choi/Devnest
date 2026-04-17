@@ -29,6 +29,7 @@ from app.services.workspace_service.models.enums import (
     WorkspaceStatus,
 )
 from app.services.workspace_service.services.workspace_session_service import (
+    WORKSPACE_SESSION_COOKIE_NAME,
     WORKSPACE_SESSION_HTTP_HEADER,
     generate_workspace_session_token,
     hash_workspace_session_token,
@@ -203,6 +204,30 @@ class TestForwardAuthEnforcementMode:
                 plain_token=plain_token,
                 forwarded_host=_ws_forwarded_host(ws.workspace_id),
             ),
+        )
+        assert r.status_code == status.HTTP_200_OK
+
+    def test_valid_session_cookie_returns_200(self, client, db_session: Session) -> None:
+        """Browser navigations send HttpOnly workspace session cookie (not custom headers)."""
+        ws = _seed_running_workspace(db_session)
+        plain_token, _ = _seed_active_session(db_session, workspace_id=ws.workspace_id)
+
+        client.cookies.set(WORKSPACE_SESSION_COOKIE_NAME, plain_token)
+        r = client.get(
+            "/internal/gateway/auth",
+            headers=_forwardauth_headers(forwarded_host=_ws_forwarded_host(ws.workspace_id)),
+        )
+        assert r.status_code == status.HTTP_200_OK
+
+    def test_legacy_numeric_forwarded_host_still_resolves(self, client, db_session: Session) -> None:
+        """Older route-admin rows used ``{id}.{base}`` without ``ws-`` prefix."""
+        ws = _seed_running_workspace(db_session)
+        plain_token, _ = _seed_active_session(db_session, workspace_id=ws.workspace_id)
+        host = f"{ws.workspace_id}.{_BASE_DOMAIN}"
+
+        r = client.get(
+            "/internal/gateway/auth",
+            headers=_forwardauth_headers(plain_token=plain_token, forwarded_host=host),
         )
         assert r.status_code == status.HTTP_200_OK
 

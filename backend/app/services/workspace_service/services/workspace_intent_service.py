@@ -212,7 +212,7 @@ def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime
     if wid is None:
         return None
     dom = (settings.devnest_base_domain or "app.devnest.local").strip().strip(".")
-    return f"{wid}.{dom}"
+    return f"ws-{wid}.{dom}"
 
 
 def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
