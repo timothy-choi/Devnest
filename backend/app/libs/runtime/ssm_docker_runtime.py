@@ -8,6 +8,7 @@ Project bind paths must be **absolute on the remote Linux host** (``/var/...``),
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 
 from app.libs.topology.system.command_runner import CommandRunner
@@ -42,6 +43,8 @@ from .models import (
     RuntimeActionResult,
     RuntimeEnsureResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_project_host_path_remote(
@@ -210,6 +213,16 @@ class SsmDockerRuntimeAdapter(RuntimeAdapter):
 
         ins = self.inspect_container(container_id=cid)
         resolved = ins.ports if ins.ports else _resolved_ports_tuple(port_bindings)
+        logger.info(
+            "workspace_runtime_docker_create_remote",
+            extra={
+                "container_id": ins.container_id or cid,
+                "container_state": ins.container_state,
+                "started_at": ins.started_at,
+                "finished_at": ins.finished_at,
+                "pid": ins.pid,
+            },
+        )
         return RuntimeEnsureResult(
             container_id=ins.container_id or cid,
             exists=True,
@@ -245,6 +258,17 @@ class SsmDockerRuntimeAdapter(RuntimeAdapter):
         except RuntimeError as e:
             raise ContainerStartError(str(e)) from e
         after = self.inspect_container(container_id=container_id)
+        logger.info(
+            "workspace_runtime_docker_start_remote",
+            extra={
+                "container_id": after.container_id or container_id,
+                "container_state": after.container_state,
+                "pid": after.pid,
+                "started_at": after.started_at,
+                "finished_at": after.finished_at,
+                "exit_code": after.exit_code,
+            },
+        )
         if after.container_state == "running":
             return RuntimeActionResult(
                 container_id=after.container_id or container_id,

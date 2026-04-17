@@ -620,6 +620,25 @@ class DefaultOrchestratorService(OrchestratorService):
                 workspace_ip=ip_res.workspace_ip,
             )
         except TopologyError as e:
+            ins = self._runtime_adapter.inspect_container(container_id=running.container_id)
+            tail = (self._runtime_adapter.fetch_container_log_tail(
+                container_id=running.container_id,
+                lines=200,
+            ) or "").strip()
+            dead = (
+                not ins.exists
+                or ins.container_state in ("exited", "dead")
+                or ins.pid is None
+                or ins.pid <= 0
+            )
+            if dead:
+                raise WorkspaceBringUpError(
+                    "workspace runtime exited before topology attach "
+                    f"(inspect: state={ins.container_state!r}, pid={ins.pid!r}, "
+                    f"started_at={ins.started_at!r}, finished_at={ins.finished_at!r}, exit_code={ins.exit_code!r}). "
+                    f"Downstream topology error (often a symptom when init PID is gone): {e}\n"
+                    f"docker log tail:\n{tail[-8000:] if tail else '(empty)'}",
+                ) from e
             raise WorkspaceBringUpError(
                 f"topology bring-up failed (after workspace runtime was running): {e}",
             ) from e
@@ -695,6 +714,15 @@ class DefaultOrchestratorService(OrchestratorService):
             cid = str(cid).strip() or None
         issues: list[str] = []
         last_stop: WorkspaceStopResult | None = None
+        logger.warning(
+            "orchestrator_bringup_rollback_docker_stop_pending",
+            extra={
+                "workspace_id": ctx.wid,
+                "container_id": cid,
+                "rollback_sends_sigterm_first": True,
+                "note": "docker stop defaults to SIGTERM then SIGKILL after stop timeout; exit 143 is normal here",
+            },
+        )
         for attempt in (1, 2):
             try:
                 stop_out = self.stop_workspace_runtime(
@@ -720,6 +748,63 @@ class DefaultOrchestratorService(OrchestratorService):
         )
         devnest_metrics.record_bringup_rollback_failed()
         return False, issues, last_stop
+
+    def _bring_up_log_runtime_failure_before_rollback(
+        self,
+        ctx: _BringUpContext,
+        running: EnsureRunningRuntimeResult | None,
+        *,
+        failure_kind: str,
+        exc: BaseException,
+    ) -> None:
+        """Fresh inspect + log tail so the first workspace error survives truncated job logs."""
+        if running is None or not str(running.container_id).strip():
+            logger.warning(
+                "workspace_runtime_bringup_failure_evidence_skipped",
+                extra={
+                    "workspace_id": ctx.wid,
+                    "failure_kind": failure_kind,
+                    "reason": "no_container_id",
+                    "exc_type": type(exc).__name__,
+                    "exc_head": str(exc)[:2000],
+                },
+            )
+            return
+        cid = str(running.container_id).strip()
+        try:
+            ins = self._runtime_adapter.inspect_container(container_id=cid)
+            tail = (self._runtime_adapter.fetch_container_log_tail(container_id=cid, lines=250) or "").strip()
+        except Exception as gather_e:
+            logger.warning(
+                "workspace_runtime_bringup_failure_evidence_gather_error",
+                extra={
+                    "workspace_id": ctx.wid,
+                    "container_id": cid,
+                    "error": str(gather_e)[:800],
+                },
+            )
+            return
+        logger.warning(
+            "workspace_runtime_bringup_failure_evidence",
+            extra={
+                "workspace_id": ctx.wid,
+                "failure_kind": failure_kind,
+                "exc_type": type(exc).__name__,
+                "exc_message_head": str(exc)[:2000],
+                "container_id": ins.container_id,
+                "inspect_state": ins.container_state,
+                "inspect_pid": ins.pid,
+                "inspect_started_at": ins.started_at,
+                "inspect_finished_at": ins.finished_at,
+                "inspect_exit_code": ins.exit_code,
+                "log_tail_len": len(tail),
+            },
+        )
+        if tail:
+            logger.warning(
+                "workspace_runtime_bringup_failure_log_tail",
+                extra={"workspace_id": ctx.wid, "container_id": cid, "tail": tail[-12000:]},
+            )
 
     def bring_up_workspace_runtime(
         self,
@@ -773,6 +858,12 @@ class DefaultOrchestratorService(OrchestratorService):
             netns, attach_res = self._bring_up_attach_topology(ctx, running)
             result = self._bring_up_run_probe(ctx, running, netns, attach_res)
         except WorkspaceBringUpError as e:
+            self._bring_up_log_runtime_failure_before_rollback(
+                ctx,
+                running,
+                failure_kind="WorkspaceBringUpError",
+                exc=e,
+            )
             log_event(
                 logger,
                 LogEvent.ORCHESTRATOR_BRINGUP_FAILED,
@@ -794,6 +885,12 @@ class DefaultOrchestratorService(OrchestratorService):
                 rollback_container_state=rst,
             ) from e
         except Exception as e:
+            self._bring_up_log_runtime_failure_before_rollback(
+                ctx,
+                running,
+                failure_kind=type(e).__name__,
+                exc=e,
+            )
             log_event(
                 logger,
                 LogEvent.ORCHESTRATOR_BRINGUP_FAILED,
@@ -830,6 +927,12 @@ class DefaultOrchestratorService(OrchestratorService):
                 workspace_id=ctx.wid,
                 probe_healthy=result.probe_healthy,
                 issues=(result.issues or [])[:5],
+            )
+            self._bring_up_log_runtime_failure_before_rollback(
+                ctx,
+                running,
+                failure_kind="probe_unhealthy",
+                exc=RuntimeError("; ".join(result.issues or ["probe_unhealthy"])),
             )
             rb_ok, rb_issues, stop_out = self._bring_up_compensating_rollback(ctx, running, reason="probe_unhealthy")
             merged_issues = list(result.issues or [])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -31,6 +32,8 @@ from .models import (
     WorkspaceExtraBindMountSpec,
     WorkspaceProjectMountSpec,
 )
+
+logger = logging.getLogger(__name__)
 
 # Matches Dockerfile.workspace default tag; override with DEVNEST_WORKSPACE_IMAGE.
 _DEFAULT_WORKSPACE_IMAGE = "devnest/workspace:latest"
@@ -523,6 +526,16 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         ctr.reload()
         ins = _normalize_inspection(ctr.attrs)
         resolved = ins.ports if ins.ports else _resolved_ports_tuple(port_bindings)
+        logger.info(
+            "workspace_runtime_docker_create",
+            extra={
+                "container_id": ins.container_id,
+                "container_state": ins.container_state,
+                "started_at": ins.started_at,
+                "finished_at": ins.finished_at,
+                "pid": ins.pid,
+            },
+        )
         return RuntimeEnsureResult(
             container_id=ins.container_id or "",
             exists=True,
@@ -577,6 +590,17 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             raise ContainerStartError(str(e)) from e
 
         after = self.inspect_container(container_id=container_id)
+        logger.info(
+            "workspace_runtime_docker_start",
+            extra={
+                "container_id": after.container_id or container_id,
+                "container_state": after.container_state,
+                "pid": after.pid,
+                "started_at": after.started_at,
+                "finished_at": after.finished_at,
+                "exit_code": after.exit_code,
+            },
+        )
         if after.container_state == "running":
             return RuntimeActionResult(
                 container_id=after.container_id or container_id,

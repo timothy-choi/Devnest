@@ -43,6 +43,7 @@ def test_skip_netns_resolution_omits_get_container_netns_ref() -> None:
     runtime.ensure_container.return_value = ensure
     runtime.start_container.return_value = start
     runtime.inspect_container.return_value = inspect
+    runtime.fetch_container_log_tail.return_value = ""
     runtime.get_container_netns_ref.return_value = NetnsRefResult(
         container_id="abc123",
         pid=5000,
@@ -112,6 +113,7 @@ def test_post_start_inspect_requires_host_pid_when_netns_enabled() -> None:
     runtime.ensure_container.return_value = ensure
     runtime.start_container.return_value = start
     runtime.inspect_container.return_value = inspect
+    runtime.fetch_container_log_tail.return_value = ""
 
     with pytest.raises(ContainerStartError, match="host PID"):
         ensure_running_runtime_only(runtime, name="w", workspace_host_path="/host", skip_netns_resolution=False)
