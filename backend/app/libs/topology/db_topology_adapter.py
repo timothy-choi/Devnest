@@ -1862,6 +1862,20 @@ class DbTopologyAdapter(TopologyAdapter):
                 "workspace_netns_listen_tcp",
                 ["nsenter", "-n", "-t", pid, "--", "ss", "-H", "-lntp"],
             )
+            # ``ss`` may be missing in slim images; procfs still shows bound sockets (hex ports, little-endian).
+            _snippet(
+                "workspace_netns_tcp_proc",
+                [
+                    "nsenter",
+                    "-n",
+                    "-t",
+                    pid,
+                    "--",
+                    "sh",
+                    "-c",
+                    "head -n 40 /proc/net/tcp 2>/dev/null || true",
+                ],
+            )
             rt_row = self._session.exec(
                 select(TopologyRuntime).where(
                     TopologyRuntime.topology_id == topology_id,

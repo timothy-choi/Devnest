@@ -7,8 +7,14 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from app.libs.common.config import get_settings
 from app.libs.probes.interfaces import ProbeRunner
-from app.libs.probes.results import HealthIssue, HealthIssueSeverity, WorkspaceHealthResult
+from app.libs.probes.results import (
+    HealthIssue,
+    HealthIssueSeverity,
+    ServiceProbeResult,
+    WorkspaceHealthResult,
+)
 from app.libs.runtime.errors import NetnsRefError
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import (
@@ -57,6 +63,15 @@ def mock_topology() -> MagicMock:
 @pytest.fixture
 def mock_probe() -> MagicMock:
     return MagicMock(spec=ProbeRunner)
+
+
+@pytest.fixture(autouse=True)
+def _short_ide_tcp_bringup_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS", "2.5")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS", "0.1")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -116,6 +131,13 @@ def _topology_ok(mock_topology: MagicMock) -> None:
 
 
 def _probe_ok(mock_probe: MagicMock) -> None:
+    mock_probe.check_service_reachable.return_value = ServiceProbeResult(
+        healthy=True,
+        workspace_ip=WORKSPACE_IP,
+        port=WORKSPACE_IDE_CONTAINER_PORT,
+        latency_ms=1.0,
+        issues=(),
+    )
     mock_probe.check_workspace_health.return_value = WorkspaceHealthResult(
         workspace_id=int(WORKSPACE_ID),
         healthy=True,
@@ -217,13 +239,14 @@ class TestBringUpHappyPath:
             workspace_ip=WORKSPACE_IP,
         )
 
+        mock_probe.check_service_reachable.assert_called()
         mock_probe.check_workspace_health.assert_called_once_with(
             workspace_id=WORKSPACE_ID,
             topology_id=str(TOPOLOGY_ID),
             node_id=NODE_ID,
             container_id=CONTAINER_ID,
             expected_port=WORKSPACE_IDE_CONTAINER_PORT,
-            timeout_seconds=5.0,
+            timeout_seconds=8.0,
         )
 
 
@@ -422,6 +445,20 @@ class TestBringUpProbeUnhealthy:
     ) -> None:
         _runtime_ok(mock_runtime)
         _topology_ok(mock_topology)
+        mock_probe.check_service_reachable.return_value = ServiceProbeResult(
+            healthy=False,
+            workspace_ip=WORKSPACE_IP,
+            port=WORKSPACE_IDE_CONTAINER_PORT,
+            latency_ms=None,
+            issues=(
+                HealthIssue(
+                    code="SERVICE_UNREACHABLE",
+                    component="service",
+                    message="remote nc probe failed",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            ),
+        )
         issue = HealthIssue(
             code="SERVICE_TIMEOUT",
             component="service",
@@ -465,6 +502,7 @@ class TestBringUpProbeUnhealthy:
         assert out.rollback_attempted is True
         assert out.rollback_succeeded is True
         assert not out.rollback_issues
+        assert mock_probe.check_service_reachable.call_count >= 2
         mock_probe.check_workspace_health.assert_called_once()
         assert mock_topology.detach_workspace.call_count >= 1
         assert mock_runtime.stop_container.call_count >= 1
@@ -483,6 +521,20 @@ class TestBringUpProbeUnhealthy:
     ) -> None:
         _runtime_ok(mock_runtime)
         _topology_ok(mock_topology)
+        mock_probe.check_service_reachable.return_value = ServiceProbeResult(
+            healthy=False,
+            workspace_ip=WORKSPACE_IP,
+            port=WORKSPACE_IDE_CONTAINER_PORT,
+            latency_ms=None,
+            issues=(
+                HealthIssue(
+                    code="SERVICE_UNREACHABLE",
+                    component="service",
+                    message="remote nc probe failed",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            ),
+        )
         mock_probe.check_workspace_health.return_value = WorkspaceHealthResult(
             workspace_id=int(WORKSPACE_ID),
             healthy=False,

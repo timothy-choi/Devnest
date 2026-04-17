@@ -81,6 +81,36 @@ _OSR_UNREACHABLE_ERRNOS: frozenset[int] = frozenset(
 )
 
 
+def _prepend_topology_ok_no_listener_hint(
+    issues: tuple[HealthIssue, ...],
+    *,
+    expected_port: int,
+) -> tuple[HealthIssue, ...]:
+    """When DB+Linux topology is healthy but TCP fails, clarify this is usually IDE bind/start lag."""
+    dial = {
+        ProbeIssueCode.SERVICE_UNREACHABLE.value,
+        ProbeIssueCode.SERVICE_TIMEOUT.value,
+    }
+    prefix = (
+        f"workspace topology attached but nothing is listening on 0.0.0.0:{expected_port} "
+        "(IDE still starting or process exited); "
+    )
+    out: list[HealthIssue] = []
+    for iss in issues:
+        if iss.component == "service" and iss.code in dial and not iss.message.startswith(prefix):
+            out.append(
+                HealthIssue(
+                    code=iss.code,
+                    component=iss.component,
+                    message=(prefix + iss.message)[:5000],
+                    severity=iss.severity,
+                ),
+            )
+        else:
+            out.append(iss)
+    return tuple(out)
+
+
 def _service_issue(
     *,
     code: ProbeIssueCode,
@@ -813,7 +843,13 @@ class DefaultProbeRunner(ProbeRunner):
                     service_issues = svc.issues
             else:
                 service_healthy = False
-                service_issues = svc.issues
+                if topo.healthy and ws_ip:
+                    service_issues = _prepend_topology_ok_no_listener_hint(
+                        svc.issues,
+                        expected_port=expected_port,
+                    )
+                else:
+                    service_issues = svc.issues
         else:
             service_healthy = False
             missing_ip_code = ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value

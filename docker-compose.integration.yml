@@ -97,6 +97,9 @@ services:
       <<: *workspace_image
       # Pydantic Settings: field workspace_projects_base → env WORKSPACE_PROJECTS_BASE.
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
+      # After topology attach, poll workspace IDE TCP before failing bring-up (code-server cold start).
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
       # Some CI runners provide a minimal PATH; console scripts live under /usr/local/bin.
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
@@ -135,6 +138,8 @@ services:
       DEVNEST_RATE_LIMIT_ENABLED: "false"
       <<: *workspace_image
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
       # Topology ``ip`` must run in the Docker *host* netns when this worker uses docker.sock from a
       # container; otherwise veth/bridge are created in the sidecar netns and ``ip link set … netns``
       # fails with ``Invalid "netns" value`` while the workspace container stays healthy.

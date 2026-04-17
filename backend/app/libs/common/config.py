@@ -202,6 +202,24 @@ class Settings(BaseSettings):
             return 2.0
         return max(0.5, min(n, 60.0))
 
+    @field_validator("devnest_workspace_bringup_ide_tcp_wait_seconds", mode="before")
+    @classmethod
+    def _coerce_bringup_ide_tcp_wait(cls, v):  # noqa: ANN001
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return 90.0
+        return max(1.0, min(n, 600.0))
+
+    @field_validator("devnest_workspace_bringup_ide_tcp_poll_interval_seconds", mode="before")
+    @classmethod
+    def _coerce_bringup_ide_tcp_poll_interval(cls, v):  # noqa: ANN001
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return 1.5
+        return max(0.05, min(n, 30.0))
+
     # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
     aws_region: str = ""
     aws_access_key_id: str = ""
@@ -323,6 +341,11 @@ class Settings(BaseSettings):
     devnest_require_ide_http_probe: bool = True
     # HTTP path for IDE readiness (code-server exposes /healthz in typical installs). Must start with ``/``.
     devnest_workspace_ide_health_path: str = "/healthz"
+    # After topology attach, poll TCP to ``workspace_ip:IDE`` for up to this many seconds before failing
+    # bring-up. code-server often needs tens of seconds (extensions, disk) before ``nc`` succeeds.
+    devnest_workspace_bringup_ide_tcp_wait_seconds: float = 90.0
+    # Sleep between TCP poll attempts during bring-up (see ``devnest_workspace_bringup_ide_tcp_wait_seconds``).
+    devnest_workspace_bringup_ide_tcp_poll_interval_seconds: float = 1.5
     # When true (default), TCP/HTTP probes may run from the API/worker process (same host as Docker).
     # Set false on control-plane hosts that are not co-located with workspace Docker (e.g. API-only
     # tier); then probes require ``NodeExecutionBundle.service_reachability_runner`` (SSH/SSM) so

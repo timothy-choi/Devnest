@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.libs.probes.interfaces import ProbeRunner
-from app.libs.probes.results import WorkspaceHealthResult
+from app.libs.probes.results import ServiceProbeResult, WorkspaceHealthResult
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import (
     CODE_SERVER_CONFIG_CONTAINER_PATH,
@@ -89,6 +89,13 @@ def _make_topology() -> MagicMock:
 
 def _make_probe() -> MagicMock:
     probe = MagicMock(spec=ProbeRunner)
+    probe.check_service_reachable.return_value = ServiceProbeResult(
+        healthy=True,
+        workspace_ip=WORKSPACE_IP,
+        port=WORKSPACE_IDE_CONTAINER_PORT,
+        latency_ms=1.0,
+        issues=(),
+    )
     probe.check_workspace_health.return_value = WorkspaceHealthResult(
         workspace_id=int(WORKSPACE_ID),
         healthy=True,

@@ -11,6 +11,7 @@ rows. Callers (typically :mod:`app.workers.workspace_job_worker.worker`) persist
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -656,14 +657,50 @@ class DefaultOrchestratorService(OrchestratorService):
         attach_res: AttachWorkspaceResult,
     ) -> WorkspaceBringUpResult:
         # Route registration: workspace job worker calls route-admin after RUNNING (not orchestrator).
+        from app.libs.common.config import get_settings  # noqa: PLC0415
+
+        cfg = get_settings()
+        wait_total = float(cfg.devnest_workspace_bringup_ide_tcp_wait_seconds)
+        poll_interval = float(cfg.devnest_workspace_bringup_ide_tcp_poll_interval_seconds)
+        if not math.isfinite(wait_total):
+            wait_total = 90.0
+        if not math.isfinite(poll_interval):
+            poll_interval = 1.5
+        wait_total = max(1.0, min(600.0, wait_total))
+        poll_interval = max(0.05, min(30.0, poll_interval))
+
+        ws_ip = (attach_res.workspace_ip or "").strip()
+        tcp_reached = False
         try:
+            if ws_ip:
+                deadline = time.monotonic() + wait_total
+                while time.monotonic() < deadline:
+                    remaining = max(0.5, deadline - time.monotonic())
+                    per_try = min(5.0, remaining)
+                    last_tcp = self._probe_runner.check_service_reachable(
+                        workspace_ip=ws_ip,
+                        port=WORKSPACE_IDE_CONTAINER_PORT,
+                        timeout_seconds=per_try,
+                    )
+                    if last_tcp.healthy:
+                        tcp_reached = True
+                        break
+                    time.sleep(poll_interval)
+
+            # After attach, code-server may need many seconds before the IDE port accepts TCP; once it
+            # does, allow a proportionally larger window for HTTP readiness on slow disks.
+            if ws_ip and tcp_reached:
+                final_timeout = min(45.0, max(8.0, wait_total / 6.0))
+            else:
+                final_timeout = 5.0
+
             health = self._probe_runner.check_workspace_health(
                 workspace_id=ctx.wid,
                 topology_id=str(self._topology_id),
                 node_id=self._node_id,
                 container_id=running.container_id,
                 expected_port=WORKSPACE_IDE_CONTAINER_PORT,
-                timeout_seconds=5.0,
+                timeout_seconds=final_timeout,
             )
         except Exception as e:
             raise WorkspaceBringUpError(f"probe health check failed: {e}") from e
