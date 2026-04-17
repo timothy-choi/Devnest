@@ -91,6 +91,7 @@ def _runtime_ok(mock_runtime: MagicMock) -> None:
         pid=12345,
         netns_ref=NETNS_REF,
     )
+    mock_runtime.fetch_container_log_tail.return_value = ""
 
 
 def _topology_ok(mock_topology: MagicMock) -> None:

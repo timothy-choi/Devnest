@@ -495,6 +495,8 @@ class DbTopologyAdapter(TopologyAdapter):
         try:
             ao.create_veth_pair(host_if, container_if, runner=r)
             ao.attach_host_if_to_bridge(host_if, bridge_name, runner=r)
+            # Re-check after bridge/veth work: workspace init PID can exit during slow host steps.
+            ao.assert_netns_attach_target_visible(netns_ref)
             ao.move_container_if_to_netns(container_if, netns_ref, runner=r)
             ao.assign_ip_in_netns(netns_ref, container_if, workspace_ip, cidr, runner=r)
             ao.ensure_default_route_in_netns(netns_ref, gateway_ip, runner=r)

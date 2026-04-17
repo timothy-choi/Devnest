@@ -38,6 +38,7 @@ from app.libs.runtime.models import (
 )
 from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
+from app.libs.topology.system.attachment_ops import assert_netns_attach_target_visible
 from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
@@ -435,31 +436,106 @@ class DefaultOrchestratorService(OrchestratorService):
         except RuntimeAdapterError as e:
             raise WorkspaceBringUpError(f"runtime bring-up failed: {e}") from e
 
-    def _bring_up_assert_workspace_alive_for_attach(self, running: EnsureRunningRuntimeResult) -> None:
-        """Do not run topology attach if the workspace is not running with a host PID (avoids downstream netns noise)."""
+    def _log_workspace_runtime_attach_snapshot(
+        self,
+        ctx: _BringUpContext,
+        *,
+        phase: str,
+        ins: ContainerInspectionResult,
+    ) -> None:
+        proc_visible: bool | None = None
+        if sys.platform == "linux" and ins.pid is not None and ins.pid > 0:
+            proc_visible = os.path.isdir(f"/proc/{ins.pid}")
+        logger.info(
+            "workspace_runtime_attach_boundary",
+            extra={
+                "workspace_id": ctx.wid,
+                "phase": phase,
+                "container_id": ins.container_id,
+                "exists": ins.exists,
+                "container_state": ins.container_state,
+                "pid": ins.pid,
+                "started_at": ins.started_at,
+                "finished_at": ins.finished_at,
+                "exit_code": ins.exit_code,
+                "proc_pid_visible_control_plane": proc_visible,
+            },
+        )
+
+    def _bring_up_wait_workspace_alive_for_topology(
+        self,
+        ctx: _BringUpContext,
+        running: EnsureRunningRuntimeResult,
+        *,
+        phase: str,
+        max_wait_s: float,
+    ) -> ContainerInspectionResult:
+        """
+        Poll inspect until the workspace is running with a host PID (or fail with log tail).
+
+        Surfaces ``workspace runtime exited before topology attach`` before ``ip link set … netns``,
+        so invalid netns errors are not the first surfaced failure when the runtime is already dead.
+        """
         if _env_skip_linux_topology_attachment():
-            return
-        ins = self._runtime_adapter.inspect_container(container_id=running.container_id)
-        if not ins.exists:
-            raise WorkspaceBringUpError(
-                "workspace runtime startup failed: container missing before topology attach "
-                "(cannot resolve network namespace)",
-            )
-        if ins.container_state in ("exited", "dead"):
-            raise WorkspaceBringUpError(
-                "workspace runtime exited before topology attach (container is not running). "
-                "Check workspace logs first (e.g. EACCES on /home/coder/.config/code-server/config.yaml "
-                "or malformed image CMD/ENTRYPOINT); linux attach errors are often a follow-on symptom.",
-            )
-        if ins.container_state != "running":
-            raise WorkspaceBringUpError(
-                f"workspace runtime not running before topology attach (container_state={ins.container_state!r})",
-            )
-        if ins.pid is None or ins.pid <= 0:
-            raise WorkspaceBringUpError(
-                "workspace container has no host PID before topology attach; the runtime did not stay alive. "
-                "See workspace logs for startup failures — do not treat this as a primary topology failure.",
-            )
+            ins = self._runtime_adapter.inspect_container(container_id=running.container_id)
+            self._log_workspace_runtime_attach_snapshot(ctx, phase=phase, ins=ins)
+            return ins
+
+        deadline = time.monotonic() + max(0.05, float(max_wait_s))
+        interval_s = 0.12
+        last: ContainerInspectionResult | None = None
+        while True:
+            ins = self._runtime_adapter.inspect_container(container_id=running.container_id)
+            last = ins
+            self._log_workspace_runtime_attach_snapshot(ctx, phase=phase, ins=ins)
+            if not ins.exists:
+                tail = self._runtime_adapter.fetch_container_log_tail(
+                    container_id=running.container_id,
+                    lines=120,
+                )
+                raise WorkspaceBringUpError(
+                    "workspace runtime exited before topology attach "
+                    f"(phase={phase!r}, container missing). "
+                    "If logs are empty, compensating rollback may have removed the container after an earlier failure.\n"
+                    f"docker log tail:\n{tail or '(empty)'}",
+                )
+            if ins.container_state in ("exited", "dead"):
+                tail = self._runtime_adapter.fetch_container_log_tail(
+                    container_id=running.container_id,
+                    lines=120,
+                )
+                raise WorkspaceBringUpError(
+                    "workspace runtime exited before topology attach "
+                    f"(phase={phase!r}, state={ins.container_state!r}, pid={ins.pid!r}, "
+                    f"started_at={ins.started_at!r}, finished_at={ins.finished_at!r}, exit_code={ins.exit_code!r}). "
+                    "Note: exit 143 often follows SIGTERM from bring-up rollback after a *different* failure; "
+                    "check this message and log tail for the first error, not only post-rollback inspect.\n"
+                    f"docker log tail:\n{tail or '(empty)'}",
+                )
+            if ins.container_state == "running" and ins.pid is not None and ins.pid > 0:
+                if sys.platform != "linux" or os.path.isdir(f"/proc/{ins.pid}"):
+                    return ins
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            time.sleep(min(interval_s, max(0.01, deadline - now)))
+
+        ins = last
+        assert ins is not None
+        tail = self._runtime_adapter.fetch_container_log_tail(
+            container_id=running.container_id,
+            lines=120,
+        )
+        proc_vis: bool | None = None
+        if sys.platform == "linux" and ins.pid is not None and ins.pid > 0:
+            proc_vis = os.path.isdir(f"/proc/{ins.pid}")
+        raise WorkspaceBringUpError(
+            "workspace runtime exited before topology attach "
+            f"(phase={phase!r}, waited {max_wait_s}s: state={ins.container_state!r}, pid={ins.pid!r}, "
+            f"started_at={ins.started_at!r}, finished_at={ins.finished_at!r}, exit_code={ins.exit_code!r}, "
+            f"proc_pid_visible_control_plane={proc_vis!r}).\n"
+            f"docker log tail:\n{tail or '(empty)'}",
+        )
 
     def _bring_up_attach_topology(
         self,
@@ -468,7 +544,12 @@ class DefaultOrchestratorService(OrchestratorService):
     ) -> tuple[NetnsRefResult, AttachWorkspaceResult]:
         """Ensure node topology, allocate IP, attach workspace veth to bridge."""
         try:
-            self._bring_up_assert_workspace_alive_for_attach(running)
+            self._bring_up_wait_workspace_alive_for_topology(
+                ctx,
+                running,
+                phase="before_ensure_node_topology",
+                max_wait_s=2.5,
+            )
             self._topology_service.ensure_node_topology(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
@@ -478,7 +559,12 @@ class DefaultOrchestratorService(OrchestratorService):
                 node_id=self._node_id,
                 workspace_id=ctx.ws_int,
             )
-            self._bring_up_assert_workspace_alive_for_attach(running)
+            self._bring_up_wait_workspace_alive_for_topology(
+                ctx,
+                running,
+                phase="after_allocate_workspace_ip_before_netns",
+                max_wait_s=12.0,
+            )
             # When Linux veth attachment is disabled, ``ensure_running_runtime_only`` already used a
             # placeholder netns; reuse it (no second ``get_container_netns_ref``).
             if _env_skip_linux_topology_attachment():
@@ -488,7 +574,25 @@ class DefaultOrchestratorService(OrchestratorService):
                     netns_ref=running.netns_ref,
                 )
             else:
+                self._bring_up_wait_workspace_alive_for_topology(
+                    ctx,
+                    running,
+                    phase="before_get_container_netns_ref",
+                    max_wait_s=3.0,
+                )
                 netns = self._runtime_adapter.get_container_netns_ref(container_id=running.container_id)
+                try:
+                    assert_netns_attach_target_visible(netns.netns_ref)
+                except RuntimeError as e:
+                    tail = self._runtime_adapter.fetch_container_log_tail(
+                        container_id=running.container_id,
+                        lines=160,
+                    )
+                    raise WorkspaceBringUpError(
+                        "workspace runtime exited before topology attach "
+                        f"(netns target not visible from control plane before linux attach: {e}).\n"
+                        f"docker log tail:\n{tail or '(empty)'}",
+                    ) from e
             attach_res = self._topology_service.attach_workspace(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
@@ -637,9 +741,16 @@ class DefaultOrchestratorService(OrchestratorService):
                 memory_limit_mib=memory_limit_mib,
                 env=env,
             )
-            logger.debug(
-                "orchestrator_bring_up_runtime_running",
-                extra={"workspace_id": ctx.wid, "container_id": running.container_id},
+            logger.info(
+                "orchestrator_bringup_sequence",
+                extra={
+                    "workspace_id": ctx.wid,
+                    "step": "after_ensure_running_runtime_only",
+                    "container_id": running.container_id,
+                    "container_state": running.container_state,
+                    "pid": running.pid,
+                    "next": "attach_topology",
+                },
             )
             netns, attach_res = self._bring_up_attach_topology(ctx, running)
             result = self._bring_up_run_probe(ctx, running, netns, attach_res)

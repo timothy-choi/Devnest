@@ -97,6 +97,13 @@ class SsmDockerRuntimeAdapter(RuntimeAdapter):
             return _inspection_not_found()
         return _normalize_inspection(data[0])
 
+    def fetch_container_log_tail(self, *, container_id: str, lines: int = 80) -> str:
+        n = max(1, min(int(lines), 4096))
+        try:
+            return (self._runner.run(["docker", "logs", "--tail", str(n), container_id]) or "").strip()
+        except Exception:
+            return ""
+
     def ensure_container(
         self,
         *,

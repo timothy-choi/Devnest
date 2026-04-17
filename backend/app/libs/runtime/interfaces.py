@@ -149,6 +149,14 @@ class RuntimeAdapter(ABC):
             (no exception for “not found”).
         """
 
+    def fetch_container_log_tail(self, *, container_id: str, lines: int = 80) -> str:
+        """
+        Best-effort recent container logs (stdout + stderr) for diagnostics.
+
+        Default is empty; Docker adapters typically override with ``docker logs --tail``.
+        """
+        return ""
+
     @abstractmethod
     def get_container_netns_ref(self, *, container_id: str) -> NetnsRefResult:
         """

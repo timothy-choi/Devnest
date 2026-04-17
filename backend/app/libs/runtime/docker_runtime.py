@@ -80,6 +80,9 @@ def _inspection_not_found() -> ContainerInspectionResult:
         bind_mounts=(),
         workspace_project_mount=None,
         labels=(),
+        started_at=None,
+        finished_at=None,
+        exit_code=None,
     )
 
 
@@ -272,6 +275,20 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
         else:
             pid = None if p <= 0 else p
 
+    started_raw = state.get("StartedAt")
+    finished_raw = state.get("FinishedAt")
+    started_at = str(started_raw).strip() if started_raw not in (None, "") else None
+    finished_at = str(finished_raw).strip() if finished_raw not in (None, "") else None
+    raw_exit = state.get("ExitCode")
+    exit_code: int | None
+    if raw_exit is None:
+        exit_code = None
+    else:
+        try:
+            exit_code = int(raw_exit)
+        except (TypeError, ValueError):
+            exit_code = None
+
     cid = attrs.get("Id")
     if cid is None:
         container_id = None
@@ -291,6 +308,9 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
         bind_mounts=bind_mounts,
         workspace_project_mount=_workspace_project_bind(bind_mounts),
         labels=_normalize_inspection_labels(attrs),
+        started_at=started_at,
+        finished_at=finished_at,
+        exit_code=exit_code,
     )
 
 
@@ -370,6 +390,17 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         except docker.errors.NotFound:
             return _inspection_not_found()
         return _normalize_inspection(ctr.attrs)
+
+    def fetch_container_log_tail(self, *, container_id: str, lines: int = 80) -> str:
+        n = max(1, min(int(lines), 4096))
+        try:
+            ctr = self._client.containers.get(container_id)
+            raw = ctr.logs(tail=n)
+        except Exception:
+            return ""
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return str(raw)
 
     def ensure_container(
         self,
