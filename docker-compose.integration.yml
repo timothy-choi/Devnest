@@ -25,10 +25,14 @@
 #
 # Workspace browser URL (Traefik + route-admin are included in this compose):
 #   Pattern: ``{DEVNEST_GATEWAY_PUBLIC_SCHEME}://ws-<workspace_id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/``
-#   Defaults: gateway enabled, ``DEVNEST_BASE_DOMAIN=app.devnest.local``, Traefik HTTP on host port 9081,
-#   ``DEVNEST_GATEWAY_PUBLIC_PORT=9081`` so ``gateway_url`` matches the published port. On EC2 with Traefik
-#   on port 80, set ``DEVNEST_GATEWAY_PORT=80`` and ``DEVNEST_GATEWAY_PUBLIC_PORT=0`` (omit port in URL).
-#   Add hosts entries (or DNS) for ``ws-<id>.<DEVNEST_BASE_DOMAIN>`` pointing at the instance IP.
+#   Defaults: gateway enabled, ``DEVNEST_BASE_DOMAIN=app.lvh.me``, Traefik HTTP on host port 9081,
+#   ``DEVNEST_GATEWAY_PUBLIC_PORT=9081`` so ``gateway_url`` matches the published port. Subdomains of
+#   ``app.lvh.me`` resolve to ``127.0.0.1`` (no ``/etc/hosts``) when the browser runs on the same host as Docker.
+#   On EC2 with Traefik on port 80, set ``DEVNEST_GATEWAY_PORT=80`` and ``DEVNEST_GATEWAY_PUBLIC_PORT=0`` (omit port in URL).
+#   Remote browsers: do not use ``app.lvh.me`` (that points at the client loopback). Set ``DEVNEST_BASE_DOMAIN`` to
+#   a wildcard DNS zone you control (``*.yourzone`` → server IP), or use ``<dotted-ip-with-hyphens>.sslip.io`` so
+#   ``ws-<id>.<dashed-ip>.sslip.io`` resolves to that IP. ``scripts/deploy-ec2.sh`` sets the sslip form automatically
+#   when EC2 metadata is available. ``app.devnest.local`` is only for hosts-file / lab DNS (never public DNS).
 #
 # Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
@@ -109,7 +113,7 @@ services:
       # Traefik + route-admin (same compose network): enable attach ``gateway_url`` and worker route registration.
       DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"
       DEVNEST_GATEWAY_URL: "http://route-admin:8080"
-      DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.devnest.local}
+      DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.lvh.me}
       DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
       DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
       DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
@@ -157,7 +161,7 @@ services:
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
       DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"
       DEVNEST_GATEWAY_URL: "http://route-admin:8080"
-      DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.devnest.local}
+      DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.lvh.me}
       DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
       DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
       DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"

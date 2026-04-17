@@ -4,6 +4,8 @@
 
 set -euo pipefail
 
+# For same-machine browser + Docker on localhost, prefer compose default ``app.lvh.me`` (no hosts file).
+# Use this snippet when you keep ``DEVNEST_BASE_DOMAIN=app.devnest.local`` (or another non-resolving name).
 DOMAIN="${DEVNEST_BASE_DOMAIN:-app.devnest.local}"
 IP="${DEVNEST_GATEWAY_LOOPBACK_IP:-127.0.0.1}"
 
