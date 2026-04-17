@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -65,6 +67,8 @@ if TYPE_CHECKING:
     from .system.command_runner import CommandRunner
 
 _V1_MODE = "node_bridge"
+
+logger = logging.getLogger(__name__)
 
 # V1 default CIDR allocator: each node gets a stable /20 out of the parent pool.
 _V1_PARENT_POOL_CIDR = "10.128.0.0/9"
@@ -486,21 +490,68 @@ class DbTopologyAdapter(TopologyAdapter):
         gateway_ip: str,
         workspace_ip: str,
         netns_ref: str,
+        topology_id: int | None = None,
+        node_id: str | None = None,
+        workspace_id: int | None = None,
+        container_id: str | None = None,
     ) -> None:
         from .system import attachment_ops as ao
         from .system.command_runner import CommandRunner
 
         r = self._command_runner or CommandRunner()
+
+        def _pid_for_log() -> str | None:
+            try:
+                from .system.attachment_ops import _pid_from_netns_ref
+
+                return _pid_from_netns_ref(netns_ref)
+            except Exception:
+                return None
+
+        pid_s = _pid_for_log()
+        proc_visible: bool | None = None
+        if sys.platform == "linux" and pid_s and pid_s.isdigit():
+            proc_visible = os.path.isdir(f"/proc/{pid_s}")
+
+        log_extras: dict[str, object | None] = {
+            "topology_id": topology_id,
+            "node_id": node_id,
+            "workspace_id": workspace_id,
+            "workspace_container_id": container_id,
+            "host_if": host_if,
+            "container_if": container_if,
+            "bridge_name": bridge_name,
+            "netns_ref": netns_ref,
+            "netns_target_pid": pid_s,
+            "proc_pid_visible_runner_process": proc_visible,
+        }
+        logger.info("topology_linux_attach_begin", extra=log_extras)
+
+        def _step(name: str) -> None:
+            logger.info("topology_linux_attach_step", extra={**log_extras, "step": name})
+
         ao.assert_netns_attach_target_visible(netns_ref)
+        _step("assert_netns_target_visible_pre_veth")
         try:
             ao.create_veth_pair(host_if, container_if, runner=r)
+            _step("create_veth_pair")
             ao.attach_host_if_to_bridge(host_if, bridge_name, runner=r)
+            _step("attach_host_if_to_bridge")
             # Re-check after bridge/veth work: workspace init PID can exit during slow host steps.
             ao.assert_netns_attach_target_visible(netns_ref)
+            _step("assert_netns_target_visible_pre_netns_move")
             ao.move_container_if_to_netns(container_if, netns_ref, runner=r)
+            _step("move_container_if_to_netns")
             ao.assign_ip_in_netns(netns_ref, container_if, workspace_ip, cidr, runner=r)
+            _step("assign_ip_in_netns")
             ao.ensure_default_route_in_netns(netns_ref, gateway_ip, runner=r)
-        except (RuntimeError, ValueError):
+            _step("ensure_default_route_in_netns")
+            logger.info("topology_linux_attach_complete", extra=log_extras)
+        except (RuntimeError, ValueError) as e:
+            logger.warning(
+                "topology_linux_attach_step_failed",
+                extra={**log_extras, "error": str(e)[:2000], "error_type": type(e).__name__},
+            )
             try:
                 ao.remove_veth_if_exists(host_if, runner=r)
             except RuntimeError:
@@ -933,6 +984,10 @@ class DbTopologyAdapter(TopologyAdapter):
                 gateway_ip=str(runtime.gateway_ip).strip(),
                 workspace_ip=workspace_ip,
                 netns_ref=netns_clean,
+                topology_id=topology_id,
+                node_id=node_id,
+                workspace_id=workspace_id,
+                container_id=container_id,
             )
         except (RuntimeError, ValueError) as e:
             self._session.rollback()
@@ -950,9 +1005,10 @@ class DbTopologyAdapter(TopologyAdapter):
             el = str(e).lower()
             if "invalid" in el and "netns" in el:
                 hint = (
-                    " (Often the workspace container already exited: verify `docker inspect` State.Status "
-                    "and logs for code-server EACCES on bind-mounted config/data; use `pid: host` on the "
-                    "control plane if /proc/<pid> is missing while the container is running.)"
+                    " (If the workspace is still healthy, this is often ``ip`` running in the wrong network "
+                    "namespace vs the Docker host: set DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1 for local "
+                    "docker.sock workers — see docker-compose.integration.yml. Also verify `pid: host` on "
+                    "the worker and that /proc/<pid> exists in the process that runs ``ip``.)"
                 )
             raise WorkspaceAttachmentError(f"linux attach failed: {e}{hint}") from e
 

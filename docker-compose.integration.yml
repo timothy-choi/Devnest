@@ -128,6 +128,10 @@ services:
       DEVNEST_RATE_LIMIT_ENABLED: "false"
       <<: *workspace_image
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
+      # Topology ``ip`` must run in the Docker *host* netns when this worker uses docker.sock from a
+      # container; otherwise veth/bridge are created in the sidecar netns and ``ip link set … netns``
+      # fails with ``Invalid "netns" value`` while the workspace container stays healthy.
+      DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER: "true"
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

@@ -207,8 +207,10 @@ def move_container_if_to_netns(container_if: str, netns_ref: str, *, runner: Com
         if "invalid" in err and "netns" in err:
             raise RuntimeError(
                 f"ip link set dev {c} netns {pid} failed: {e}. "
-                "Usually host PID from Docker is not visible in this PID namespace (use `pid: host` "
-                "for the control-plane container) or the workspace init process exited before attach."
+                "Common causes: (1) workspace init exited before attach; (2) Docker host PID not "
+                "visible to the ``ip`` process (use `pid: host` on the worker); (3) ``ip`` runs in a "
+                "sidecar netns while veth/PID refer to the real host — set DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1 "
+                "for docker.sock-on-host integration (see docker-compose.integration.yml)."
             ) from e
         raise
 

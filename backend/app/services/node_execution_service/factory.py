@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import quote
 
 import docker
@@ -10,6 +11,7 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 from app.libs.runtime.ssm_docker_runtime import SsmDockerRuntimeAdapter
 from app.libs.topology.system.command_runner import CommandRunner
+from app.libs.topology.system.host_nsenter_command_runner import HostPid1NsenterRunner
 
 from app.services.placement_service.models import (
     ExecutionNode,
@@ -98,6 +100,16 @@ def resolve_node_execution_bundle(
     return _bundle_local_docker()
 
 
+def _topology_ip_should_use_host_nsenter() -> bool:
+    """When true, topology ``ip`` runs under ``nsenter -t 1 …`` (host init net/pid/mount view)."""
+    return os.environ.get("DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _bundle_local_docker() -> NodeExecutionBundle:
     try:
         client = docker.from_env()
@@ -106,7 +118,10 @@ def _bundle_local_docker() -> NodeExecutionBundle:
         raise NodeExecutionBindingError(
             f"Docker engine not available for local execution: {e}",
         ) from e
-    runner = CommandRunner()
+    base_runner = CommandRunner()
+    runner: CommandRunner = (
+        HostPid1NsenterRunner(base_runner) if _topology_ip_should_use_host_nsenter() else base_runner
+    )
     return NodeExecutionBundle(
         docker_client=client,
         topology_command_runner=runner,
