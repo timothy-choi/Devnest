@@ -604,6 +604,20 @@ class DbTopologyAdapter(TopologyAdapter):
             _step("assign_ip_in_netns")
             ao.ensure_default_route_in_netns(netns_ref, gateway_ip, runner=r)
             _step("ensure_default_route_in_netns")
+            out_master = ""
+            try:
+                out_master = r.run(["ip", "link", "show", "master", bridge_name])
+            except RuntimeError as e:
+                out_master = f"<ip link show master failed: {e}>"
+            logger.info(
+                "topology_linux_attach_bridge_slaves",
+                extra={**log_extras, "bridge_slaves_snippet": (out_master or "")[:1800]},
+            )
+            if not ao.check_host_veth_enslaved_to_bridge(host_if, bridge_name, runner=r):
+                raise RuntimeError(
+                    f"post-attach verification failed: host interface {host_if!r} is not enslaved to "
+                    f"bridge {bridge_name!r} (no usable L2 path to the workspace netns)",
+                )
             logger.info("topology_linux_attach_complete", extra=log_extras)
         except (RuntimeError, ValueError) as e:
             logger.warning(
@@ -1530,6 +1544,77 @@ class DbTopologyAdapter(TopologyAdapter):
             issues=issues,
             attachment_id=att.attachment_id,
         )
+
+    def format_service_reachability_diagnostics(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> str:
+        """
+        Best-effort snapshot of host bridge membership and workspace netns addressing/listeners.
+
+        Intended for log messages when IDE TCP probes fail; keeps output bounded.
+        """
+        from .system.command_runner import CommandRunner
+
+        nid = node_id.strip()[:128]
+        att_stmt = select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == topology_id,
+            TopologyAttachment.node_id == nid,
+            TopologyAttachment.workspace_id == workspace_id,
+        )
+        att = self._session.exec(att_stmt).first()
+        if att is None:
+            return "diagnostics: no topology_attachment row"
+        br = (att.bridge_name or "").strip()
+        wsip = (att.workspace_ip or "").strip()
+        cid = (att.container_id or "").strip()
+        host_if, ctr_if = _veth_pair_names(topology_id, nid, workspace_id)
+        if att.interface_host and str(att.interface_host).strip():
+            host_if = str(att.interface_host).strip()
+        if att.interface_container and str(att.interface_container).strip():
+            ctr_if = str(att.interface_container).strip()
+
+        r = self._command_runner or CommandRunner()
+        parts: list[str] = [
+            f"bridge_name={br!r} workspace_ip={wsip!r} host_if={host_if!r} container_if={ctr_if!r}",
+        ]
+
+        def _snippet(label: str, cmd: list[str], limit: int = 1400) -> None:
+            try:
+                out = (r.run(cmd) or "").strip()
+                if len(out) > limit:
+                    out = out[:limit] + "…[truncated]"
+                parts.append(f"{label}={out!r}")
+            except RuntimeError as e:
+                parts.append(f"{label}_failed={str(e)[:900]!r}")
+
+        if br:
+            _snippet("ip_link_show_master_bridge", ["ip", "link", "show", "master", br])
+        _snippet("ip_link_show_host_veth", ["ip", "link", "show", "dev", host_if])
+        pid = ""
+        if cid:
+            try:
+                pid = (r.run(["docker", "inspect", "-f", "{{.State.Pid}}", cid]) or "").strip()
+                parts.append(f"docker_pid={pid!r}")
+            except RuntimeError as e:
+                parts.append(f"docker_inspect_failed={str(e)[:900]!r}")
+        if pid.isdigit():
+                _snippet(
+                    "workspace_netns_ip_brief",
+                    ["nsenter", "-n", "-t", pid, "--", "ip", "-brief", "addr"],
+                )
+                _snippet(
+                    "workspace_netns_route",
+                    ["nsenter", "-n", "-t", pid, "--", "ip", "-brief", "route"],
+                )
+                _snippet(
+                    "workspace_netns_listen_tcp",
+                    ["nsenter", "-n", "-t", pid, "--", "ss", "-H", "-lntp"],
+                )
+        return "; ".join(parts)
 
     def run_topology_janitor(
         self,

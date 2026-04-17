@@ -44,3 +44,28 @@ class HostPid1NsenterRunner(CommandRunner):
             prefixed = ["nsenter", "-t", "1", "-n", "--", *[str(x) for x in cmd]]
             return self._inner.run(prefixed)
         return self._inner.run(cmd)
+
+
+class HostPid1NsenterProbeRunner(CommandRunner):
+    """
+    Run **arbitrary** probe commands (``timeout``/``nc``/``curl``/``sh``) in **PID 1's network namespace**.
+
+    Used for IDE reachability checks from a Docker sidecar: topology addresses live on the host
+    bridge while the worker process still uses the container's default netns. Unlike
+    :class:`HostPid1NsenterRunner`, this wraps **all** argv lists so probes share the same host view
+    as ``ip link set … master`` (see ``DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER``).
+
+    Commands that already start with ``nsenter`` (e.g. workspace-netns ``nsenter -t <pid> -n``)
+    are passed through unchanged.
+    """
+
+    def __init__(self, inner: CommandRunner | None = None) -> None:
+        self._inner = inner if inner is not None else CommandRunner()
+
+    def run(self, cmd: list[str]) -> str:
+        if not cmd:
+            raise ValueError("cmd must be a non-empty list of strings")
+        if str(cmd[0]) == "nsenter":
+            return self._inner.run(cmd)
+        prefixed = ["nsenter", "-t", "1", "-n", "--", *[str(x) for x in cmd]]
+        return self._inner.run(prefixed)

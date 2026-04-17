@@ -636,6 +636,56 @@ class DefaultProbeRunner(ProbeRunner):
             ),
         )
 
+    def _augment_unreachable_service_probe(
+        self,
+        svc: ServiceProbeResult,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> ServiceProbeResult:
+        """Append host + workspace-netns diagnostics for failed TCP reachability (bounded)."""
+        if svc.healthy:
+            return svc
+        fmt = getattr(self._topology, "format_service_reachability_diagnostics", None)
+        if not callable(fmt):
+            return svc
+        dial_codes = {
+            ProbeIssueCode.SERVICE_UNREACHABLE.value,
+            ProbeIssueCode.SERVICE_TIMEOUT.value,
+        }
+        if not any(i.component == "service" and i.code in dial_codes for i in svc.issues):
+            return svc
+        try:
+            blob = fmt(topology_id=topology_id, node_id=node_id, workspace_id=workspace_id)
+        except Exception as e:
+            blob = f"diagnostics_error={e!r}"
+        blob = (blob or "").strip()[:2400]
+        if not blob:
+            return svc
+        new_issues: list[HealthIssue] = []
+        appended = False
+        for iss in svc.issues:
+            if not appended and iss.component == "service" and iss.code in dial_codes:
+                new_issues.append(
+                    HealthIssue(
+                        code=iss.code,
+                        component=iss.component,
+                        message=f"{iss.message}; host/workspace diagnostics: {blob}",
+                        severity=iss.severity,
+                    ),
+                )
+                appended = True
+            else:
+                new_issues.append(iss)
+        return ServiceProbeResult(
+            healthy=svc.healthy,
+            workspace_ip=svc.workspace_ip,
+            port=svc.port,
+            latency_ms=svc.latency_ms,
+            issues=tuple(new_issues),
+        )
+
     def check_workspace_health(
         self,
         *,
@@ -660,6 +710,12 @@ class DefaultProbeRunner(ProbeRunner):
                 workspace_ip=ws_ip,
                 port=expected_port,
                 timeout_seconds=timeout_seconds,
+            )
+            svc = self._augment_unreachable_service_probe(
+                svc,
+                topology_id=topo.topology_id,
+                node_id=topo.node_id,
+                workspace_id=topo.workspace_id,
             )
             if svc.healthy:
                 # TCP connected — optionally verify HTTP (code-server readiness). When disabled
