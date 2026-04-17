@@ -511,3 +511,35 @@ def test_access_includes_health_issue_when_not_healthy(workspace_unit_engine, ow
     assert out.runtime_ready is True
     assert len(out.issues) == 1
     assert out.issues[0].startswith("access:runtime:health:")
+
+
+def test_attach_gateway_url_includes_public_port(
+    workspace_unit_engine,
+    owner_user_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
+    monkeypatch.setenv("DEVNEST_BASE_DOMAIN", "app.devnest.local")
+    monkeypatch.setenv("DEVNEST_GATEWAY_PUBLIC_PORT", "9081")
+    from app.libs.common.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        with Session(workspace_unit_engine) as session:
+            wid = _seed_running_with_runtime(
+                session,
+                owner_user_id,
+                public_host=None,
+                name="gw-port-ws",
+            )
+            out = workspace_intent_service.request_attach_workspace(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                requested_by_user_id=owner_user_id,
+                client_metadata={},
+                correlation_id=None,
+            )
+        assert out.gateway_url == f"http://ws-{wid}.app.devnest.local:9081/"
+    finally:
+        get_settings.cache_clear()

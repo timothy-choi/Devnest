@@ -70,7 +70,9 @@ export default function WorkspacePage() {
         }
 
         setMessage(
-          "No gateway URL is configured for this workspace. Enable DEVNEST_GATEWAY_ENABLED on the API, register routes, and ensure DEVNEST_BASE_DOMAIN matches your Traefik host rules.",
+          "No gateway URL was returned. Ensure the API has DEVNEST_GATEWAY_ENABLED, a reachable DEVNEST_GATEWAY_URL " +
+            "(route-admin), and DEVNEST_BASE_DOMAIN aligned with Traefik Host rules. If Traefik is published on a " +
+            "non-default port, set DEVNEST_GATEWAY_PUBLIC_PORT to match (see docker-compose.integration.yml).",
         );
       } catch {
         if (!cancelled) {

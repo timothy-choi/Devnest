@@ -46,6 +46,11 @@ if [[ -x "${REPO_DIR}/scripts/verify-workspace-image.sh" ]]; then
   "${REPO_DIR}/scripts/verify-workspace-image.sh" devnest/workspace:latest || true
 fi
 
+echo "--- gateway (browser IDE URL) ---"
+echo "Compose enables DEVNEST_GATEWAY_ENABLED by default with Traefik on host port \${DEVNEST_GATEWAY_PORT:-9081}."
+echo "Attach returns gateway_url like http://ws-<id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/"
+echo "On EC2 with Traefik on 80: export DEVNEST_GATEWAY_PORT=80 DEVNEST_GATEWAY_PUBLIC_PORT=0 before compose up."
+echo "DNS or /etc/hosts must resolve ws-<id>.<DEVNEST_BASE_DOMAIN> to this host (or your edge IP)."
 echo "--- deploy diagnostics ---"
 git status || true
 git rev-parse HEAD || true

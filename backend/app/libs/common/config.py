@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     devnest_gateway_enabled: bool = False
     # Used for gateway_url hint on attach/access when route registration is enabled (no TLS in V1).
     devnest_gateway_public_scheme: str = "http"
+    # When Traefik is published on a non-default port, set this so ``gateway_url`` matches the browser
+    # (standard 80/443 are omitted from the URL). Example: map ``9081:80`` and set ``9081`` here.
+    devnest_gateway_public_port: int = 0
     # When true, GET /internal/gateway/auth enforces workspace session validation for Traefik ForwardAuth.
     # Set false in local/dev mode (default) to skip session requirement during development.
     devnest_gateway_auth_enabled: bool = False
@@ -138,6 +141,15 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
+
+    @field_validator("devnest_gateway_public_port", mode="before")
+    @classmethod
+    def _coerce_gateway_public_port(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(n, 65535))
 
     @field_validator("devnest_reconcile_interval_seconds", mode="before")
     @classmethod
