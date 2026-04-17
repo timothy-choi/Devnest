@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from sqlmodel import Session
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 from app.libs.common.config import get_settings
 from app.libs.probes.probe_runner import DefaultProbeRunner
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
+from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology import DbTopologyAdapter
 from app.services.node_execution_service import resolve_node_execution_bundle
 from app.services.node_execution_service.errors import NodeExecutionBindingError
@@ -28,6 +30,24 @@ from app.services.workspace_service.models import Workspace, WorkspaceJob
 
 from .errors import AppOrchestratorBindingError
 from .service import DefaultOrchestratorService
+
+
+def _container_init_pid_resolver_from_runtime(runtime: RuntimeAdapter) -> Callable[[str], int | None]:
+    """Resolve workspace init PID via engine inspect (no ``docker`` CLI subprocess)."""
+
+    def resolve(container_id: str) -> int | None:
+        cid = (container_id or "").strip()
+        if not cid:
+            return None
+        try:
+            ins = runtime.inspect_container(container_id=cid)
+            if ins.exists and ins.pid is not None and ins.pid > 0:
+                return int(ins.pid)
+        except Exception:
+            return None
+        return None
+
+    return resolve
 
 
 def build_default_orchestrator_for_session(
@@ -111,7 +131,11 @@ def build_default_orchestrator_for_session(
                 "node execution bundle has no runtime_adapter and no docker_client",
             )
         runtime = DockerRuntimeAdapter(client=bundle.docker_client)
-    topology = DbTopologyAdapter(session, command_runner=bundle.topology_command_runner)
+    topology = DbTopologyAdapter(
+        session,
+        command_runner=bundle.topology_command_runner,
+        container_init_pid_resolver=_container_init_pid_resolver_from_runtime(runtime),
+    )
     probe = DefaultProbeRunner(
         runtime=runtime,
         topology=topology,

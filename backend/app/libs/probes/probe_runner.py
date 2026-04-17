@@ -304,6 +304,14 @@ class DefaultProbeRunner(ProbeRunner):
         except AttachmentHealthCheckError as e:
             return _exec_failed(step="check_attachment", exc=e)
         except Exception as e:
+            if isinstance(e, FileNotFoundError):
+                wrapped = RuntimeError(
+                    f"{e!s} [check_attachment: docker CLI missing from PATH — topology checks should use "
+                    "Docker SDK PID resolution via DbTopologyAdapter(container_init_pid_resolver=…); "
+                    "see orchestrator app_factory.]",
+                )
+                wrapped.__cause__ = e
+                return _exec_failed(step="check_attachment", exc=wrapped)
             return _exec_failed(step="check_attachment", exc=e)
 
         issues: list[HealthIssue] = []

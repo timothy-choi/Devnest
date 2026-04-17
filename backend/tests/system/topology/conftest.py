@@ -68,11 +68,25 @@ def topology_sqlite_session() -> Generator[Session, None, None]:
 
 
 @pytest.fixture
-def linux_topology_adapter(topology_sqlite_session: Session) -> DbTopologyAdapter:
+def linux_topology_adapter(
+    topology_sqlite_session: Session,
+    docker_client: docker.DockerClient,
+) -> DbTopologyAdapter:
+    def _pid_resolver(container_id: str) -> int | None:
+        try:
+            c = docker_client.containers.get(container_id)
+            raw = (c.attrs.get("State") or {}).get("Pid")
+            if isinstance(raw, int) and raw > 0:
+                return raw
+        except Exception:
+            return None
+        return None
+
     return DbTopologyAdapter(
         topology_sqlite_session,
         apply_linux_bridge=True,
         apply_linux_attachment=True,
+        container_init_pid_resolver=_pid_resolver,
     )
 
 

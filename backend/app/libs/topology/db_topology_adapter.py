@@ -14,8 +14,10 @@ otherwise it updates attachment DB state only. IP leases are not released on det
 ``check_topology`` / ``check_attachment`` append ``linux: …`` issues when the corresponding
 ``apply_linux_*`` flag is enabled (see env ``DEVNEST_TOPOLOGY_SKIP_LINUX_*``); otherwise they
 evaluate persisted state only. Issue prefixes: ``db:`` (rows/fields), ``runtime:`` (CIDR/gateway
-consistency), ``linux:`` (host ``ip`` checks). Unexpected ``RuntimeError`` from ``ip`` is surfaced
-as ``linux:`` issues instead of aborting the check.
+consistency), ``linux:`` (host ``ip`` checks). Workspace netns checks resolve the container init
+PID via ``container_init_pid_resolver`` (Docker SDK inspect from orchestrator ``app_factory``) so
+``check_attachment`` does not require a ``docker`` CLI in the worker image. Unexpected
+``RuntimeError`` from ``ip`` is surfaced as ``linux:`` issues instead of aborting the check.
 
 ``delete_topology`` removes the ``TopologyRuntime`` row (and node-local attachment rows) when no
 non-``DETACHED`` attachments exist, commits, then optionally deletes the Linux bridge when bridge sync
@@ -29,6 +31,7 @@ import ipaddress
 import logging
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -416,9 +419,11 @@ class DbTopologyAdapter(TopologyAdapter):
         command_runner: CommandRunner | None = None,
         apply_linux_bridge: bool | None = None,
         apply_linux_attachment: bool | None = None,
+        container_init_pid_resolver: Callable[[str], int | None] | None = None,
     ) -> None:
         self._session = session
         self._command_runner = command_runner
+        self._container_init_pid_resolver = container_init_pid_resolver
         self._apply_linux_bridge = (
             apply_linux_bridge if apply_linux_bridge is not None else _apply_linux_bridge_env_default()
         )
@@ -427,6 +432,44 @@ class DbTopologyAdapter(TopologyAdapter):
             if apply_linux_attachment is not None
             else _apply_linux_attachment_env_default()
         )
+
+    def _workspace_init_pid_str(self, container_id: str) -> tuple[str, str | None]:
+        """
+        Resolve Docker init PID for ``/proc/<pid>/ns/net`` checks.
+
+        Prefer :class:`DockerRuntimeAdapter` / engine inspect via ``container_init_pid_resolver``
+        (orchestrator wiring) so ``check_attachment`` does not require a ``docker`` CLI in PATH.
+        """
+        cid = (container_id or "").strip()
+        if not cid:
+            return "", "empty container_id"
+        if self._container_init_pid_resolver is not None:
+            try:
+                pid = self._container_init_pid_resolver(cid)
+            except Exception as e:
+                return "", f"container_init_pid_resolver failed: {e!s}"[:900]
+            if pid is not None and int(pid) > 0:
+                return str(int(pid)), None
+            return "", "container_init_pid_resolver returned no usable PID for this container_id"
+        from shutil import which
+
+        from .system.command_runner import CommandRunner
+
+        r = self._command_runner or CommandRunner()
+        if which("docker") is None:
+            return (
+                "",
+                "check_attachment cannot resolve workspace init PID: docker CLI is not in PATH and "
+                "no container_init_pid_resolver is configured (orchestrator should pass Docker SDK "
+                "inspect via app_factory — workspace-worker images often omit the docker binary)",
+            )
+        try:
+            pid_s = (r.run(["docker", "inspect", "-f", "{{.State.Pid}}", cid]) or "").strip()
+            return pid_s, None
+        except FileNotFoundError as e:
+            return "", f"check_attachment runtime missing docker CLI ({e!s})"
+        except RuntimeError as e:
+            return "", str(e)[:900]
 
     def _sync_linux_node_bridge(self, row: TopologyRuntime) -> None:
         """
@@ -1684,16 +1727,9 @@ class DbTopologyAdapter(TopologyAdapter):
                 )
                 brn = str(att.bridge_name).strip()
                 try:
-                    pid_s = ""
-                    try:
-                        pid_s = (
-                            r.run(
-                                ["docker", "inspect", "-f", "{{.State.Pid}}", str(att.container_id).strip()],
-                            )
-                            or ""
-                        ).strip()
-                    except RuntimeError:
-                        pid_s = ""
+                    pid_s, pid_err = self._workspace_init_pid_str(str(att.container_id).strip())
+                    if pid_err and not pid_s:
+                        linux_issues.append(f"linux: {pid_err}")
 
                     attempted_full_plumb = False
                     if (
@@ -1807,11 +1843,12 @@ class DbTopologyAdapter(TopologyAdapter):
         _snippet("ip_link_show_host_veth", ["ip", "link", "show", "dev", host_if])
         pid = ""
         if cid:
-            try:
-                pid = (r.run(["docker", "inspect", "-f", "{{.State.Pid}}", cid]) or "").strip()
-                parts.append(f"docker_pid={pid!r}")
-            except RuntimeError as e:
-                parts.append(f"docker_inspect_failed={str(e)[:900]!r}")
+            pid_str, pid_hint = self._workspace_init_pid_str(cid)
+            pid = pid_str
+            if pid:
+                parts.append(f"workspace_init_pid={pid!r}")
+            elif pid_hint:
+                parts.append(f"workspace_init_pid_unresolved={pid_hint[:900]!r}")
         if pid.isdigit():
             _snippet(
                 "workspace_netns_ip_brief",

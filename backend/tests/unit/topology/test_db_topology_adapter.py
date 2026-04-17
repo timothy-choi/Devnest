@@ -1546,6 +1546,7 @@ class TestCheckAttachment:
             topo_session,
             command_runner=GoodRunner(),
             apply_linux_attachment=True,
+            container_init_pid_resolver=lambda _cid: 1,
         )
         res = chk.check_attachment(topology_id=tid, node_id="n1", workspace_id=63)
         assert res.healthy is True

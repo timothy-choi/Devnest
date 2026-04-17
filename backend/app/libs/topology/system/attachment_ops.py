@@ -307,6 +307,26 @@ def assign_ip_in_netns(
     r.run([*prefix, "ip", "link", "set", "dev", ifn, "up"])
 
 
+def bridge_master_slave_ifnames(bridge_name: str, *, runner: CommandRunner | None = None) -> list[str]:
+    """
+    Interface names listed as bridge ports under ``ip link show master <bridge>``.
+
+    Empty list means the bridge has no slaves (typical NO-CARRIER / no L2 path).
+    """
+    br = _validate_ifname(bridge_name, label="bridge_name")
+    r = runner or CommandRunner()
+    try:
+        out = r.run(["ip", "link", "show", "master", br])
+    except RuntimeError:
+        return []
+    names: list[str] = []
+    for line in out.splitlines():
+        m = re.match(r"^\d+:\s*([^:@\s]+)(?:@|:)", line.strip())
+        if m:
+            names.append(m.group(1))
+    return names
+
+
 def check_bridge_master_list_contains_if(
     host_if: str,
     bridge_name: str,
@@ -321,16 +341,7 @@ def check_bridge_master_list_contains_if(
     """
     h = _validate_ifname(host_if, label="host_if")
     br = _validate_ifname(bridge_name, label="bridge_name")
-    r = runner or CommandRunner()
-    try:
-        out = r.run(["ip", "link", "show", "master", br])
-    except RuntimeError:
-        return False
-    for line in out.splitlines():
-        m = re.match(r"^\d+:\s*([^:@\s]+)(?:@|:)", line.strip())
-        if m and m.group(1) == h:
-            return True
-    return False
+    return h in bridge_master_slave_ifnames(br, runner=runner)
 
 
 def check_workspace_ipv4_assigned_on_iface(
@@ -415,6 +426,12 @@ def topology_attach_plumbing_failures(
     h = _validate_ifname(host_if, label="host_if")
     c = _validate_ifname(container_if, label="container_if")
     reasons: list[str] = []
+    slaves = bridge_master_slave_ifnames(br, runner=r)
+    if len(slaves) == 0:
+        reasons.append(
+            f"topology bridge {br!r} has no slave interfaces (`ip link show master` empty — "
+            f"NO-CARRIER / missing bridge membership vs DB ATTACHED state)",
+        )
     if not check_interface_exists(h, runner=r):
         reasons.append(f"host veth {h!r} does not exist in the topology `ip` netns")
         return reasons
@@ -426,10 +443,10 @@ def topology_attach_plumbing_failures(
         reasons.append(
             f"host veth {h!r} is not enslaved to bridge {br!r} (link show: {(out or '')[:300]!r})",
         )
-    if not check_bridge_master_list_contains_if(h, br, runner=r):
+    if h not in slaves:
         reasons.append(
             f"`ip link show master {br!r}` does not list host leg {h!r} "
-            "(bridge has no port / host L2 path missing)",
+            f"(observed bridge ports: {slaves!r}; host L2 path missing)",
         )
     nr = validate_netns_ref(netns_ref)
     if not check_interface_exists(c, netns_ref=nr, runner=r):
