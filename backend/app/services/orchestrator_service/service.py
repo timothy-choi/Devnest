@@ -584,18 +584,33 @@ class DefaultOrchestratorService(OrchestratorService):
                     max_wait_s=3.0,
                 )
                 netns = self._runtime_adapter.get_container_netns_ref(container_id=running.container_id)
-                try:
-                    assert_netns_attach_target_visible(netns.netns_ref)
-                except RuntimeError as e:
-                    tail = self._runtime_adapter.fetch_container_log_tail(
-                        container_id=running.container_id,
-                        lines=160,
+                # ``assert_netns_attach_target_visible`` requires ``/proc/<pid>`` in *this* PID namespace.
+                # Unit tests use fake inspect PIDs; real attach still validates in ``DbTopologyAdapter._run_linux_attach``.
+                precheck_netns = True
+                if sys.platform == "linux" and netns.pid > 0:
+                    precheck_netns = os.path.isdir(f"/proc/{netns.pid}")
+                if precheck_netns:
+                    try:
+                        assert_netns_attach_target_visible(netns.netns_ref)
+                    except RuntimeError as e:
+                        tail = self._runtime_adapter.fetch_container_log_tail(
+                            container_id=running.container_id,
+                            lines=160,
+                        )
+                        raise WorkspaceBringUpError(
+                            "workspace runtime exited before topology attach "
+                            f"(netns target not visible from control plane before linux attach: {e}).\n"
+                            f"docker log tail:\n{tail or '(empty)'}",
+                        ) from e
+                else:
+                    logger.debug(
+                        "workspace_runtime_netns_precheck_skipped_host_proc_not_visible",
+                        extra={
+                            "workspace_id": ctx.wid,
+                            "container_id": running.container_id,
+                            "pid": netns.pid,
+                        },
                     )
-                    raise WorkspaceBringUpError(
-                        "workspace runtime exited before topology attach "
-                        f"(netns target not visible from control plane before linux attach: {e}).\n"
-                        f"docker log tail:\n{tail or '(empty)'}",
-                    ) from e
             attach_res = self._topology_service.attach_workspace(
                 topology_id=self._topology_id,
                 node_id=self._node_id,
