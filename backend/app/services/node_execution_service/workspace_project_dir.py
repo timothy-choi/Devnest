@@ -42,6 +42,54 @@ def stat_mode_octal(path: str) -> str:
     return oct(stat.S_IMODE(st.st_mode))
 
 
+def finalize_workspace_host_project_tree_ownership(project_root: str, *, strict: bool) -> None:
+    """Recursively chown the entire workspace bind tree to the container runtime UID/GID.
+
+    Call after all ``mkdir``/seed steps under ``project_root`` (including ``code-server/``) and
+    again immediately before ``docker create`` so root-created files cannot remain on the host.
+    """
+    root = os.path.realpath(os.path.expanduser(str(project_root or "").strip()))
+    if not root:
+        return
+    if not os.path.lexists(root):
+        if strict:
+            raise OSError(errno.ENOENT, f"workspace project root missing for final chown: {root!r}")
+        return
+    chown_tree_for_workspace_runtime(root, strict=strict)
+
+
+def log_workspace_host_bind_mount_ownership(workspace_id: str, project_root: str) -> None:
+    """Emit one log line per key path with uid/gid/mode (post-chown diagnostics)."""
+    wid = (workspace_id or "").strip() or "unknown"
+    root = os.path.realpath(os.path.expanduser(str(project_root or "").strip()))
+    paths: list[tuple[str, str]] = [
+        ("workspace_root", root),
+        ("code_server", os.path.join(root, "code-server")),
+        ("code_server_config", os.path.join(root, "code-server", "config")),
+        ("code_server_data", os.path.join(root, "code-server", "data")),
+    ]
+    for role, path in paths:
+        if not path or not os.path.lexists(path):
+            logger.info(
+                "workspace_host_bind_mount_ownership_skip",
+                extra={"workspace_id": wid, "role": role, "host_path": path, "exists": False},
+            )
+            continue
+        su, sg = stat_uid_gid(path)
+        logger.info(
+            "workspace_host_bind_mount_ownership_final",
+            extra={
+                "workspace_id": wid,
+                "role": role,
+                "host_path": path,
+                "stat_uid": su,
+                "stat_gid": sg,
+                "mode_oct": stat_mode_octal(path),
+                "is_file": os.path.isfile(path),
+            },
+        )
+
+
 def chown_tree_for_workspace_runtime(path: str, *, strict: bool) -> None:
     """
     Recursively set ownership to :func:`workspace_container_uid_gid`.
@@ -404,6 +452,8 @@ def ssh_remote_ensure_workspace_project_dir(
     except RuntimeError:
         existed_before = False
     runner.run(["mkdir", "-p", remote_path])
+    uid, gid = workspace_container_uid_gid()
+    runner.run(["chown", "-R", f"{uid}:{gid}", remote_path])
     logger.info(
         "workspace_project_host_dir_ready",
         extra={
@@ -414,6 +464,8 @@ def ssh_remote_ensure_workspace_project_dir(
             "path_mode": "legacy_workspace_id" if not storage_key else "workspace_id_plus_storage_key",
             "directory_preexisted": existed_before,
             "execution_target": "remote",
+            "chown_uid": uid,
+            "chown_gid": gid,
         },
     )
     return remote_path

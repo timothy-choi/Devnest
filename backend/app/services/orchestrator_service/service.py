@@ -44,9 +44,10 @@ from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
 from app.services.node_execution_service.workspace_project_dir import (
-    chown_tree_for_workspace_runtime,
     default_local_ensure_workspace_project_dir,
     ensure_code_server_bind_auth_proxy_config,
+    finalize_workspace_host_project_tree_ownership,
+    log_workspace_host_bind_mount_ownership,
     stat_mode_octal,
     stat_uid_gid,
     verify_workspace_runtime_can_read_write_file,
@@ -355,9 +356,9 @@ class DefaultOrchestratorService(OrchestratorService):
             )
             # Seed/patch ``config.yaml`` first; this may create or rewrite the file as root.
             ensure_code_server_bind_auth_proxy_config(cfg_host)
-            # Final ownership fix-up must happen after every mkdir/write above so root-created files
-            # (especially config.yaml) cannot survive with stale ownership.
-            chown_tree_for_workspace_runtime(cs_base, strict=_strict_chown)
+            # Chown the entire project tree (not only code-server/) so nothing under the bind root
+            # stays root-owned after mkdir/seed/rmtree steps.
+            finalize_workspace_host_project_tree_ownership(project_root, strict=_strict_chown)
             for label, host in (("config", cfg_host), ("data", data_host)):
                 verify_workspace_runtime_owns_path(host)
                 verify_workspace_runtime_can_write_dir(host)
@@ -376,7 +377,7 @@ class DefaultOrchestratorService(OrchestratorService):
                         "target_uid": uid,
                         "target_gid": gid,
                         "mode_oct": stat_mode_octal(host),
-                        "chown_performed_under_cs_base": True,
+                        "chown_final_project_tree": True,
                         "chown_strict": _strict_chown,
                         "pre_start_writability_ok": True,
                         "writability_checked_with_privdrop": bool(
@@ -387,28 +388,6 @@ class DefaultOrchestratorService(OrchestratorService):
             if os.path.isfile(cfg_file):
                 verify_workspace_runtime_owns_path(cfg_file)
                 verify_workspace_runtime_can_read_write_file(cfg_file)
-            for label, host in (
-                ("workspace_root", project_root),
-                ("config_dir", cfg_host),
-                ("data_dir", data_host),
-                ("config_file", cfg_file),
-            ):
-                if not os.path.exists(host):
-                    continue
-                su, sg = stat_uid_gid(host)
-                logger.info(
-                    "workspace_code_server_host_path_final",
-                    extra={
-                        "workspace_id": wid_clean,
-                        "role": label,
-                        "host_path": host,
-                        "launch_mode": launch_mode,
-                        "stat_uid": su,
-                        "stat_gid": sg,
-                        "mode_oct": stat_mode_octal(host),
-                        "is_file": os.path.isfile(host),
-                    },
-                )
         except OSError as e:
             logger.warning(
                 "orchestrator_code_server_bind_mount_mkdir_failed",
@@ -515,6 +494,16 @@ class DefaultOrchestratorService(OrchestratorService):
             ctx.workspace_host_path,
             ctx.launch_mode,
         )
+        proj_pre = (ctx.workspace_host_path or "").strip()
+        if proj_pre:
+            try:
+                euid_pc = os.geteuid()
+            except AttributeError:
+                euid_pc = -1
+            _strict_final = euid_pc == 0
+            finalize_workspace_host_project_tree_ownership(proj_pre, strict=_strict_final)
+            log_workspace_host_bind_mount_ownership(ctx.wid, proj_pre)
+
         for spec in cs_extra_mounts or []:
             hp = (spec.host_path or "").strip()
             if not hp:

@@ -74,12 +74,15 @@ def test_ssh_remote_requires_absolute_base() -> None:
         ssh_remote_ensure_workspace_project_dir(runner, "relative/path", "ws1")
 
 
-def test_ssh_remote_mkdir() -> None:
+def test_ssh_remote_mkdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_UID", "1000")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_GID", "1000")
     runner = MagicMock()
     path = ssh_remote_ensure_workspace_project_dir(runner, "/var/devnest", "ws7", "k1")
     assert path == "/var/devnest/ws7-k1"
-    assert runner.run.call_count == 2
-    assert runner.run.call_args_list[-1].args[0] == ["mkdir", "-p", "/var/devnest/ws7-k1"]
+    assert runner.run.call_count == 3
+    assert runner.run.call_args_list[-2].args[0] == ["mkdir", "-p", "/var/devnest/ws7-k1"]
+    assert runner.run.call_args_list[-1].args[0] == ["chown", "-R", "1000:1000", "/var/devnest/ws7-k1"]
 
 
 def test_verify_workspace_runtime_owns_path_rejects_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
