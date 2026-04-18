@@ -303,7 +303,7 @@ class TestEnsureContainer:
         ctr.attrs = _sample_attrs(cid="exist1", status="exited", pid=0)
         mock_client.containers.get.return_value = ctr
 
-        r = adapter.ensure_container(name="ws-1", workspace_host_path="/should/not/matter")
+        r = adapter.ensure_container(name="ws-1", workspace_host_path="/host/ws")
 
         assert r.exists is True
         assert r.created_new is False
@@ -318,14 +318,34 @@ class TestEnsureContainer:
         )
         mock_client.api.create_container.assert_not_called()
 
-    def test_reuse_ignores_extra_bind_mounts_and_does_not_recreate(
+    def test_recreates_existing_when_extra_bind_mounts_do_not_match(
         self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
     ) -> None:
-        ctr = MagicMock()
-        ctr.attrs = _sample_attrs(cid="exist1", status="exited", pid=0)
-        mock_client.containers.get.return_value = ctr
+        stale_ctr = MagicMock()
+        stale_ctr.attrs = _sample_attrs(cid="exist1", status="exited", pid=0)
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(
+            cid="newfull",
+            status="created",
+            pid=0,
+            ports={},
+            mounts=[
+                {"Type": "bind", "Source": "/would/be/ignored/on/create", "Destination": WORKSPACE_PROJECT_CONTAINER_PATH, "RW": True},
+                {"Type": "bind", "Source": "/cfg", "Destination": CODE_SERVER_CONFIG_CONTAINER_PATH, "RW": True},
+            ],
+        )
 
-        adapter.ensure_container(
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-1":
+                return stale_ctr
+            if container_id == "newcidfull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "newcidfull"}
+
+        r = adapter.ensure_container(
             name="ws-1",
             workspace_host_path="/would/be/ignored/on/create",
             extra_bind_mounts=(
@@ -333,8 +353,42 @@ class TestEnsureContainer:
             ),
         )
 
-        mock_client.api.create_container.assert_not_called()
-        mock_client.api.create_host_config.assert_not_called()
+        stale_ctr.remove.assert_called_once_with(force=True)
+        mock_client.api.create_container.assert_called_once()
+        mock_client.api.create_host_config.assert_called_once()
+        assert r.created_new is True
+
+    def test_recreates_existing_when_project_bind_does_not_match(
+        self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
+    ) -> None:
+        stale_ctr = MagicMock()
+        stale_ctr.attrs = _sample_attrs(cid="exist1", status="exited", pid=0)
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(
+            cid="freshid",
+            status="created",
+            pid=0,
+            ports={},
+            mounts=[
+                {"Type": "bind", "Source": "/fresh/project", "Destination": WORKSPACE_PROJECT_CONTAINER_PATH, "RW": True},
+            ],
+        )
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-1":
+                return stale_ctr
+            if container_id == "freshidfull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "freshidfull"}
+
+        r = adapter.ensure_container(name="ws-1", workspace_host_path="/fresh/project")
+
+        stale_ctr.remove.assert_called_once_with(force=True)
+        mock_client.api.create_container.assert_called_once()
+        assert r.created_new is True
 
     def test_reuses_existing_when_existing_container_id_resolves(
         self, adapter: DockerRuntimeAdapter, mock_client: MagicMock
@@ -354,7 +408,7 @@ class TestEnsureContainer:
         r = adapter.ensure_container(
             name="logical-name",
             existing_container_id="fullcontainerid",
-            workspace_host_path="/unused",
+            workspace_host_path="/host/ws",
         )
 
         assert r.created_new is False
@@ -370,7 +424,7 @@ class TestEnsureContainer:
         ctr.attrs = attrs
         mock_client.containers.get.return_value = ctr
 
-        r = adapter.ensure_container(name="ws-1", workspace_host_path="/tmp")
+        r = adapter.ensure_container(name="ws-1", workspace_host_path="/host/ws")
 
         assert r.resolved_ports == ()
 
