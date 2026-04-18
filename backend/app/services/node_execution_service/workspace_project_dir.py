@@ -58,6 +58,44 @@ def finalize_workspace_host_project_tree_ownership(project_root: str, *, strict:
     chown_tree_for_workspace_runtime(root, strict=strict)
 
 
+def log_workspace_config_bind_host_before_docker_start(workspace_id: str, config_host_path: str) -> None:
+    """Log host ownership for the code-server config bind source immediately before ``docker create``."""
+    wid = (workspace_id or "").strip() or "unknown"
+    cfg = os.path.realpath(os.path.expanduser(str(config_host_path or "").strip()))
+    want_uid, want_gid = workspace_container_uid_gid()
+    if not cfg or not os.path.lexists(cfg):
+        logger.info(
+            "workspace_config_bind_host_before_docker_skip",
+            extra={
+                "workspace_id": wid,
+                "host_path": cfg or config_host_path,
+                "target_uid": want_uid,
+                "target_gid": want_gid,
+                "exists": False,
+            },
+        )
+        return
+    su, sg = stat_uid_gid(cfg)
+    extra: dict[str, object] = {
+        "workspace_id": wid,
+        "host_path": cfg,
+        "stat_uid": su,
+        "stat_gid": sg,
+        "target_uid": want_uid,
+        "target_gid": want_gid,
+        "mode_oct": stat_mode_octal(cfg),
+        "ownership_matches_target": bool(su == want_uid and sg == want_gid),
+    }
+    yaml_path = os.path.join(cfg, "config.yaml")
+    if os.path.isfile(yaml_path):
+        yu, yg = stat_uid_gid(yaml_path)
+        extra["config_yaml_stat_uid"] = yu
+        extra["config_yaml_stat_gid"] = yg
+        extra["config_yaml_mode_oct"] = stat_mode_octal(yaml_path)
+        extra["config_yaml_ownership_matches_target"] = bool(yu == want_uid and yg == want_gid)
+    logger.info("workspace_config_bind_host_ownership_before_docker_start", extra=extra)
+
+
 def log_workspace_host_bind_mount_ownership(workspace_id: str, project_root: str) -> None:
     """Emit one log line per key path with uid/gid/mode (post-chown diagnostics)."""
     wid = (workspace_id or "").strip() or "unknown"

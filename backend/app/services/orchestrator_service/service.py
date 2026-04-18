@@ -47,7 +47,7 @@ from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
     ensure_code_server_bind_auth_proxy_config,
     finalize_workspace_host_project_tree_ownership,
-    log_workspace_host_bind_mount_ownership,
+    log_workspace_config_bind_host_before_docker_start,
     stat_mode_octal,
     stat_uid_gid,
     verify_workspace_runtime_can_read_write_file,
@@ -494,15 +494,6 @@ class DefaultOrchestratorService(OrchestratorService):
             ctx.workspace_host_path,
             ctx.launch_mode,
         )
-        proj_pre = (ctx.workspace_host_path or "").strip()
-        if proj_pre:
-            try:
-                euid_pc = os.geteuid()
-            except AttributeError:
-                euid_pc = -1
-            _strict_final = euid_pc == 0
-            finalize_workspace_host_project_tree_ownership(proj_pre, strict=_strict_final)
-            log_workspace_host_bind_mount_ownership(ctx.wid, proj_pre)
 
         for spec in cs_extra_mounts or []:
             hp = (spec.host_path or "").strip()
@@ -539,6 +530,24 @@ class DefaultOrchestratorService(OrchestratorService):
                 ) from e
 
         try:
+            try:
+                euid_last = os.geteuid()
+            except AttributeError:
+                euid_last = -1
+            _strict_last_chown = euid_last == 0
+            proj_last = (ctx.workspace_host_path or "").strip()
+            if proj_last:
+                finalize_workspace_host_project_tree_ownership(proj_last, strict=_strict_last_chown)
+            cfg_dest = CODE_SERVER_CONFIG_CONTAINER_PATH.rstrip("/")
+            cfg_host_bind = ""
+            for spec in cs_extra_mounts or []:
+                cp = str(spec.container_path or "").strip().rstrip("/")
+                if cp == cfg_dest:
+                    cfg_host_bind = str(spec.host_path or "").strip()
+                    break
+            if cfg_host_bind:
+                log_workspace_config_bind_host_before_docker_start(ctx.wid, cfg_host_bind)
+
             return ensure_running_runtime_only(
                 self._runtime_adapter,
                 name=ctx.container_name,
