@@ -290,7 +290,7 @@ class DefaultOrchestratorService(OrchestratorService):
     def _code_server_extra_bind_mounts(
         self,
         wid: str,
-        workspace_host_path: str,
+        workspace_host_path: str | None = None,
     ) -> list[WorkspaceExtraBindMountSpec]:
         """Build code-server persistence bind mounts for config and data.
 
@@ -305,7 +305,13 @@ class DefaultOrchestratorService(OrchestratorService):
         wid_clean = (wid or "").strip()
         if not wid_clean:
             return []
-        project_root = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
+        if workspace_host_path and str(workspace_host_path).strip():
+            project_root = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
+        else:
+            try:
+                project_root = self._ensure_workspace_project_dir(self._workspace_projects_base, wid_clean, None)
+            except ValueError:
+                return []
         if not project_root:
             return []
         cs_base = os.path.join(project_root, "code-server")

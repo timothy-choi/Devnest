@@ -408,6 +408,7 @@ def test_process_update_job_happy_path_respects_config_version(
 
     orch.update_workspace_runtime.assert_called_once_with(
         workspace_id=str(wid),
+        project_storage_key=db_session.get(Workspace, wid).project_storage_key,
         container_id="runtime-ctr",
         requested_config_version=REQUESTED_CONFIG_VERSION,
         requested_by=str(owner_id),
