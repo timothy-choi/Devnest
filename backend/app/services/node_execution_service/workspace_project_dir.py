@@ -173,6 +173,65 @@ def verify_workspace_runtime_can_write_dir(path: str) -> None:
         )
 
 
+def verify_workspace_runtime_can_read_write_file(path: str) -> None:
+    """
+    Confirm ``path`` is readable and writable as the workspace runtime user.
+
+    This catches the common failure mode where a config file is re-created by the control plane as
+    ``root:root`` after the parent directory has already been chowned correctly.
+    """
+    want_uid, want_gid = workspace_container_uid_gid()
+    try:
+        euid = os.geteuid()
+    except AttributeError:
+        return
+    if euid != 0:
+        return
+    quoted = shlex.quote(path)
+    setpriv = shutil.which("setpriv")
+    if setpriv:
+        cmd = [
+            setpriv,
+            f"--reuid={want_uid}",
+            f"--regid={want_gid}",
+            "--clear-groups",
+            "sh",
+            "-c",
+            f"test -r {quoted} && test -w {quoted}",
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            raise OSError(
+                errno.EACCES,
+                f"workspace host file not readable/writable by runtime user uid={want_uid} "
+                f"gid={want_gid} (setpriv check failed for {path!r}): {err}",
+            )
+        return
+    runuser = shutil.which("runuser")
+    if not runuser:
+        return
+    cmd = [
+        runuser,
+        "-u",
+        f"#{want_uid}",
+        "-g",
+        f"#{want_gid}",
+        "--",
+        "sh",
+        "-c",
+        f"test -r {quoted} && test -w {quoted}",
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        raise OSError(
+            errno.EACCES,
+            f"workspace host file not readable/writable by runtime user uid={want_uid} "
+            f"gid={want_gid} (runuser check failed for {path!r}): {err}",
+        )
+
+
 def ensure_host_path_owned_by_workspace_user(path: str, *, strict: bool = False) -> None:
     """
     Recursively ``chown`` a host path tree to the workspace container user (default 1000:1000).

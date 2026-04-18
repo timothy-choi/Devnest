@@ -151,6 +151,8 @@ class TestCodeServerBindMounts:
         mounts = svc._code_server_extra_bind_mounts("99")
         for m in mounts:
             assert Path(m.host_path).is_dir()
+        cfg = tmp_path / "workspaces" / "99" / "code-server" / "config" / "config.yaml"
+        assert cfg.is_file()
 
     def test_no_mounts_when_wid_empty_and_no_base(self) -> None:
         """Empty workspace_id returns empty mounts."""

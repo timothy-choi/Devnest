@@ -49,6 +49,7 @@ from app.services.node_execution_service.workspace_project_dir import (
     ensure_code_server_bind_auth_proxy_config,
     stat_mode_octal,
     stat_uid_gid,
+    verify_workspace_runtime_can_read_write_file,
     verify_workspace_runtime_can_write_dir,
     verify_workspace_runtime_owns_path,
     workspace_container_uid_gid,
@@ -320,6 +321,7 @@ class DefaultOrchestratorService(OrchestratorService):
         cs_base = os.path.join(project_root, "code-server")
         cfg_host = os.path.join(cs_base, "config")
         data_host = os.path.join(cs_base, "data")
+        cfg_file = os.path.join(cfg_host, "config.yaml")
         cfg_existed_before = os.path.isdir(cfg_host)
         data_existed_before = os.path.isdir(data_host)
         uid, gid = workspace_container_uid_gid()
@@ -351,9 +353,10 @@ class DefaultOrchestratorService(OrchestratorService):
                 data_host=data_host,
                 launch_mode=launch_mode,
             )
-            # Seed ``config.yaml`` before chown so the workspace user can read it (auth/proxy contract).
+            # Seed/patch ``config.yaml`` first; this may create or rewrite the file as root.
             ensure_code_server_bind_auth_proxy_config(cfg_host)
-            # Chown the whole ``code-server`` tree (``chown -R`` as root; Python walk fallback).
+            # Final ownership fix-up must happen after every mkdir/write above so root-created files
+            # (especially config.yaml) cannot survive with stale ownership.
             chown_tree_for_workspace_runtime(cs_base, strict=_strict_chown)
             for label, host in (("config", cfg_host), ("data", data_host)):
                 verify_workspace_runtime_owns_path(host)
@@ -379,6 +382,31 @@ class DefaultOrchestratorService(OrchestratorService):
                         "writability_checked_with_privdrop": bool(
                             (shutil.which("setpriv") or shutil.which("runuser")) and _strict_chown,
                         ),
+                    },
+                )
+            if os.path.isfile(cfg_file):
+                verify_workspace_runtime_owns_path(cfg_file)
+                verify_workspace_runtime_can_read_write_file(cfg_file)
+            for label, host in (
+                ("workspace_root", project_root),
+                ("config_dir", cfg_host),
+                ("data_dir", data_host),
+                ("config_file", cfg_file),
+            ):
+                if not os.path.exists(host):
+                    continue
+                su, sg = stat_uid_gid(host)
+                logger.info(
+                    "workspace_code_server_host_path_final",
+                    extra={
+                        "workspace_id": wid_clean,
+                        "role": label,
+                        "host_path": host,
+                        "launch_mode": launch_mode,
+                        "stat_uid": su,
+                        "stat_gid": sg,
+                        "mode_oct": stat_mode_octal(host),
+                        "is_file": os.path.isfile(host),
                     },
                 )
         except OSError as e:
