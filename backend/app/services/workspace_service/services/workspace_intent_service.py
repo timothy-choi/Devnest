@@ -195,6 +195,20 @@ def _runtime_ready_for_access(ws: Workspace, rt: WorkspaceRuntime | None) -> boo
     return bool((rt.container_id or "").strip())
 
 
+def _gateway_unique_public_host(
+    workspace_id: int,
+    base_domain: str,
+    *,
+    project_storage_key: str | None = None,
+) -> str:
+    dom = (base_domain or "app.devnest.local").strip().strip(".")
+    suffix = (project_storage_key or "").strip().lower()
+    label = f"ws-{workspace_id}"
+    if suffix:
+        label = f"{label}-{suffix}"
+    return f"{label}.{dom}"
+
+
 def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
     """Stored ``Workspace.public_host``, or default ``ws-{id}.{base_domain}`` when gateway is on and runtime is ready."""
     from app.libs.common.config import get_settings
@@ -212,8 +226,7 @@ def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime
     wid = ws.workspace_id
     if wid is None:
         return None
-    dom = (settings.devnest_base_domain or "app.devnest.local").strip().strip(".")
-    return f"ws-{wid}.{dom}"
+    return _gateway_unique_public_host(int(wid), settings.devnest_base_domain)
 
 
 def _gateway_public_host_for_url(host: str, scheme: str, port: int) -> str:
@@ -928,6 +941,8 @@ def create_workspace(
     body: CreateWorkspaceRequest,
     correlation_id: str | None = None,
 ) -> CreateWorkspaceResult:
+    from app.libs.common.config import get_settings
+
     # --- Policy and quota checks (before any DB writes) ---
     cid_pre = _effective_correlation_id(correlation_id)
     check_workspace_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
@@ -966,6 +981,15 @@ def create_workspace(
     )
     session.add(ws)
     session.flush()
+    settings = get_settings()
+    if settings.devnest_gateway_enabled and ws.workspace_id is not None:
+        ws.public_host = _gateway_unique_public_host(
+            int(ws.workspace_id),
+            settings.devnest_base_domain,
+            project_storage_key=ws.project_storage_key,
+        )
+        session.add(ws)
+        session.flush()
 
     cfg = WorkspaceConfig(workspace_id=ws.workspace_id, version=1, config_json=config_json)
     session.add(cfg)
