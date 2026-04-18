@@ -94,6 +94,7 @@ def test_access_and_attach_return_public_host_and_gateway_url(
     workspace_control_plane_db_session: Session,
 ) -> None:
     client = workspace_control_plane_client
+    db_session = workspace_control_plane_db_session
     uid, token = helpers.register_and_token(
         client,
         username=f"gw_acc_{uuid.uuid4().hex[:8]}",
