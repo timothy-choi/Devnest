@@ -64,11 +64,6 @@ _ALLOWED_RECONCILE = frozenset(
 )
 
 
-def _gateway_default_public_host(workspace_id: int, base_domain: str) -> str:
-    dom = (base_domain or "app.devnest.local").strip().strip(".")
-    return f"{workspace_id}.{dom}"
-
-
 def _strict_list_routes() -> list[dict[str, Any]]:
     settings = get_settings()
     if not settings.devnest_gateway_enabled:
@@ -80,7 +75,7 @@ def _strict_register_route(ws: Workspace, internal_endpoint: str) -> None:
     settings = get_settings()
     wid = ws.workspace_id
     assert wid is not None
-    public = (ws.public_host or "").strip() or _gateway_default_public_host(
+    public = (ws.public_host or "").strip() or wmod._gateway_default_public_host(
         int(wid),
         settings.devnest_base_domain,
     )
@@ -687,9 +682,14 @@ def _reconcile_running(
             _fail_reconcile(session, ws, job, f"reconcile:gateway_list_failed:{e}")
             return
         row = route_row_for_workspace(routes, wid)
+        expected_host = (ws.public_host or "").strip() or wmod._gateway_default_public_host(
+            int(wid),
+            settings.devnest_base_domain,
+        )
         if gateway_route_needs_repair(
             route_row=row,
             observed_internal_endpoint=health.internal_endpoint,
+            expected_public_host=expected_host,
         ):
             try:
                 _strict_register_route(ws, health.internal_endpoint)
