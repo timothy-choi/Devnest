@@ -11,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.libs.runtime.ssm_docker_runtime import SsmDockerRuntimeAdapter
+from app.libs.topology.system.host_nsenter_command_runner import HostPid1NsenterProbeRunner
 from app.services.node_execution_service import NodeExecutionBackend, NodeExecutionBundle
 from app.services.node_execution_service.errors import NodeExecutionBindingError
 from app.services.node_execution_service.factory import resolve_node_execution_bundle
@@ -38,6 +39,9 @@ def test_empty_node_key_uses_local_bundle_without_db(ne_engine) -> None:
     with Session(ne_engine) as session, patch(
         "app.services.node_execution_service.factory.docker.from_env",
         return_value=mock_client,
+    ), patch(
+        "app.services.node_execution_service.factory._topology_ip_should_use_host_nsenter",
+        return_value=False,
     ):
         bundle = resolve_node_execution_bundle(session, "  ")
     mock_client.ping.assert_called()
@@ -76,10 +80,42 @@ def test_local_docker_row_uses_local_bundle(ne_engine) -> None:
         with patch(
             "app.services.node_execution_service.factory.docker.from_env",
             return_value=mock_client,
+        ), patch(
+            "app.services.node_execution_service.factory._topology_ip_should_use_host_nsenter",
+            return_value=False,
         ):
             bundle = resolve_node_execution_bundle(session, "n1")
     assert bundle.topology_command_runner is not None
     assert bundle.service_reachability_runner is None
+
+
+def test_local_docker_sets_host_probe_runner_when_topology_uses_host_nsenter(ne_engine) -> None:
+    mock_client = MagicMock()
+    with Session(ne_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="n2",
+                name="n2",
+                provider_type=ExecutionNodeProviderType.LOCAL.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+        with patch(
+            "app.services.node_execution_service.factory.docker.from_env",
+            return_value=mock_client,
+        ), patch(
+            "app.services.node_execution_service.factory._topology_ip_should_use_host_nsenter",
+            return_value=True,
+        ):
+            bundle = resolve_node_execution_bundle(session, "n2")
+    assert isinstance(bundle.service_reachability_runner, HostPid1NsenterProbeRunner)
 
 
 def test_unsupported_execution_mode_raises(ne_engine) -> None:

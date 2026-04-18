@@ -74,6 +74,9 @@ class _RecordingRuntimeAdapter:
         assert self._netns is not None
         return self._netns
 
+    def fetch_container_log_tail(self, *, container_id: str, lines: int = 80) -> str:
+        return ""
+
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
         raise NotImplementedError
 

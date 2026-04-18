@@ -84,7 +84,7 @@ def test_create_running_workspace_registers_gateway_route(
     routes = helpers.fetch_registered_routes()
     row = helpers.route_for_workspace(routes, wid)
     assert row is not None, routes
-    assert row["public_host"] == f"{wid}.app.devnest.local"
+    assert row["public_host"] == f"ws-{wid}.app.devnest.local"
     assert str(wid) == row["workspace_id"]
     assert _norm_target(rt.internal_endpoint) == _norm_target(row.get("target"))
 
@@ -102,7 +102,7 @@ def test_access_and_attach_return_public_host_and_gateway_url(
     wid, jid = helpers.create_workspace(client, token)
     helpers.process_job(client, jid)
 
-    expected_host = f"{wid}.app.devnest.local"
+    expected_host = f"ws-{wid}.app.devnest.local"
 
     r_att = client.post(f"/workspaces/attach/{wid}", headers=helpers.auth_header(token))
     assert r_att.status_code == status.HTTP_200_OK, r_att.text

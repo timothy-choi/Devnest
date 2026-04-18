@@ -9,15 +9,20 @@ Image and paths are configurable via settings / env; see :func:`build_default_or
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from sqlmodel import Session
 
+logger = logging.getLogger(__name__)
+
 from app.libs.common.config import get_settings
 from app.libs.probes.probe_runner import DefaultProbeRunner
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
+from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology import DbTopologyAdapter
 from app.services.node_execution_service import resolve_node_execution_bundle
 from app.services.node_execution_service.errors import NodeExecutionBindingError
@@ -25,6 +30,24 @@ from app.services.workspace_service.models import Workspace, WorkspaceJob
 
 from .errors import AppOrchestratorBindingError
 from .service import DefaultOrchestratorService
+
+
+def _container_init_pid_resolver_from_runtime(runtime: RuntimeAdapter) -> Callable[[str], int | None]:
+    """Resolve workspace init PID via engine inspect (no ``docker`` CLI subprocess)."""
+
+    def resolve(container_id: str) -> int | None:
+        cid = (container_id or "").strip()
+        if not cid:
+            return None
+        try:
+            ins = runtime.inspect_container(container_id=cid)
+            if ins.exists and ins.pid is not None and ins.pid > 0:
+                return int(ins.pid)
+        except Exception:
+            return None
+        return None
+
+    return resolve
 
 
 def build_default_orchestrator_for_session(
@@ -43,6 +66,12 @@ def build_default_orchestrator_for_session(
     For ``ssh_docker`` / ``ssm_docker``, ``workspace_projects_base`` must be an **absolute path on the
     remote Docker host**; workspace dirs are created there via SSH or SSM respectively.
 
+    For **local** Docker (socket only): ``workspace_projects_base`` must refer to a directory that
+    exists on the **Docker host** at the same path the control plane uses (typically a bind mount into
+    the API/worker container). Using only the default temp dir inside the control-plane container
+    breaks ``mkdir``/``chown`` for bind mounts — see ``WORKSPACE_PROJECTS_BASE`` in
+    ``docker-compose.integration.yml``.
+
     Raises:
         AppOrchestratorBindingError: if Docker / SSH / SSM binding fails.
     """
@@ -56,11 +85,32 @@ def build_default_orchestrator_for_session(
     if not image:
         image = (os.environ.get("DEVNEST_WORKSPACE_CONTAINER_IMAGE", "") or "").strip()
     if not image:
-        image = "nginx:alpine"
+        # Align with docker_runtime.DockerRuntimeAdapter (DEVNEST_WORKSPACE_IMAGE → devnest/workspace:latest).
+        image = (os.environ.get("DEVNEST_WORKSPACE_IMAGE", "") or "").strip()
+    if not image:
+        image = "devnest/workspace:latest"
 
     base = (settings.workspace_projects_base or "").strip()
+    base_source = "settings.workspace_projects_base"
+    if not base:
+        base = (os.environ.get("WORKSPACE_PROJECTS_BASE", "") or "").strip()
+        base_source = "env.WORKSPACE_PROJECTS_BASE"
     if not base:
         base = str(Path(tempfile.gettempdir()) / "devnest-workspaces")
+        base_source = "temp_default"
+        logger.warning(
+            "workspace_projects_base_using_temp_default",
+            extra={
+                "resolved_base": base,
+                "hint": "Set WORKSPACE_PROJECTS_BASE (or settings.workspace_projects_base) to a host "
+                "directory bind-mounted into the control plane so mkdir/chown apply to Docker bind sources.",
+            },
+        )
+    base = os.path.realpath(os.path.expanduser(base))
+    logger.info(
+        "orchestrator_workspace_projects_base",
+        extra={"workspace_projects_base": base, "source": base_source},
+    )
 
     if topology_id is None:
         topology_id_raw = os.environ.get("DEVNEST_TOPOLOGY_ID", "1").strip()
@@ -81,7 +131,11 @@ def build_default_orchestrator_for_session(
                 "node execution bundle has no runtime_adapter and no docker_client",
             )
         runtime = DockerRuntimeAdapter(client=bundle.docker_client)
-    topology = DbTopologyAdapter(session, command_runner=bundle.topology_command_runner)
+    topology = DbTopologyAdapter(
+        session,
+        command_runner=bundle.topology_command_runner,
+        container_init_pid_resolver=_container_init_pid_resolver_from_runtime(runtime),
+    )
     probe = DefaultProbeRunner(
         runtime=runtime,
         topology=topology,

@@ -512,6 +512,11 @@ class TestCheckWorkspaceHealth:
         assert ProbeIssueCode.SERVICE_UNREACHABLE.value in _issue_codes(out)
         assert out.workspace_ip == "10.88.1.10"
         assert out.internal_endpoint == "10.88.1.10:8080"
+        assert any(
+            "workspace topology attached but nothing is listening on 0.0.0.0:8080" in i.message
+            for i in out.issues
+            if i.component == "service"
+        )
 
     def test_aggregate_service_timeout_preserves_workspace_ip_and_internal_endpoint(
         self,
@@ -541,3 +546,8 @@ class TestCheckWorkspaceHealth:
         assert out.internal_endpoint == "10.99.1.2:8080"
         assert _issue_codes(out).count(ProbeIssueCode.SERVICE_TIMEOUT.value) == 1
         assert out.container_state == "running"
+        assert any(
+            "workspace topology attached but nothing is listening on 0.0.0.0:8080" in i.message
+            for i in out.issues
+            if i.component == "service"
+        )

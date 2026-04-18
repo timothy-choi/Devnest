@@ -46,7 +46,7 @@ def test_gateway_try_register_calls_client_when_enabled(monkeypatch: pytest.Monk
             mock_client.register_route.assert_called_once_with(
                 "101",
                 "http://10.0.0.1:8080",
-                "101.app.devnest.local",
+                "ws-101.app.devnest.local",
             )
     finally:
         get_settings.cache_clear()

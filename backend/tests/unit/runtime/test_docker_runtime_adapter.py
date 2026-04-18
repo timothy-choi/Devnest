@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock
 
 import docker.errors
@@ -1131,14 +1132,16 @@ class TestDeleteContainer:
 class TestGetContainerNetnsRef:
     def test_valid_returns_proc_path(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         ctr = MagicMock()
-        ctr.attrs = _sample_attrs(cid="c1", pid=12345)
+        # On Linux, get_container_netns_ref checks /proc/<pid>; use this process PID so it exists.
+        mypid = os.getpid()
+        ctr.attrs = _sample_attrs(cid="c1", pid=mypid)
         mock_client.containers.get.return_value = ctr
 
         r = adapter.get_container_netns_ref(container_id="c1")
 
         assert r.container_id == "c1"
-        assert r.pid == 12345
-        assert r.netns_ref == "/proc/12345/ns/net"
+        assert r.pid == mypid
+        assert r.netns_ref == f"/proc/{mypid}/ns/net"
 
     def test_missing_container_raises(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
         mock_client.containers.get.side_effect = docker.errors.NotFound("nope")

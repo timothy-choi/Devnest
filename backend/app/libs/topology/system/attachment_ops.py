@@ -9,9 +9,82 @@ All execution goes through ``CommandRunner`` for mocking in tests.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
+import sys
 
 from .command_runner import CommandRunner
+
+
+def infer_docker_sidecar_default_netns_differs_from_pid1() -> bool:
+    """
+    Return True when this process is likely a Docker container whose default netns is **not** init's.
+
+    Topology ``ip link`` for bridges/veth must run in the **Docker host** netns when the worker
+    uses ``docker.sock`` from a sidecar. That is enabled with ``DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER``
+    + :class:`~app.libs.topology.system.host_nsenter_command_runner.HostPid1NsenterRunner`.
+    Without it, plain ``ip`` creates veth/bridge in the sidecar netns while probes against the
+    workspace may use host routing — a classic false-success attach vs unreachable service.
+    """
+    if sys.platform != "linux":
+        return False
+    if not os.path.isfile("/.dockerenv"):
+        return False
+    try:
+        self_ns = os.readlink("/proc/self/ns/net")
+        pid1_ns = os.readlink("/proc/1/ns/net")
+    except OSError:
+        return False
+    return self_ns != pid1_ns
+
+
+def _env_truthy(val: str | None) -> bool:
+    if val is None:
+        return False
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def assert_host_topology_ip_via_nsenter_config_or_raise() -> None:
+    """
+    Raise if we are in a Docker sidecar netns but host-nsenter for ``ip`` is not enabled.
+
+    Reads ``DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER`` (same truthy rule as node_execution factory).
+    """
+    if not infer_docker_sidecar_default_netns_differs_from_pid1():
+        return
+    raw = os.environ.get("DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER", "")
+    if _env_truthy(raw):
+        return
+    raise RuntimeError(
+        "refusing topology Linux attach: this process runs in a Docker sidecar netns that differs "
+        "from PID 1's netns, but DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER is not enabled. Plain `ip` "
+        "would create veth/bridge in the sidecar while workspace topology addresses live on the "
+        "host bridge — set DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1 (and HostPid1NsenterRunner on "
+        "the topology CommandRunner). See docker-compose.integration.yml workspace-worker."
+    )
+
+
+def _assert_netns_target_pid_visible(pid: str) -> None:
+    """
+    ``ip link set … netns <pid>`` and ``nsenter -t <pid>`` resolve ``pid`` in the **caller's PID namespace**.
+
+    Docker's ``State.Pid`` is the workspace init **host** PID. If the control plane runs in a
+    container without ``pid: host``, ``/proc/<pid>`` is missing and the kernel rejects the netns
+    with errors like ``Invalid "netns" value``.
+    """
+    if not re.fullmatch(r"\d+", pid):
+        return
+    if sys.platform != "linux":
+        return
+    proc_path = f"/proc/{pid}"
+    if not os.path.isdir(proc_path):
+        raise RuntimeError(
+            f"target PID {pid} for netns move is not visible ({proc_path} missing). "
+            "If the API/worker runs in Docker, set `pid: host` on that service so host PIDs from "
+            "Docker inspect match this process namespace. If /proc is missing because the "
+            "workspace container already exited, bring-up raced teardown — retry after the "
+            "workspace container is running."
+        )
 
 
 def _validate_ifname(name: str, *, label: str = "interface") -> str:
@@ -64,9 +137,21 @@ def validate_netns_ref(netns_ref: str) -> str:
     return s
 
 
+def assert_netns_attach_target_visible(netns_ref: str) -> None:
+    """
+    Validate ``netns_ref`` and ensure ``/proc/<pid>`` is visible in this PID namespace.
+
+    Call before expensive veth creation so attach fails fast with a clear message when the
+    workspace init PID is missing (exited container or control plane without ``pid: host``).
+    """
+    s = validate_netns_ref(netns_ref)
+    _assert_netns_target_pid_visible(_pid_from_netns_ref(s))
+
+
 def _netns_prefix(netns_ref: str) -> list[str]:
     """``nsenter`` argv prefix to run a command in the target network namespace."""
     pid = _pid_from_netns_ref(netns_ref)
+    _assert_netns_target_pid_visible(pid)
     return ["nsenter", "-n", "-t", pid, "--"]
 
 
@@ -161,8 +246,21 @@ def move_container_if_to_netns(container_if: str, netns_ref: str, *, runner: Com
     """
     c = _validate_ifname(container_if, label="container_if")
     pid = _pid_from_netns_ref(netns_ref)
+    _assert_netns_target_pid_visible(pid)
     r = runner or CommandRunner()
-    r.run(["ip", "link", "set", "dev", c, "netns", pid])
+    try:
+        r.run(["ip", "link", "set", "dev", c, "netns", pid])
+    except RuntimeError as e:
+        err = str(e).lower()
+        if "invalid" in err and "netns" in err:
+            raise RuntimeError(
+                f"ip link set dev {c} netns {pid} failed: {e}. "
+                "Common causes: (1) workspace init exited before attach; (2) Docker host PID not "
+                "visible to the ``ip`` process (use `pid: host` on the worker); (3) ``ip`` runs in a "
+                "sidecar netns while veth/PID refer to the real host — set DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1 "
+                "for docker.sock-on-host integration (see docker-compose.integration.yml)."
+            ) from e
+        raise
 
 
 def assign_ip_in_netns(
@@ -207,6 +305,168 @@ def assign_ip_in_netns(
         else:
             raise
     r.run([*prefix, "ip", "link", "set", "dev", ifn, "up"])
+
+
+def bridge_master_slave_ifnames(bridge_name: str, *, runner: CommandRunner | None = None) -> list[str]:
+    """
+    Interface names listed as bridge ports under ``ip link show master <bridge>``.
+
+    Empty list means the bridge has no slaves (typical NO-CARRIER / no L2 path).
+    """
+    br = _validate_ifname(bridge_name, label="bridge_name")
+    r = runner or CommandRunner()
+    try:
+        out = r.run(["ip", "link", "show", "master", br])
+    except RuntimeError:
+        return []
+    names: list[str] = []
+    for line in out.splitlines():
+        m = re.match(r"^\d+:\s*([^:@\s]+)(?:@|:)", line.strip())
+        if m:
+            names.append(m.group(1))
+    return names
+
+
+def check_bridge_master_list_contains_if(
+    host_if: str,
+    bridge_name: str,
+    *,
+    runner: CommandRunner | None = None,
+) -> bool:
+    """
+    Return True if ``ip link show master <bridge>`` lists ``host_if`` as a bridge port.
+
+    Stronger than reading ``master`` only on the veth: confirms the bridge's forwarding view
+    includes this interface (catches stale / divergent state).
+    """
+    h = _validate_ifname(host_if, label="host_if")
+    br = _validate_ifname(bridge_name, label="bridge_name")
+    return h in bridge_master_slave_ifnames(br, runner=runner)
+
+
+def check_workspace_ipv4_assigned_on_iface(
+    netns_ref: str,
+    container_if: str,
+    workspace_ip: str,
+    cidr: str,
+    *,
+    runner: CommandRunner | None = None,
+) -> bool:
+    """Return True if ``workspace_ip/<cidr prefix>`` appears on ``container_if`` inside ``netns_ref``."""
+    ifn = _validate_ifname(container_if, label="container_if")
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    if not isinstance(net, ipaddress.IPv4Network):
+        return False
+    try:
+        ip = ipaddress.ip_address(workspace_ip.strip())
+    except ValueError:
+        return False
+    if not isinstance(ip, ipaddress.IPv4Address):
+        return False
+    if ip not in net:
+        return False
+    expect = f"{ip}/{net.prefixlen}"
+    r = runner or CommandRunner()
+    try:
+        out = r.run([*_netns_prefix(netns_ref), "ip", "-brief", "addr", "show", "dev", ifn])
+    except RuntimeError:
+        return False
+    return expect in out
+
+
+def check_default_ipv4_route_via_gateway_in_netns(
+    netns_ref: str,
+    gateway_ip: str,
+    *,
+    runner: CommandRunner | None = None,
+) -> bool:
+    """Return True if default route in ``netns_ref`` is IPv4 ``via <gateway_ip>``."""
+    try:
+        gw = ipaddress.ip_address(gateway_ip.strip())
+    except ValueError:
+        return False
+    if not isinstance(gw, ipaddress.IPv4Address):
+        return False
+    gws = str(gw)
+    r = runner or CommandRunner()
+    try:
+        out = r.run([*_netns_prefix(netns_ref), "ip", "-brief", "route", "show", "default"])
+    except RuntimeError:
+        return False
+    for line in out.splitlines():
+        line_l = line.strip().lower()
+        if not line_l.startswith("default"):
+            continue
+        if f"via {gws}" in line or f"via {gws}/" in line:
+            return True
+    return False
+
+
+def topology_attach_plumbing_failures(
+    *,
+    host_if: str,
+    container_if: str,
+    bridge_name: str,
+    workspace_ip: str,
+    cidr: str,
+    gateway_ip: str,
+    netns_ref: str,
+    runner: CommandRunner | None = None,
+) -> list[str]:
+    """
+    Return a list of human-readable reasons Linux topology plumbing is not usable (empty = OK).
+
+    Single source for fast-path checks, post-attach verification, and diagnostics.
+    """
+    r = runner or CommandRunner()
+    br = _validate_ifname(bridge_name, label="bridge_name")
+    h = _validate_ifname(host_if, label="host_if")
+    c = _validate_ifname(container_if, label="container_if")
+    reasons: list[str] = []
+    slaves = bridge_master_slave_ifnames(br, runner=r)
+    if len(slaves) == 0:
+        reasons.append(
+            f"topology bridge {br!r} has no slave interfaces (`ip link show master` empty — "
+            f"NO-CARRIER / missing bridge membership vs DB ATTACHED state)",
+        )
+    if not check_interface_exists(h, runner=r):
+        reasons.append(f"host veth {h!r} does not exist in the topology `ip` netns")
+        return reasons
+    if not check_host_veth_enslaved_to_bridge(h, br, runner=r):
+        try:
+            out = r.run(["ip", "link", "show", "dev", h])
+        except RuntimeError as e:
+            out = f"<failed: {e}>"
+        reasons.append(
+            f"host veth {h!r} is not enslaved to bridge {br!r} (link show: {(out or '')[:300]!r})",
+        )
+    if h not in slaves:
+        reasons.append(
+            f"`ip link show master {br!r}` does not list host leg {h!r} "
+            f"(observed bridge ports: {slaves!r}; host L2 path missing)",
+        )
+    nr = validate_netns_ref(netns_ref)
+    if not check_interface_exists(c, netns_ref=nr, runner=r):
+        reasons.append(f"container leg {c!r} not present in workspace netns")
+    if not check_workspace_ipv4_assigned_on_iface(
+        nr,
+        c,
+        workspace_ip,
+        cidr,
+        runner=r,
+    ):
+        reasons.append(
+            f"workspace IP {workspace_ip!r} not assigned on {c!r} inside workspace netns "
+            f"(CIDR {cidr!r})",
+        )
+    if not check_default_ipv4_route_via_gateway_in_netns(nr, gateway_ip, runner=r):
+        reasons.append(
+            f"default route via topology gateway {gateway_ip!r} missing in workspace netns",
+        )
+    return reasons
 
 
 def ensure_default_route_in_netns(

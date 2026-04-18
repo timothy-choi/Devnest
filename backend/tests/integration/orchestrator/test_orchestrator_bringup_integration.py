@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 from sqlmodel import Session
 
+from app.libs.common.config import get_settings
 from app.libs.probes import DefaultProbeRunner
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.topology import DbTopologyAdapter
@@ -129,7 +130,12 @@ def test_bring_up_workspace_runtime_probe_unhealthy_when_service_unreachable(
     runtime_adapter_integration: DockerRuntimeAdapter,
     topology_adapter_integration: DbTopologyAdapter,
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS", "3")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS", "0.2")
+    get_settings.cache_clear()
+
     tid = _seed_topology(
         db_session,
         spec={
@@ -168,6 +174,7 @@ def test_bring_up_workspace_runtime_probe_unhealthy_when_service_unreachable(
         assert out.issues
         assert any("service:" in msg for msg in out.issues)
     finally:
+        get_settings.cache_clear()
         _remove_container(
             orchestrator_docker_client,
             out.container_id if out else None,

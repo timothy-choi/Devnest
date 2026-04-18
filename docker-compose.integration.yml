@@ -3,17 +3,78 @@
 # Usage (repo root):
 #   docker compose -f docker-compose.integration.yml up -d --build
 #
+# Workspace runtime image (IMPORTANT):
+#   User workspace containers use image devnest/workspace:latest built from Dockerfile.workspace.
+#   The Docker API does NOT override ENTRYPOINT/CMD at container create time — Config.Entrypoint/Cmd
+#   always come from the image. If EC2 shows the old entrypoint (embedded --bind-addr and ".") and
+#   Cmd starting with "code-server", the host is running a STALE image: rebuild workspace-image and
+#   ensure backend/worker use the new image (see scripts/verify-workspace-image.sh).
+#   To force a rebuild after Dockerfile changes: bump DEVNEST_WORKSPACE_DOCKERFILE_REVISION or use
+#     docker compose -f docker-compose.integration.yml build --no-cache workspace-image
+#
+# Workspace bind mounts + permissions (IMPORTANT):
+#   Backend/worker only mount docker.sock by default. If WORKSPACE_PROJECTS_BASE is unset, the app
+#   uses /tmp/devnest-workspaces INSIDE the control-plane container — mkdir/chown there do NOT
+#   change the host paths Docker bind-mounts into workspace containers → root-owned host dirs →
+#   EACCES for coder (UID 1000). Mount a host directory at the SAME path and set WORKSPACE_PROJECTS_BASE
+#   (below) so orchestrator mkdir/chown apply to the real bind sources the daemon uses.
+#   Per-workspace layout on that base: ``{id}/`` (project) and ``{id}/code-server/{config,data}/``.
+#
 # EC2 / remote host (set public API URL for browser clients):
 #   NEXT_PUBLIC_API_BASE_URL=http://YOUR_PUBLIC_IP:8000 docker compose -f docker-compose.integration.yml up -d --build
 #
-# Services: PostgreSQL, FastAPI (migrations on start), standalone workspace job poll loop, Next.js frontend.
-# Gateway (Traefik) is optional for this stack; add docker-compose.system.yml-style services if you need data-plane routing.
+# Workspace browser URL (Traefik + route-admin are included in this compose):
+#   Pattern: ``{DEVNEST_GATEWAY_PUBLIC_SCHEME}://ws-<workspace_id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/``
+#   Defaults: gateway enabled, ``DEVNEST_BASE_DOMAIN=app.lvh.me``, Traefik HTTP on host port 9081,
+#   ``DEVNEST_GATEWAY_PUBLIC_PORT=9081`` so ``gateway_url`` matches the published port. Subdomains of
+#   ``app.lvh.me`` resolve to ``127.0.0.1`` (no ``/etc/hosts``) when the browser runs on the same host as Docker.
+#   On EC2 with Traefik on port 80, set ``DEVNEST_GATEWAY_PORT=80`` and ``DEVNEST_GATEWAY_PUBLIC_PORT=0`` (omit port in URL).
+#   Remote browsers: do not use ``app.lvh.me`` (that points at the client loopback). Set ``DEVNEST_BASE_DOMAIN`` to
+#   a wildcard DNS zone you control (``*.yourzone`` → server IP), or use ``<dotted-ip-with-hyphens>.sslip.io`` so
+#   ``ws-<id>.<dashed-ip>.sslip.io`` resolves to that IP. ``scripts/deploy-ec2.sh`` sets the sslip form automatically
+#   when EC2 metadata is available. ``app.devnest.local`` is only for hosts-file / lab DNS (never public DNS).
+#
+# Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
 # Backend uses the host Docker socket for workspace containers; NET_ADMIN helps topology bring-up on Linux.
+#
+# `pid: host` is required for topology veth attach: `ip link set … netns <pid>` and `nsenter -t <pid>`
+# must resolve Docker's State.Pid (host PID namespace). Without it, PIDs are invalid in the
+# container's isolated PID namespace → "Invalid netns value" / attach failures.
+#
+# `workspace-worker` runs `nsenter -t 1 -n -- ip …` (DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=true) so
+# bridge/veth `ip` targets the Docker host netns. Docker Engine's default seccomp profile still
+# rejects that `setns` path with "reassociate to namespaces failed: Operation not permitted" even
+# with `pid: host` + `cap_add: [NET_ADMIN, SYS_ADMIN]`. For integration/EC2, `workspace-worker`
+# is therefore `privileged: true` (disables default seccomp for that container). Narrower option if
+# policy allows: only `security_opt: [seccomp:unconfined]` instead of full privileged.
+#
+# Apply to every service that runs workspace jobs / orchestrator `ip` + `nsenter` (backend API if it
+# processes internal job ticks, and workspace-worker). After changing this, recreate containers:
+#   docker compose -f docker-compose.integration.yml up -d --build --force-recreate
 
 name: devnest-integration
 
+# Shared PID mode for control-plane containers that perform Linux topology attach (see header).
+x-pid-host: &pid_host
+  pid: "host"
+
+# Default workspace runtime for orchestrator bring-up (matches Dockerfile.workspace).
+x-workspace-image: &workspace_image
+  DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-devnest/workspace:latest}
+
 services:
+  # Build-only helper: tags devnest/workspace:latest so backend/worker can start user workspaces.
+  workspace-image:
+    image: devnest/workspace:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.workspace
+      args:
+        # Bump or export a new value to invalidate build cache when debugging stale EC2 images.
+        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-5-coder-config-dirs}
+    entrypoint: ["/bin/true"]
+
   postgres:
     image: postgres:15
     environment:
@@ -29,6 +90,7 @@ services:
       retries: 10
 
   backend:
+    <<: *pid_host
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -42,13 +104,31 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_WORKER_ENABLED: "false"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
+      <<: *workspace_image
+      # Pydantic Settings: field workspace_projects_base → env WORKSPACE_PROJECTS_BASE.
+      WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
+      # After topology attach, poll workspace IDE TCP before failing bring-up (code-server cold start).
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
+      # Traefik + route-admin (same compose network): enable attach ``gateway_url`` and worker route registration.
+      DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"
+      DEVNEST_GATEWAY_URL: "http://route-admin:8080"
+      DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.lvh.me}
+      DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
+      DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
+      DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
       # Some CI runners provide a minimal PATH; console scripts live under /usr/local/bin.
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/devnest/workspace-projects:/var/lib/devnest/workspace-projects
     depends_on:
       postgres:
         condition: service_healthy
+      workspace-image:
+        condition: service_completed_successfully
+      route-admin:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
       interval: 10s
@@ -64,6 +144,7 @@ services:
       - python -m alembic upgrade head && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
   workspace-worker:
+    <<: *pid_host
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -74,17 +155,76 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_RATE_LIMIT_ENABLED: "false"
+      <<: *workspace_image
+      WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
+      DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
+      DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"
+      DEVNEST_GATEWAY_URL: "http://route-admin:8080"
+      DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.lvh.me}
+      DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
+      DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
+      DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
+      # Topology ``ip`` must run in the Docker *host* netns when this worker uses docker.sock from a
+      # container; otherwise veth/bridge are created in the sidecar netns and ``ip link set … netns``
+      # fails with ``Invalid "netns" value`` while the workspace container stays healthy.
+      DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER: "true"
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/devnest/workspace-projects:/var/lib/devnest/workspace-projects
     depends_on:
       postgres:
         condition: service_healthy
       backend:
         condition: service_healthy
+      workspace-image:
+        condition: service_completed_successfully
+      route-admin:
+        condition: service_started
     cap_add:
       - NET_ADMIN
+      - SYS_ADMIN
+    # Required for `nsenter -t 1 -n` bridge sync against default Docker seccomp (see header).
+    privileged: true
+    # Backend Dockerfile HEALTHCHECK curls :8000/ready; the poll loop does not listen on 8000 — disable it.
+    healthcheck:
+      disable: true
     command: ["python", "-m", "app.workers.workspace_job_poll_loop", "--poll-interval", "2", "--jobs-per-tick", "2"]
+
+  # Data-plane: route-admin writes Traefik dynamic routes; Traefik proxies ``ws-<id>.<DEVNEST_BASE_DOMAIN>``.
+  route-admin:
+    build:
+      context: ./devnest-gateway/route_admin
+    image: devnest-route-admin:integration
+    restart: unless-stopped
+    ports:
+      - "${DEVNEST_ROUTE_ADMIN_PORT:-19090}:8080"
+    volumes:
+      - ./devnest-gateway/traefik/dynamic:/etc/traefik/dynamic
+    environment:
+      ROUTES_FILE: /etc/traefik/dynamic/100-workspaces.yml
+      DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
+      DEVNEST_TLS_ENABLED: "${DEVNEST_TLS_ENABLED:-false}"
+
+  traefik:
+    image: traefik:v3.2
+    restart: unless-stopped
+    command:
+      - "--configFile=/etc/traefik/traefik.yml"
+    ports:
+      - "${DEVNEST_GATEWAY_PORT:-9081}:80"
+      - "${DEVNEST_GATEWAY_TLS_PORT:-9443}:443"
+    volumes:
+      - ./devnest-gateway/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./devnest-gateway/traefik/dynamic:/etc/traefik/dynamic:ro
+    environment:
+      # ForwardAuth inside Traefik dynamic YAML (substituted by Traefik).
+      DEVNEST_BACKEND_AUTH_URL: http://backend:8000/internal/gateway/auth
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - route-admin
 
   frontend:
     build:

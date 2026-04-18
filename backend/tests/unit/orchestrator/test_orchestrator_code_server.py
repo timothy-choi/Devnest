@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.libs.probes.interfaces import ProbeRunner
-from app.libs.probes.results import WorkspaceHealthResult
+from app.libs.probes.results import ServiceProbeResult, WorkspaceHealthResult
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import (
     CODE_SERVER_CONFIG_CONTAINER_PATH,
@@ -61,6 +61,7 @@ def _make_runtime() -> MagicMock:
     rt.get_container_netns_ref.return_value = NetnsRefResult(
         container_id=CONTAINER_ID, pid=99999, netns_ref=NETNS_REF
     )
+    rt.fetch_container_log_tail.return_value = ""
     return rt
 
 
@@ -88,6 +89,13 @@ def _make_topology() -> MagicMock:
 
 def _make_probe() -> MagicMock:
     probe = MagicMock(spec=ProbeRunner)
+    probe.check_service_reachable.return_value = ServiceProbeResult(
+        healthy=True,
+        workspace_ip=WORKSPACE_IP,
+        port=WORKSPACE_IDE_CONTAINER_PORT,
+        latency_ms=1.0,
+        issues=(),
+    )
     probe.check_workspace_health.return_value = WorkspaceHealthResult(
         workspace_id=int(WORKSPACE_ID),
         healthy=True,
@@ -190,6 +198,9 @@ class TestCodeServerBringUp:
         container_paths = {m.container_path for m in extra}
         assert CODE_SERVER_CONFIG_CONTAINER_PATH in container_paths
         assert CODE_SERVER_DATA_CONTAINER_PATH in container_paths
+        host_paths = {m.host_path for m in extra}
+        assert any(str(p).replace("\\", "/").endswith(f"/{WORKSPACE_ID}/code-server/config") for p in host_paths)
+        assert any(str(p).replace("\\", "/").endswith(f"/{WORKSPACE_ID}/code-server/data") for p in host_paths)
 
     def test_bring_up_merges_caller_env_over_defaults(self, tmp_path: Path) -> None:
         """Caller-supplied env overrides code-server defaults."""

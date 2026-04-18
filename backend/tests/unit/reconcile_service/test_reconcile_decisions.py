@@ -54,5 +54,37 @@ def test_gateway_route_needs_repair_ok() -> None:
     )
 
 
+def test_gateway_route_needs_repair_wrong_public_host() -> None:
+    row = {
+        "workspace_id": "1",
+        "target": "http://10.0.0.5:8080",
+        "public_host": "ws-1.app.lvh.me",
+    }
+    assert (
+        gateway_route_needs_repair(
+            route_row=row,
+            observed_internal_endpoint="10.0.0.5:8080",
+            expected_public_host="ws-1.app.devnest.test",
+        )
+        is True
+    )
+
+
+def test_gateway_route_needs_repair_public_host_case_insensitive() -> None:
+    row = {
+        "workspace_id": "1",
+        "target": "http://10.0.0.5:8080",
+        "public_host": "WS-1.APP.DEVNEST.TEST",
+    }
+    assert (
+        gateway_route_needs_repair(
+            route_row=row,
+            observed_internal_endpoint="10.0.0.5:8080",
+            expected_public_host="ws-1.app.devnest.test",
+        )
+        is False
+    )
+
+
 def test_gateway_route_needs_repair_no_endpoint() -> None:
     assert gateway_route_needs_repair(route_row=None, observed_internal_endpoint=None) is False

@@ -545,7 +545,8 @@ def _touch_workspace(session: Session, ws: Workspace) -> None:
 
 def _gateway_default_public_host(workspace_id: int, base_domain: str) -> str:
     dom = (base_domain or "app.devnest.local").strip().strip(".")
-    return f"{workspace_id}.{dom}"
+    # Must match ``GET /internal/gateway/auth`` host parsing (``ws-{id}.<base_domain>``).
+    return f"ws-{workspace_id}.{dom}"
 
 
 def _gateway_try_register_running(ws: Workspace, internal_endpoint: str | None) -> None:

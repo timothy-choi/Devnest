@@ -111,13 +111,13 @@ directory by default.
 
 | Host path | Container path | Purpose |
 |---|---|---|
-| `<workspace_projects_base>/ws-<wid>/code-server/config/` | `/home/coder/.config/code-server` | code-server YAML config, auth tokens |
+| `<workspace_projects_base>/<wid>/code-server/config/` | `/home/coder/.config/code-server` | code-server YAML config, auth tokens |
 
 ### 3. code-server data mount (optional, automatic)
 
 | Host path | Container path | Purpose |
 |---|---|---|
-| `<workspace_projects_base>/ws-<wid>/code-server/data/` | `/home/coder/.local/share/code-server` | Extensions, editor state, workspace history |
+| `<workspace_projects_base>/<wid>/code-server/data/` | `/home/coder/.local/share/code-server` | Extensions, editor state, workspace history |
 
 Both optional mounts are created automatically by the orchestrator at bring-up if
 `DEVNEST_WORKSPACE_PROJECTS_BASE` is configured. They are **persistent across stop/start/restart**:
@@ -213,7 +213,7 @@ docker inspect devnest-ws-<workspace_id> --format '{{json .Mounts}}'
 
 ### Pre-warm extension cache
 
-Copy an extension directory to `<workspace_projects_base>/ws-<id>/code-server/data/extensions/`
+Copy an extension directory to `<workspace_projects_base>/<id>/code-server/data/extensions/`
 before first start.
 
 ### Custom code-server config

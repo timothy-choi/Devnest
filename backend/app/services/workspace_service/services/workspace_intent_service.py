@@ -195,7 +195,7 @@ def _runtime_ready_for_access(ws: Workspace, rt: WorkspaceRuntime | None) -> boo
 
 
 def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
-    """Stored ``Workspace.public_host``, or default ``{id}.{base_domain}`` when gateway is on and runtime is ready."""
+    """Stored ``Workspace.public_host``, or default ``ws-{id}.{base_domain}`` when gateway is on and runtime is ready."""
     from app.libs.common.config import get_settings
 
     explicit = (ws.public_host or "").strip()
@@ -212,7 +212,19 @@ def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime
     if wid is None:
         return None
     dom = (settings.devnest_base_domain or "app.devnest.local").strip().strip(".")
-    return f"{wid}.{dom}"
+    return f"ws-{wid}.{dom}"
+
+
+def _gateway_public_host_for_url(host: str, scheme: str, port: int) -> str:
+    """Append ``:port`` to ``gateway_url`` when Traefik is published on a non-default port."""
+    if port <= 0:
+        return host
+    sch = (scheme or "http").strip().lower().rstrip(":")
+    if sch == "http" and port == 80:
+        return host
+    if sch == "https" and port == 443:
+        return host
+    return f"{host}:{port}"
 
 
 def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
@@ -226,6 +238,8 @@ def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | 
     if not host:
         return None
     scheme = (settings.devnest_gateway_public_scheme or "http").strip().rstrip(":")
+    pub_port = int(settings.devnest_gateway_public_port or 0)
+    host = _gateway_public_host_for_url(host, scheme, pub_port)
     return f"{scheme}://{host}/"
 
 

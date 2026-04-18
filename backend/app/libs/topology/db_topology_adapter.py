@@ -14,8 +14,10 @@ otherwise it updates attachment DB state only. IP leases are not released on det
 ``check_topology`` / ``check_attachment`` append ``linux: …`` issues when the corresponding
 ``apply_linux_*`` flag is enabled (see env ``DEVNEST_TOPOLOGY_SKIP_LINUX_*``); otherwise they
 evaluate persisted state only. Issue prefixes: ``db:`` (rows/fields), ``runtime:`` (CIDR/gateway
-consistency), ``linux:`` (host ``ip`` checks). Unexpected ``RuntimeError`` from ``ip`` is surfaced
-as ``linux:`` issues instead of aborting the check.
+consistency), ``linux:`` (host ``ip`` checks). Workspace netns checks resolve the container init
+PID via ``container_init_pid_resolver`` (Docker SDK inspect from orchestrator ``app_factory``) so
+``check_attachment`` does not require a ``docker`` CLI in the worker image. Unexpected
+``RuntimeError`` from ``ip`` is surfaced as ``linux:`` issues instead of aborting the check.
 
 ``delete_topology`` removes the ``TopologyRuntime`` row (and node-local attachment rows) when no
 non-``DETACHED`` attachments exist, commits, then optionally deletes the Linux bridge when bridge sync
@@ -26,7 +28,10 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import logging
 import os
+import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -65,6 +70,8 @@ if TYPE_CHECKING:
     from .system.command_runner import CommandRunner
 
 _V1_MODE = "node_bridge"
+
+logger = logging.getLogger(__name__)
 
 # V1 default CIDR allocator: each node gets a stable /20 out of the parent pool.
 _V1_PARENT_POOL_CIDR = "10.128.0.0/9"
@@ -382,6 +389,16 @@ def _apply_linux_attachment_env_default() -> bool:
     )
 
 
+def _topology_runtime_not_ready_detail(runtime: TopologyRuntime) -> str:
+    """Human + machine-readable context persisted when bridge sync marks the runtime DEGRADED."""
+    parts: list[str] = [f"status={runtime.status.value!r}"]
+    if runtime.last_error_code:
+        parts.append(f"last_error_code={runtime.last_error_code!r}")
+    if runtime.last_error_message:
+        parts.append(f"last_error_message={runtime.last_error_message!r}")
+    return ", ".join(parts)
+
+
 def _veth_pair_names(topology_id: int, node_id: str, workspace_id: int) -> tuple[str, str]:
     """Deterministic Linux interface names (≤15 chars) for host leg and container peer."""
     h = hashlib.sha256(f"{topology_id}:{node_id}:{workspace_id}".encode("utf-8")).hexdigest()[:6]
@@ -402,9 +419,11 @@ class DbTopologyAdapter(TopologyAdapter):
         command_runner: CommandRunner | None = None,
         apply_linux_bridge: bool | None = None,
         apply_linux_attachment: bool | None = None,
+        container_init_pid_resolver: Callable[[str], int | None] | None = None,
     ) -> None:
         self._session = session
         self._command_runner = command_runner
+        self._container_init_pid_resolver = container_init_pid_resolver
         self._apply_linux_bridge = (
             apply_linux_bridge if apply_linux_bridge is not None else _apply_linux_bridge_env_default()
         )
@@ -413,6 +432,44 @@ class DbTopologyAdapter(TopologyAdapter):
             if apply_linux_attachment is not None
             else _apply_linux_attachment_env_default()
         )
+
+    def _workspace_init_pid_str(self, container_id: str) -> tuple[str, str | None]:
+        """
+        Resolve Docker init PID for ``/proc/<pid>/ns/net`` checks.
+
+        Prefer :class:`DockerRuntimeAdapter` / engine inspect via ``container_init_pid_resolver``
+        (orchestrator wiring) so ``check_attachment`` does not require a ``docker`` CLI in PATH.
+        """
+        cid = (container_id or "").strip()
+        if not cid:
+            return "", "empty container_id"
+        if self._container_init_pid_resolver is not None:
+            try:
+                pid = self._container_init_pid_resolver(cid)
+            except Exception as e:
+                return "", f"container_init_pid_resolver failed: {e!s}"[:900]
+            if pid is not None and int(pid) > 0:
+                return str(int(pid)), None
+            return "", "container_init_pid_resolver returned no usable PID for this container_id"
+        from shutil import which
+
+        from .system.command_runner import CommandRunner
+
+        r = self._command_runner or CommandRunner()
+        if which("docker") is None:
+            return (
+                "",
+                "check_attachment cannot resolve workspace init PID: docker CLI is not in PATH and "
+                "no container_init_pid_resolver is configured (orchestrator should pass Docker SDK "
+                "inspect via app_factory — workspace-worker images often omit the docker binary)",
+            )
+        try:
+            pid_s = (r.run(["docker", "inspect", "-f", "{{.State.Pid}}", cid]) or "").strip()
+            return pid_s, None
+        except FileNotFoundError as e:
+            return "", f"check_attachment runtime missing docker CLI ({e!s})"
+        except RuntimeError as e:
+            return "", str(e)[:900]
 
     def _sync_linux_node_bridge(self, row: TopologyRuntime) -> None:
         """
@@ -426,7 +483,18 @@ class DbTopologyAdapter(TopologyAdapter):
         now = datetime.now(timezone.utc)
         runner = self._command_runner or CommandRunner()
 
+        br_raw, cidr_raw, gw_raw = row.bridge_name, row.cidr, row.gateway_ip
+        log_ctx: dict[str, object | None] = {
+            "topology_id": row.topology_id,
+            "node_id": row.node_id,
+            "apply_linux_bridge": self._apply_linux_bridge,
+            "bridge_name": br_raw,
+            "cidr": cidr_raw,
+            "gateway_ip": gw_raw,
+        }
+
         if not self._apply_linux_bridge:
+            logger.info("topology_runtime_bridge_sync_skipped", extra=log_ctx)
             row.status = TopologyRuntimeStatus.READY
             row.last_error_code = None
             row.last_error_message = None
@@ -437,8 +505,12 @@ class DbTopologyAdapter(TopologyAdapter):
             self._session.refresh(row)
             return
 
-        br, cidr, gw = row.bridge_name, row.cidr, row.gateway_ip
+        br, cidr, gw = br_raw, cidr_raw, gw_raw
         if not (br and str(br).strip() and cidr and str(cidr).strip() and gw and str(gw).strip()):
+            logger.warning(
+                "topology_runtime_bridge_sync_incomplete_row",
+                extra={**log_ctx, "reason": "missing bridge_name, cidr, or gateway_ip"},
+            )
             row.status = TopologyRuntimeStatus.DEGRADED
             row.last_error_code = "INCOMPLETE_RUNTIME"
             row.last_error_message = "topology runtime missing bridge_name, cidr, or gateway_ip"
@@ -449,22 +521,55 @@ class DbTopologyAdapter(TopologyAdapter):
             self._session.refresh(row)
             return
 
+        log_ctx["bridge_name"] = str(br).strip()
+        log_ctx["cidr"] = str(cidr).strip()
+        log_ctx["gateway_ip"] = str(gw).strip()
+        logger.info("topology_runtime_bridge_sync_begin", extra=log_ctx)
         try:
+            logger.info("topology_runtime_bridge_sync_step", extra={**log_ctx, "step": "ensure_bridge_exists"})
             ensure_bridge_exists(br, runner=runner)
+            logger.info("topology_runtime_bridge_sync_step", extra={**log_ctx, "step": "ensure_bridge_up"})
             ensure_bridge_up(br, runner=runner)
+            logger.info("topology_runtime_bridge_sync_step", extra={**log_ctx, "step": "ensure_bridge_address"})
             ensure_bridge_address(br, str(gw).strip(), str(cidr).strip(), runner=runner)
         except ValueError as e:
             row.status = TopologyRuntimeStatus.DEGRADED
             row.last_error_code = "BRIDGE_CONFIG"
             row.last_error_message = str(e)[:2048]
+            logger.warning(
+                "topology_runtime_bridge_sync_degraded",
+                extra={**log_ctx, "failure": "BRIDGE_CONFIG", "error": row.last_error_message},
+            )
         except RuntimeError as e:
             row.status = TopologyRuntimeStatus.DEGRADED
             row.last_error_code = "BRIDGE_OS"
             row.last_error_message = str(e)[:2048]
+            err_l = (row.last_error_message or "").lower()
+            remediation: str | None = None
+            if "nsenter" in err_l and ("not permitted" in err_l or "operation not permitted" in err_l):
+                remediation = (
+                    "service=workspace-job worker (compose: workspace-worker): nsenter/setns into PID 1 "
+                    "netns is blocked by Docker default seccomp/LSM despite pid:host and NET_ADMIN+SYS_ADMIN. "
+                    "Set `privileged: true` on that service (integration: docker-compose.integration.yml) or "
+                    "try narrower `security_opt: [seccomp:unconfined]`. Command uses HostPid1NsenterRunner "
+                    "when DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1."
+                )
+            logger.warning(
+                "topology_runtime_bridge_sync_degraded",
+                extra={
+                    **log_ctx,
+                    "failure": "BRIDGE_OS",
+                    "error": row.last_error_message,
+                    "topology_service": "workspace-worker (local_docker + DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER)",
+                    "topology_runner": "HostPid1NsenterRunner+CommandRunner",
+                    "remediation_hint": remediation,
+                },
+            )
         else:
             row.status = TopologyRuntimeStatus.READY
             row.last_error_code = None
             row.last_error_message = None
+            logger.info("topology_runtime_bridge_sync_ready", extra=log_ctx)
 
         row.last_checked_at = now
         row.updated_at = now
@@ -486,23 +591,149 @@ class DbTopologyAdapter(TopologyAdapter):
         gateway_ip: str,
         workspace_ip: str,
         netns_ref: str,
+        topology_id: int | None = None,
+        node_id: str | None = None,
+        workspace_id: int | None = None,
+        container_id: str | None = None,
     ) -> None:
         from .system import attachment_ops as ao
         from .system.command_runner import CommandRunner
 
         r = self._command_runner or CommandRunner()
+
+        def _pid_for_log() -> str | None:
+            try:
+                from .system.attachment_ops import _pid_from_netns_ref
+
+                return _pid_from_netns_ref(netns_ref)
+            except Exception:
+                return None
+
+        pid_s = _pid_for_log()
+        proc_visible: bool | None = None
+        if sys.platform == "linux" and pid_s and pid_s.isdigit():
+            proc_visible = os.path.isdir(f"/proc/{pid_s}")
+
+        log_extras: dict[str, object | None] = {
+            "topology_id": topology_id,
+            "node_id": node_id,
+            "workspace_id": workspace_id,
+            "workspace_container_id": container_id,
+            "host_if": host_if,
+            "container_if": container_if,
+            "bridge_name": bridge_name,
+            "netns_ref": netns_ref,
+            "netns_target_pid": pid_s,
+            "proc_pid_visible_runner_process": proc_visible,
+        }
+        logger.info("topology_linux_attach_begin", extra=log_extras)
+
+        def _step(name: str) -> None:
+            logger.info("topology_linux_attach_step", extra={**log_extras, "step": name})
+
+        ao.assert_host_topology_ip_via_nsenter_config_or_raise()
+        ao.assert_netns_attach_target_visible(netns_ref)
+        _step("assert_netns_target_visible_pre_veth")
         try:
             ao.create_veth_pair(host_if, container_if, runner=r)
+            _step("create_veth_pair")
             ao.attach_host_if_to_bridge(host_if, bridge_name, runner=r)
+            _step("attach_host_if_to_bridge")
+            # Re-check after bridge/veth work: workspace init PID can exit during slow host steps.
+            ao.assert_netns_attach_target_visible(netns_ref)
+            _step("assert_netns_target_visible_pre_netns_move")
             ao.move_container_if_to_netns(container_if, netns_ref, runner=r)
+            _step("move_container_if_to_netns")
             ao.assign_ip_in_netns(netns_ref, container_if, workspace_ip, cidr, runner=r)
+            _step("assign_ip_in_netns")
             ao.ensure_default_route_in_netns(netns_ref, gateway_ip, runner=r)
-        except (RuntimeError, ValueError):
+            _step("ensure_default_route_in_netns")
+            out_master = ""
+            try:
+                out_master = r.run(["ip", "link", "show", "master", bridge_name])
+            except RuntimeError as e:
+                out_master = f"<ip link show master failed: {e}>"
+            logger.info(
+                "topology_linux_attach_bridge_slaves",
+                extra={**log_extras, "bridge_slaves_snippet": (out_master or "")[:1800]},
+            )
+            plumb_fails = ao.topology_attach_plumbing_failures(
+                host_if=host_if,
+                container_if=container_if,
+                bridge_name=bridge_name,
+                workspace_ip=workspace_ip,
+                cidr=cidr,
+                gateway_ip=gateway_ip,
+                netns_ref=netns_ref,
+                runner=r,
+            )
+            logger.info(
+                "topology_linux_attach_verify",
+                extra={
+                    **log_extras,
+                    "plumbing_ok": len(plumb_fails) == 0,
+                    "plumbing_failures": plumb_fails,
+                },
+            )
+            if plumb_fails:
+                raise RuntimeError(
+                    "post-attach verification failed (Linux plumbing incomplete): " + "; ".join(plumb_fails),
+                )
+            _step("verify_topology_linux_plumbing_invariants")
+            logger.info("topology_linux_attach_complete", extra=log_extras)
+        except (RuntimeError, ValueError) as e:
+            logger.warning(
+                "topology_linux_attach_step_failed",
+                extra={**log_extras, "error": str(e)[:2000], "error_type": type(e).__name__},
+            )
             try:
                 ao.remove_veth_if_exists(host_if, runner=r)
             except RuntimeError:
                 pass
             raise
+
+    def _linux_topology_attach_plumbing_verified(
+        self,
+        *,
+        host_if: str,
+        container_if: str,
+        bridge_name: str,
+        workspace_ip: str,
+        cidr: str,
+        gateway_ip: str,
+        netns_ref: str,
+    ) -> bool:
+        """
+        Live checks for DB fast-path: host veth enslaved to bridge, workspace netns has IP + default route.
+
+        Prevents returning ``ATTACHED`` from ``attach_workspace`` when host plumbing was torn down
+        but the attachment row still says ``ATTACHED``.
+        """
+        from .system import attachment_ops as ao
+        from .system.command_runner import CommandRunner
+
+        r = self._command_runner or CommandRunner()
+        fails = ao.topology_attach_plumbing_failures(
+            host_if=host_if,
+            container_if=container_if,
+            bridge_name=bridge_name,
+            workspace_ip=workspace_ip,
+            cidr=cidr,
+            gateway_ip=gateway_ip,
+            netns_ref=netns_ref,
+            runner=r,
+        )
+        if fails:
+            logger.info(
+                "topology_linux_attach_fast_path_verify_failed",
+                extra={
+                    "host_if": host_if,
+                    "container_if": container_if,
+                    "bridge_name": bridge_name,
+                    "plumbing_failures": fails,
+                },
+            )
+        return len(fails) == 0
 
     def ensure_node_topology(self, *, topology_id: int, node_id: str) -> EnsureNodeTopologyResult:
         if not node_id or not node_id.strip():
@@ -616,8 +847,8 @@ class DbTopologyAdapter(TopologyAdapter):
             )
         if runtime.status != TopologyRuntimeStatus.READY:
             raise WorkspaceIPAllocationError(
-                f"topology runtime is not READY (status={runtime.status.value}); "
-                "cannot allocate workspace IP until bridge/sync is healthy",
+                "topology runtime is not READY; cannot allocate workspace IP until bridge/sync is healthy "
+                f"({_topology_runtime_not_ready_detail(runtime)})",
             )
         if not runtime.cidr or not runtime.gateway_ip:
             raise WorkspaceIPAllocationError("topology runtime missing cidr or gateway_ip")
@@ -640,8 +871,8 @@ class DbTopologyAdapter(TopologyAdapter):
                     ) from exc
                 if runtime.status != TopologyRuntimeStatus.READY:
                     raise WorkspaceIPAllocationError(
-                        f"topology runtime is not READY (status={runtime.status.value}); "
-                        "cannot allocate workspace IP until bridge/sync is healthy",
+                        "topology runtime is not READY; cannot allocate workspace IP until bridge/sync is healthy "
+                        f"({_topology_runtime_not_ready_detail(runtime)})",
                     ) from exc
                 if not runtime.cidr or not runtime.gateway_ip:
                     raise WorkspaceIPAllocationError(
@@ -679,8 +910,8 @@ class DbTopologyAdapter(TopologyAdapter):
         runtime = fresh
         if runtime.status != TopologyRuntimeStatus.READY:
             raise WorkspaceIPAllocationError(
-                f"topology runtime is not READY (status={runtime.status.value}); "
-                "cannot allocate workspace IP until bridge/sync is healthy",
+                "topology runtime is not READY; cannot allocate workspace IP until bridge/sync is healthy "
+                f"({_topology_runtime_not_ready_detail(runtime)})",
             )
         if not runtime.cidr or not runtime.gateway_ip:
             raise WorkspaceIPAllocationError("topology runtime missing cidr or gateway_ip")
@@ -772,7 +1003,8 @@ class DbTopologyAdapter(TopologyAdapter):
             )
         if runtime.status != TopologyRuntimeStatus.READY:
             raise WorkspaceAttachmentError(
-                f"topology runtime is not READY (status={runtime.status.value}); cannot attach workspace",
+                "topology runtime is not READY; cannot attach workspace "
+                f"({_topology_runtime_not_ready_detail(runtime)})",
             )
         if not (runtime.bridge_name and str(runtime.bridge_name).strip()):
             raise WorkspaceAttachmentError("topology runtime missing bridge_name")
@@ -814,21 +1046,6 @@ class DbTopologyAdapter(TopologyAdapter):
         att_was_new = att is None
 
         internal_endpoint = f"{workspace_ip}:{WORKSPACE_IDE_CONTAINER_PORT}"
-        if (
-            att is not None
-            and att.status == TopologyAttachmentStatus.ATTACHED
-            and (att.container_id or "") == container_id
-            and (att.workspace_ip or "") == workspace_ip
-        ):
-            assert att.attachment_id is not None
-            return AttachWorkspaceResult(
-                attachment_id=att.attachment_id,
-                workspace_ip=workspace_ip,
-                bridge_name=runtime.bridge_name,
-                gateway_ip=runtime.gateway_ip,
-                internal_endpoint=internal_endpoint,
-            )
-
         from .system.attachment_ops import validate_netns_ref
         from .system.command_runner import CommandRunner
 
@@ -838,8 +1055,81 @@ class DbTopologyAdapter(TopologyAdapter):
                 netns_clean = validate_netns_ref(netns_ref)
             except ValueError as e:
                 raise WorkspaceAttachmentError(str(e)) from e
+            from .system.attachment_ops import assert_host_topology_ip_via_nsenter_config_or_raise
+
+            try:
+                assert_host_topology_ip_via_nsenter_config_or_raise()
+            except RuntimeError as e:
+                raise WorkspaceAttachmentError(str(e)) from e
         elif not (isinstance(netns_ref, str) and netns_ref.strip()):
             raise WorkspaceAttachmentError("netns_ref is required")
+
+        early_eligible = (
+            att is not None
+            and att.status == TopologyAttachmentStatus.ATTACHED
+            and (att.container_id or "") == container_id
+            and (att.workspace_ip or "") == workspace_ip
+        )
+        if early_eligible:
+            if self._apply_linux_attachment:
+                assert netns_clean is not None
+                host_if_chk, ctr_if_chk = _veth_pair_names(topology_id, node_id, workspace_id)
+                if att.interface_host and str(att.interface_host).strip():
+                    host_if_chk = str(att.interface_host).strip()
+                if att.interface_container and str(att.interface_container).strip():
+                    ctr_if_chk = str(att.interface_container).strip()
+                if self._linux_topology_attach_plumbing_verified(
+                    host_if=host_if_chk,
+                    container_if=ctr_if_chk,
+                    bridge_name=str(runtime.bridge_name).strip(),
+                    workspace_ip=workspace_ip,
+                    cidr=str(runtime.cidr).strip(),
+                    gateway_ip=str(runtime.gateway_ip).strip(),
+                    netns_ref=netns_clean,
+                ):
+                    assert att.attachment_id is not None
+                    return AttachWorkspaceResult(
+                        attachment_id=att.attachment_id,
+                        workspace_ip=workspace_ip,
+                        bridge_name=runtime.bridge_name,
+                        gateway_ip=runtime.gateway_ip,
+                        internal_endpoint=internal_endpoint,
+                    )
+                from .system import attachment_ops as _ao_fast
+
+                _ff = _ao_fast.topology_attach_plumbing_failures(
+                    host_if=host_if_chk,
+                    container_if=ctr_if_chk,
+                    bridge_name=str(runtime.bridge_name).strip(),
+                    workspace_ip=workspace_ip,
+                    cidr=str(runtime.cidr).strip(),
+                    gateway_ip=str(runtime.gateway_ip).strip(),
+                    netns_ref=netns_clean,
+                    runner=self._command_runner or CommandRunner(),
+                )
+                logger.warning(
+                    "topology_linux_attach_fast_path_rejected_stale_plumbing",
+                    extra={
+                        "topology_id": topology_id,
+                        "node_id": node_id,
+                        "workspace_id": workspace_id,
+                        "workspace_container_id": container_id,
+                        "host_if": host_if_chk,
+                        "container_if": ctr_if_chk,
+                        "bridge_name": str(runtime.bridge_name).strip(),
+                        "workspace_ip": workspace_ip,
+                        "plumbing_failures": _ff,
+                    },
+                )
+            else:
+                assert att.attachment_id is not None
+                return AttachWorkspaceResult(
+                    attachment_id=att.attachment_id,
+                    workspace_ip=workspace_ip,
+                    bridge_name=runtime.bridge_name,
+                    gateway_ip=runtime.gateway_ip,
+                    internal_endpoint=internal_endpoint,
+                )
 
         host_if, ctr_if = _veth_pair_names(topology_id, node_id, workspace_id)
 
@@ -930,6 +1220,10 @@ class DbTopologyAdapter(TopologyAdapter):
                 gateway_ip=str(runtime.gateway_ip).strip(),
                 workspace_ip=workspace_ip,
                 netns_ref=netns_clean,
+                topology_id=topology_id,
+                node_id=node_id,
+                workspace_id=workspace_id,
+                container_id=container_id,
             )
         except (RuntimeError, ValueError) as e:
             self._session.rollback()
@@ -943,7 +1237,16 @@ class DbTopologyAdapter(TopologyAdapter):
                 release_ip=att_was_new,
                 error=f"linux attach failed: {e}",
             )
-            raise WorkspaceAttachmentError(f"linux attach failed: {e}") from e
+            hint = ""
+            el = str(e).lower()
+            if "invalid" in el and "netns" in el:
+                hint = (
+                    " (If the workspace is still healthy, this is often ``ip`` running in the wrong network "
+                    "namespace vs the Docker host: set DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER=1 for local "
+                    "docker.sock workers — see docker-compose.integration.yml. Also verify `pid: host` on "
+                    "the worker and that /proc/<pid> exists in the process that runs ``ip``.)"
+                )
+            raise WorkspaceAttachmentError(f"linux attach failed: {e}{hint}") from e
 
         try:
             att.status = TopologyAttachmentStatus.ATTACHED
@@ -966,6 +1269,44 @@ class DbTopologyAdapter(TopologyAdapter):
             )
             raise WorkspaceAttachmentError(f"failed to persist topology attachment: {e}") from e
         self._session.refresh(att)
+        from .system import attachment_ops as ao_post
+        from .system.command_runner import CommandRunner as _RunnerPc
+
+        _pc = ao_post.topology_attach_plumbing_failures(
+            host_if=host_if,
+            container_if=ctr_if,
+            bridge_name=str(runtime.bridge_name).strip(),
+            workspace_ip=workspace_ip,
+            cidr=str(runtime.cidr).strip(),
+            gateway_ip=str(runtime.gateway_ip).strip(),
+            netns_ref=netns_clean,
+            runner=self._command_runner or _RunnerPc(),
+        )
+        if _pc:
+            logger.error(
+                "topology_linux_attach_postcommit_verify_failed",
+                extra={
+                    "topology_id": topology_id,
+                    "node_id": node_id,
+                    "workspace_id": workspace_id,
+                    "workspace_container_id": container_id,
+                    "plumbing_failures": _pc,
+                },
+            )
+            self._attach_failure_best_effort(
+                topology_id=topology_id,
+                node_id=node_id,
+                workspace_id=workspace_id,
+                attachment_id=att.attachment_id,
+                interface_host=host_if,
+                workspace_ip=workspace_ip,
+                release_ip=att_was_new,
+                error="post-commit linux plumbing verify failed: " + "; ".join(_pc),
+            )
+            raise WorkspaceAttachmentError(
+                "topology attach reported success and persisted ATTACHED, but Linux plumbing did not "
+                "match DB state (repair attempted — re-run attach): " + "; ".join(_pc),
+            )
         return AttachWorkspaceResult(
             attachment_id=att.attachment_id,
             workspace_ip=workspace_ip,
@@ -1367,6 +1708,7 @@ class DbTopologyAdapter(TopologyAdapter):
             )
             if db_ok_for_link:
                 from .system.attachment_ops import (
+                    check_bridge_master_list_contains_if,
                     check_host_veth_enslaved_to_bridge,
                     check_interface_exists,
                 )
@@ -1378,16 +1720,61 @@ class DbTopologyAdapter(TopologyAdapter):
                     if att.interface_host and str(att.interface_host).strip()
                     else _veth_pair_names(topology_id, node_id, workspace_id)[0]
                 )
+                ctr_if = (
+                    str(att.interface_container).strip()
+                    if att.interface_container and str(att.interface_container).strip()
+                    else _veth_pair_names(topology_id, node_id, workspace_id)[1]
+                )
                 brn = str(att.bridge_name).strip()
                 try:
-                    if not check_interface_exists(host_if, runner=r):
-                        linux_issues.append(
-                            "linux: host-side veth for workspace attachment not found on node",
+                    pid_s, pid_err = self._workspace_init_pid_str(str(att.container_id).strip())
+                    if pid_err and not pid_s:
+                        linux_issues.append(f"linux: {pid_err}")
+
+                    attempted_full_plumb = False
+                    if (
+                        pid_s.isdigit()
+                        and runtime is not None
+                        and runtime.cidr
+                        and str(runtime.cidr).strip()
+                        and att.gateway_ip
+                        and str(att.gateway_ip).strip()
+                    ):
+                        from .system import attachment_ops as ao_chk
+
+                        plumb_fails = ao_chk.topology_attach_plumbing_failures(
+                            host_if=host_if,
+                            container_if=ctr_if,
+                            bridge_name=brn,
+                            workspace_ip=str(att.workspace_ip).strip(),
+                            cidr=str(runtime.cidr).strip(),
+                            gateway_ip=str(att.gateway_ip).strip(),
+                            netns_ref=f"/proc/{pid_s}/ns/net",
+                            runner=r,
                         )
-                    elif not check_host_veth_enslaved_to_bridge(host_if, brn, runner=r):
-                        linux_issues.append(
-                            "linux: host veth is not enslaved to expected topology bridge",
-                        )
+                        attempted_full_plumb = True
+                        if plumb_fails:
+                            linux_issues.append(
+                                "linux: DB reports ATTACHED but Linux bridge/netns plumbing does not match "
+                                "(stale attach or missing bridge slave — service probes may fail)",
+                            )
+                            for fn in plumb_fails:
+                                linux_issues.append(f"linux: {fn}")
+
+                    if not attempted_full_plumb:
+                        if not check_interface_exists(host_if, runner=r):
+                            linux_issues.append(
+                                "linux: host-side veth for workspace attachment not found on node",
+                            )
+                        elif not check_host_veth_enslaved_to_bridge(host_if, brn, runner=r):
+                            linux_issues.append(
+                                "linux: host veth is not enslaved to expected topology bridge",
+                            )
+                        elif not check_bridge_master_list_contains_if(host_if, brn, runner=r):
+                            linux_issues.append(
+                                "linux: topology bridge does not list the host veth under `ip link show master` "
+                                f"(expected port for {host_if!r} on {brn!r})",
+                            )
                 except ValueError as e:
                     linux_issues.append(f"linux: host interface check failed ({e})")
                 except RuntimeError as e:
@@ -1404,6 +1791,126 @@ class DbTopologyAdapter(TopologyAdapter):
             issues=issues,
             attachment_id=att.attachment_id,
         )
+
+    def format_service_reachability_diagnostics(
+        self,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> str:
+        """
+        Best-effort snapshot of host bridge membership and workspace netns addressing/listeners.
+
+        Intended for log messages when IDE TCP probes fail; keeps output bounded.
+        """
+        from .system.command_runner import CommandRunner
+
+        nid = node_id.strip()[:128]
+        att_stmt = select(TopologyAttachment).where(
+            TopologyAttachment.topology_id == topology_id,
+            TopologyAttachment.node_id == nid,
+            TopologyAttachment.workspace_id == workspace_id,
+        )
+        att = self._session.exec(att_stmt).first()
+        if att is None:
+            return "diagnostics: no topology_attachment row"
+        br = (att.bridge_name or "").strip()
+        wsip = (att.workspace_ip or "").strip()
+        cid = (att.container_id or "").strip()
+        host_if, ctr_if = _veth_pair_names(topology_id, nid, workspace_id)
+        if att.interface_host and str(att.interface_host).strip():
+            host_if = str(att.interface_host).strip()
+        if att.interface_container and str(att.interface_container).strip():
+            ctr_if = str(att.interface_container).strip()
+
+        r = self._command_runner or CommandRunner()
+        parts: list[str] = [
+            f"bridge_name={br!r} workspace_ip={wsip!r} host_if={host_if!r} container_if={ctr_if!r}",
+        ]
+
+        def _snippet(label: str, cmd: list[str], limit: int = 1400) -> None:
+            try:
+                out = (r.run(cmd) or "").strip()
+                if len(out) > limit:
+                    out = out[:limit] + "…[truncated]"
+                parts.append(f"{label}={out!r}")
+            except RuntimeError as e:
+                parts.append(f"{label}_failed={str(e)[:900]!r}")
+
+        if br:
+            _snippet("ip_link_show_master_bridge", ["ip", "link", "show", "master", br])
+        _snippet("ip_link_show_host_veth", ["ip", "link", "show", "dev", host_if])
+        pid = ""
+        if cid:
+            pid_str, pid_hint = self._workspace_init_pid_str(cid)
+            pid = pid_str
+            if pid:
+                parts.append(f"workspace_init_pid={pid!r}")
+            elif pid_hint:
+                parts.append(f"workspace_init_pid_unresolved={pid_hint[:900]!r}")
+        if pid.isdigit():
+            _snippet(
+                "workspace_netns_ip_brief",
+                ["nsenter", "-n", "-t", pid, "--", "ip", "-brief", "addr"],
+            )
+            _snippet(
+                "workspace_netns_route",
+                ["nsenter", "-n", "-t", pid, "--", "ip", "-brief", "route"],
+            )
+            _snippet(
+                "workspace_netns_listen_tcp",
+                ["nsenter", "-n", "-t", pid, "--", "ss", "-H", "-lntp"],
+            )
+            # ``ss`` may be missing in slim images; procfs still shows bound sockets (hex ports, little-endian).
+            _snippet(
+                "workspace_netns_tcp_proc",
+                [
+                    "nsenter",
+                    "-n",
+                    "-t",
+                    pid,
+                    "--",
+                    "sh",
+                    "-c",
+                    "head -n 40 /proc/net/tcp 2>/dev/null || true",
+                ],
+            )
+            rt_row = self._session.exec(
+                select(TopologyRuntime).where(
+                    TopologyRuntime.topology_id == topology_id,
+                    TopologyRuntime.node_id == nid,
+                ),
+            ).first()
+            cidr_d = (str(rt_row.cidr).strip() if rt_row and rt_row.cidr else "") or ""
+            gw_d = (str(att.gateway_ip).strip() if att.gateway_ip else "") or (
+                str(rt_row.gateway_ip).strip() if rt_row and rt_row.gateway_ip else ""
+            )
+            if cidr_d and wsip and gw_d and br:
+                from .system import attachment_ops as ao_diag
+
+                nr = f"/proc/{pid}/ns/net"
+                plumb_fails = ao_diag.topology_attach_plumbing_failures(
+                    host_if=host_if,
+                    container_if=ctr_if,
+                    bridge_name=br,
+                    workspace_ip=wsip,
+                    cidr=cidr_d,
+                    gateway_ip=gw_d,
+                    netns_ref=nr,
+                    runner=r,
+                )
+                if plumb_fails:
+                    parts.insert(
+                        1,
+                        "stale_topology_attach="
+                        + repr(
+                            "DB ATTACHED but Linux plumbing mismatch / bridge membership missing: "
+                            + "; ".join(plumb_fails),
+                        )[:1900],
+                    )
+                parts.append(f"topology_plumbing_failures={plumb_fails!r}")
+        return "; ".join(parts)
 
     def run_topology_janitor(
         self,

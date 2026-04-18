@@ -21,7 +21,8 @@ http:
     devnest-workspace-auth:
       forwardAuth:
         address: "${DEVNEST_BACKEND_AUTH_URL:-http://host.docker.internal:8000/internal/gateway/auth}"
-        # Forward all original headers so the backend can read X-DevNest-Workspace-Session
+        # Forward all original headers so the backend can read X-DevNest-Workspace-Session and
+        # the HttpOnly devnest_ws_session cookie set by POST /workspaces/attach/{id}.
         # and X-Forwarded-Host. Do not trust any headers injected by untrusted upstreams.
         trustForwardHeader: true
         # Headers the backend is allowed to copy back into the proxied request after auth.

@@ -391,7 +391,31 @@ The same instance is used for **staging** (non-`main` branches) and **production
 
 If any of these is empty, deploy steps are skipped; the workflow still passes if tests succeed.
 
-**Remote behavior:** CI uses `appleboy/ssh-action@v1.2.3` (no unsupported inputs) and runs `scripts/deploy-ec2.sh` on the server. That script clones or updates `~/Devnest`, **checks out a branch by name** (`git reset --hard origin/<branch>`), sets `NEXT_PUBLIC_API_BASE_URL` from the workflow for the UI build, runs `docker compose -f docker-compose.integration.yml down` / `up -d --build`, then prints **git status**, **HEAD**, **compose ps**, and **compose logs** for debugging.
+**Remote behavior:** CI uses `appleboy/ssh-action@v1.2.3` (no unsupported inputs) and runs `scripts/deploy-ec2.sh` on the server. That script clones or updates `~/Devnest`, **checks out a branch by name** (`git reset --hard origin/<branch>`), sets `NEXT_PUBLIC_API_BASE_URL` from the workflow for the UI build, runs `docker compose -f docker-compose.integration.yml down` / `up -d --build --force-recreate`, then prints **git status**, **HEAD**, **compose ps**, and **compose logs** for debugging.
+
+#### Integration stack: Linux topology and `pid: host` (EC2 / staging)
+
+Workspace bring-up runs **veth + netns** commands (`ip link set … netns <pid>`, `nsenter -n -t <pid>`) inside the **control-plane** process. Docker reports **`State.Pid`** in the **host** PID namespace for each workspace container.
+
+If the API or worker runs in a **normal** container with an **isolated** PID namespace, that host PID is **not visible** under `/proc/<pid>` to `ip`/`nsenter`, and the kernel returns **`Invalid "netns" value`** (exit 255).
+
+**Fix:** `docker-compose.integration.yml` sets **`pid: "host"`** on:
+
+- **`backend`** — needed if you process workspace jobs via **`POST /internal/workspace-jobs/process`** or any in-process path that runs the orchestrator on the same container as the API.
+- **`workspace-worker`** — required for the default integration layout where **`DEVNEST_WORKER_ENABLED=false`** on the API and **`workspace_job_poll_loop`** runs the orchestrator for queued jobs.
+
+**Also required:** bind-mount **`/var/run/docker.sock`** (already present) and **`cap_add: NET_ADMIN`** for bridge/veth operations (already present). Do **not** remove those when adding `pid: host`.
+
+**Verify after deploy** (Linux host):
+
+```bash
+docker inspect "$(docker compose -f docker-compose.integration.yml ps -q workspace-worker)" --format '{{.HostConfig.PidMode}}'
+# expect: host
+```
+
+If the value is empty or not `host`, **recreate** the stack so the compose change applies: `docker compose -f docker-compose.integration.yml up -d --build --force-recreate` (the deploy script does this).
+
+**Workspace vs PID confusion:** Exit **143** on workspace containers after a failed attach is usually **rollback** (`SIGTERM` from `docker stop`), not the IDE exiting before attach. If **`State.Pid`** were wrong because the container had exited, **Docker inspect** would typically show **0** or **not running**; the error shown here is almost always **PID namespace visibility**, not a dead workspace before PID assignment.
 
 **Why previous deploys failed:** (1) `git checkout <sha>` when the shallow or stale clone did not yet have that commit produced **“fatal: reference is not a tree”**; deploys now track **remote branch tips** (`origin/<branch>`). (2) `script_stop` is **not** an input on `appleboy/ssh-action@v1.2.3` and could cause confusion or tool errors; it was removed. (3) **Pull requests** used to look like non-`main` refs; deploy jobs now run only on **`push`** and **`workflow_dispatch`**, never on `pull_request`.
 

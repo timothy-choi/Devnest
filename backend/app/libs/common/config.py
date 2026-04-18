@@ -57,9 +57,13 @@ class Settings(BaseSettings):
     # Default 0 disables (local/CI). Production: set via DEVNEST_INTERNAL_API_KEY_MIN_LENGTH (e.g. 24).
     devnest_internal_api_key_min_length: int = 0
 
-    # Workspace orchestrator (Docker): image for workspace containers; empty falls back to env then nginx:alpine.
+    # Workspace orchestrator (Docker): image for workspace containers; empty falls back to
+    # DEVNEST_WORKSPACE_CONTAINER_IMAGE / DEVNEST_WORKSPACE_IMAGE then devnest/workspace:latest (see app_factory).
     workspace_container_image: str = ""
     # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
+    # When the API/worker runs in Docker with only docker.sock mounted, that default is /tmp/... *inside*
+    # the control plane container — mkdir/chown there do not fix host bind sources → set WORKSPACE_PROJECTS_BASE
+    # to a path mounted from the host (see docker-compose.integration.yml).
     workspace_projects_base: str = ""
     # Root directory for snapshot archives (local filesystem provider). Empty → system temp / devnest-snapshots.
     devnest_snapshot_storage_root: str = ""
@@ -92,6 +96,9 @@ class Settings(BaseSettings):
     devnest_gateway_enabled: bool = False
     # Used for gateway_url hint on attach/access when route registration is enabled (no TLS in V1).
     devnest_gateway_public_scheme: str = "http"
+    # When Traefik is published on a non-default port, set this so ``gateway_url`` matches the browser
+    # (standard 80/443 are omitted from the URL). Example: map ``9081:80`` and set ``9081`` here.
+    devnest_gateway_public_port: int = 0
     # When true, GET /internal/gateway/auth enforces workspace session validation for Traefik ForwardAuth.
     # Set false in local/dev mode (default) to skip session requirement during development.
     devnest_gateway_auth_enabled: bool = False
@@ -134,6 +141,15 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
+
+    @field_validator("devnest_gateway_public_port", mode="before")
+    @classmethod
+    def _coerce_gateway_public_port(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(n, 65535))
 
     @field_validator("devnest_reconcile_interval_seconds", mode="before")
     @classmethod
@@ -197,6 +213,24 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 2.0
         return max(0.5, min(n, 60.0))
+
+    @field_validator("devnest_workspace_bringup_ide_tcp_wait_seconds", mode="before")
+    @classmethod
+    def _coerce_bringup_ide_tcp_wait(cls, v):  # noqa: ANN001
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return 90.0
+        return max(1.0, min(n, 600.0))
+
+    @field_validator("devnest_workspace_bringup_ide_tcp_poll_interval_seconds", mode="before")
+    @classmethod
+    def _coerce_bringup_ide_tcp_poll_interval(cls, v):  # noqa: ANN001
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return 1.5
+        return max(0.05, min(n, 30.0))
 
     # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
     aws_region: str = ""
@@ -319,6 +353,11 @@ class Settings(BaseSettings):
     devnest_require_ide_http_probe: bool = True
     # HTTP path for IDE readiness (code-server exposes /healthz in typical installs). Must start with ``/``.
     devnest_workspace_ide_health_path: str = "/healthz"
+    # After topology attach, poll TCP to ``workspace_ip:IDE`` for up to this many seconds before failing
+    # bring-up. code-server often needs tens of seconds (extensions, disk) before ``nc`` succeeds.
+    devnest_workspace_bringup_ide_tcp_wait_seconds: float = 90.0
+    # Sleep between TCP poll attempts during bring-up (see ``devnest_workspace_bringup_ide_tcp_wait_seconds``).
+    devnest_workspace_bringup_ide_tcp_poll_interval_seconds: float = 1.5
     # When true (default), TCP/HTTP probes may run from the API/worker process (same host as Docker).
     # Set false on control-plane hosts that are not co-located with workspace Docker (e.g. API-only
     # tier); then probes require ``NodeExecutionBundle.service_reachability_runner`` (SSH/SSM) so

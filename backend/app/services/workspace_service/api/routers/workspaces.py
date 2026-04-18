@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlmodel import Session
 
 from app.libs.common.config import get_settings
@@ -42,7 +42,10 @@ from app.services.workspace_service.services.workspace_event_service import (
     format_sse_data_line,
     list_workspace_events,
 )
-from app.services.workspace_service.services.workspace_session_service import WORKSPACE_SESSION_HTTP_HEADER
+from app.services.workspace_service.services.workspace_session_service import (
+    WORKSPACE_SESSION_COOKIE_NAME,
+    WORKSPACE_SESSION_HTTP_HEADER,
+)
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -302,7 +305,10 @@ def patch_workspace_update(
     description=(
         "Creates a workspace session when the workspace is RUNNING and runtime placement exists. "
         "Does not start the workspace — use POST /workspaces/start/{id} first. "
-        "Returns a one-time session_token; send it as header X-DevNest-Workspace-Session on GET /workspaces/{id}/access."
+        "Returns a one-time session_token; send it as header X-DevNest-Workspace-Session on GET /workspaces/{id}/access. "
+        "When ``DEVNEST_GATEWAY_ENABLED`` and ``DEVNEST_GATEWAY_AUTH_ENABLED`` are true, also sets HttpOnly cookie "
+        f"``{WORKSPACE_SESSION_COOKIE_NAME}`` (Domain derived from ``DEVNEST_BASE_DOMAIN``) so browser navigations "
+        "to the workspace Traefik host include a session for ForwardAuth."
     ),
 )
 def post_workspace_attach(
@@ -311,7 +317,7 @@ def post_workspace_attach(
     session: Session = Depends(get_db),
     current: UserAuth = Depends(get_current_user),
     body: Annotated[WorkspaceAttachRequest | None, Body()] = None,
-) -> WorkspaceAttachResponse:
+) -> JSONResponse:
     assert current.user_auth_id is not None
     uid = current.user_auth_id
     meta = body.client_metadata if body else {}
@@ -326,7 +332,39 @@ def post_workspace_attach(
         )
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
-    return _attach_response(out)
+    payload = _attach_response(out)
+    resp = JSONResponse(status_code=status.HTTP_200_OK, content=payload.model_dump(mode="json"))
+    settings = get_settings()
+    if (
+        settings.devnest_gateway_enabled
+        and settings.devnest_gateway_auth_enabled
+        and out.accepted
+        and (out.session_token or "").strip()
+    ):
+        req_https = request.url.scheme == "https"
+        max_age = max(60, int(settings.workspace_session_ttl_seconds))
+        tok = out.session_token.strip()
+        dom = (settings.devnest_base_domain or "").strip().strip(".")
+        if dom and "." in dom:
+            resp.set_cookie(
+                WORKSPACE_SESSION_COOKIE_NAME,
+                tok,
+                max_age=max_age,
+                httponly=True,
+                secure=req_https,
+                samesite="none" if req_https else "lax",
+                domain=f".{dom}",
+            )
+        else:
+            resp.set_cookie(
+                WORKSPACE_SESSION_COOKIE_NAME,
+                tok,
+                max_age=max_age,
+                httponly=True,
+                secure=req_https,
+                samesite="none" if req_https else "lax",
+            )
+    return resp
 
 
 @router.get(

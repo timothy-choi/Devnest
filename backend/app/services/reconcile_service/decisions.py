@@ -26,10 +26,15 @@ def route_row_for_workspace(routes: list[dict], workspace_id: int) -> dict | Non
     return None
 
 
+def _norm_public_host(raw: str | None) -> str:
+    return (raw or "").strip().lower()
+
+
 def gateway_route_needs_repair(
     *,
     route_row: dict | None,
     observed_internal_endpoint: str | None,
+    expected_public_host: str | None = None,
 ) -> bool:
     ep = (observed_internal_endpoint or "").strip()
     if not ep:
@@ -39,4 +44,9 @@ def gateway_route_needs_repair(
         return False
     if route_row is None:
         return True
-    return not targets_equivalent(route_row.get("target"), observed_internal_endpoint)
+    if not targets_equivalent(route_row.get("target"), observed_internal_endpoint):
+        return True
+    want = _norm_public_host(expected_public_host)
+    if want and _norm_public_host(str(route_row.get("public_host") or "")) != want:
+        return True
+    return False

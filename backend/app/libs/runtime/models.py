@@ -156,6 +156,9 @@ class ContainerInspectionResult:
             For full debugging use ``bind_mounts`` and ``mounts`` together.
         health_status: Adapter-normalized health (e.g. healthy, unhealthy); ``None`` if N/A.
         labels: Engine ``Config.Labels`` as sorted ``(key, value)`` pairs (immutable snapshot).
+        started_at: Docker ``State.StartedAt`` when present (RFC3339 string from the engine).
+        finished_at: Docker ``State.FinishedAt`` when present.
+        exit_code: Docker ``State.ExitCode`` when present (often ``None`` while running).
     """
 
     exists: bool
@@ -168,6 +171,9 @@ class ContainerInspectionResult:
     bind_mounts: tuple[BindMountInfo, ...] = ()
     workspace_project_mount: BindMountInfo | None = None
     labels: tuple[tuple[str, str], ...] = ()
+    started_at: str | None = None
+    finished_at: str | None = None
+    exit_code: int | None = None
 
 
 @dataclass(frozen=True)
