@@ -1022,6 +1022,7 @@ def _execute_snapshot_create_job(
     archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
     res = orchestrator.export_workspace_filesystem_snapshot(
         workspace_id=wid_str,
+        project_storage_key=ws.project_storage_key,
         archive_path=archive_path,
     )
 
@@ -1366,6 +1367,7 @@ def _execute_snapshot_restore_job(
 
     res = orchestrator.import_workspace_filesystem_snapshot(
         workspace_id=wid_str,
+        project_storage_key=ws.project_storage_key,
         archive_path=archive_path,
     )
 
@@ -1479,11 +1481,13 @@ def _execute_job_body(
 
         result = orchestrator.bring_up_workspace_runtime(
             workspace_id=wid_str,
+            project_storage_key=ws.project_storage_key,
             requested_config_version=cfg_v,
             cpu_limit_cores=float(_cpu_limit) if _cpu_limit else None,
             memory_limit_mib=int(_mem_limit) if _mem_limit else None,
             env=_env if isinstance(_env, dict) else {},
             features=_features,
+            launch_mode="new" if jt == WorkspaceJobType.CREATE.value else "resume",
         )
         _finalize_bringup_result(session, ws, job, result, config_version=cfg_v)
         return
@@ -1512,6 +1516,7 @@ def _execute_job_body(
         persisted_container_id = _get_persisted_container_id(session, wid)
         result = orchestrator.restart_workspace_runtime(
             workspace_id=wid_str,
+            project_storage_key=ws.project_storage_key,
             container_id=persisted_container_id,
             requested_by=requested_by,
             requested_config_version=cfg_v,
@@ -1523,6 +1528,7 @@ def _execute_job_body(
         persisted_container_id = _get_persisted_container_id(session, wid)
         result = orchestrator.update_workspace_runtime(
             workspace_id=wid_str,
+            project_storage_key=ws.project_storage_key,
             container_id=persisted_container_id,
             requested_config_version=cfg_v,
             requested_by=requested_by,

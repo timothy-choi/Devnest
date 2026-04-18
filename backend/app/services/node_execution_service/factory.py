@@ -166,8 +166,8 @@ def _bundle_ssm_docker(node: ExecutionNode) -> NodeExecutionBundle:
 
     runtime = SsmDockerRuntimeAdapter(ssm_runner)
 
-    def _ensure(base: str, wid: str) -> str:
-        return remote_shell_ensure_workspace_project_dir(ssm_runner, base, wid)
+    def _ensure(base: str, wid: str, project_storage_key: str | None = None) -> str:
+        return remote_shell_ensure_workspace_project_dir(ssm_runner, base, wid, project_storage_key)
 
     return NodeExecutionBundle(
         docker_client=None,
@@ -205,8 +205,8 @@ def _bundle_ssh_docker(node: ExecutionNode) -> NodeExecutionBundle:
 
     ssh_runner = SshRemoteCommandRunner(ssh_user=user, ssh_host=host, ssh_port=port)
 
-    def _ensure(base: str, wid: str) -> str:
-        return ssh_remote_ensure_workspace_project_dir(ssh_runner, base, wid)
+    def _ensure(base: str, wid: str, project_storage_key: str | None = None) -> str:
+        return ssh_remote_ensure_workspace_project_dir(ssh_runner, base, wid, project_storage_key)
 
     return NodeExecutionBundle(
         docker_client=client,

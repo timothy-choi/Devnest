@@ -242,6 +242,7 @@ class TestLoadPendingJobs:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             _seed_job(
                 session,
@@ -283,6 +284,7 @@ class TestLoadPendingJobs:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             wid_str_holder["v"] = str(wid)
             _seed_job(
@@ -340,6 +342,7 @@ class TestMarkJobStarted:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             job = _seed_job(
                 session,
@@ -370,6 +373,7 @@ class TestDispatchCreate:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             job = _seed_job(
                 session,
@@ -389,7 +393,9 @@ class TestDispatchCreate:
         orch.bring_up_workspace_runtime.assert_called_once()
         bup_kwargs = orch.bring_up_workspace_runtime.call_args.kwargs
         assert bup_kwargs["workspace_id"] == str(wid)
+        assert bup_kwargs["project_storage_key"] == storage_key
         assert bup_kwargs["requested_config_version"] == REQUESTED_CONFIG_VERSION
+        assert bup_kwargs["launch_mode"] == "new"
 
         with Session(workspace_job_worker_engine) as session:
             job = session.get(WorkspaceJob, job_id)
@@ -440,6 +446,7 @@ class TestDispatchStart:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             job = _seed_job(
                 session,
@@ -459,7 +466,9 @@ class TestDispatchStart:
         orch.bring_up_workspace_runtime.assert_called_once()
         bup_kwargs = orch.bring_up_workspace_runtime.call_args.kwargs
         assert bup_kwargs["workspace_id"] == str(wid)
+        assert bup_kwargs["project_storage_key"] == storage_key
         assert bup_kwargs["requested_config_version"] == REQUESTED_CONFIG_VERSION
+        assert bup_kwargs["launch_mode"] == "resume"
         with Session(workspace_job_worker_engine) as session:
             job = session.get(WorkspaceJob, job_id)
             assert job is not None
@@ -478,6 +487,7 @@ class TestDispatchStop:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             _seed_runtime(session, wid)
             job = _seed_job(
@@ -523,6 +533,7 @@ class TestDispatchRestart:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             job = _seed_job(
                 session,
@@ -540,6 +551,7 @@ class TestDispatchRestart:
 
         orch.restart_workspace_runtime.assert_called_once_with(
             workspace_id=str(wid),
+            project_storage_key=storage_key,
             container_id=None,
             requested_by=str(owner_user_id),
             requested_config_version=REQUESTED_CONFIG_VERSION,
@@ -565,6 +577,7 @@ class TestDispatchDelete:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             _seed_runtime(session, wid)
             job = _seed_job(
@@ -611,6 +624,7 @@ class TestDispatchUpdate:
         with Session(workspace_job_worker_engine) as session:
             ws = _seed_workspace(session, owner_user_id)
             wid = ws.workspace_id
+            storage_key = ws.project_storage_key
             assert wid is not None
             job = _seed_job(
                 session,
@@ -629,6 +643,7 @@ class TestDispatchUpdate:
 
         orch.update_workspace_runtime.assert_called_once_with(
             workspace_id=str(wid),
+            project_storage_key=storage_key,
             container_id=None,
             requested_config_version=cfg,
             requested_by=str(owner_user_id),

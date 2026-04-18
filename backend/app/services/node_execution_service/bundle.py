@@ -31,8 +31,13 @@ class NodeExecutionBundle:
     docker_client: docker.DockerClient | None
     topology_command_runner: CommandRunner
     service_reachability_runner: CommandRunner | None
-    _ensure_project_dir: Callable[[str, str], str]
+    _ensure_project_dir: Callable[[str, str, str | None], str]
     runtime_adapter: RuntimeAdapter | None = None
 
-    def ensure_workspace_project_dir(self, projects_base: str, workspace_id: str) -> str:
-        return self._ensure_project_dir(projects_base, workspace_id)
+    def ensure_workspace_project_dir(
+        self,
+        projects_base: str,
+        workspace_id: str,
+        project_storage_key: str | None = None,
+    ) -> str:
+        return self._ensure_project_dir(projects_base, workspace_id, project_storage_key)

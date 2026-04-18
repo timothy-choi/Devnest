@@ -96,6 +96,7 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
         assert ws.owner_user_id == owner_user_id
         assert ws.status == WorkspaceStatus.CREATING.value
         assert ws.is_private is False
+        assert ws.project_storage_key
 
         cfg = session.exec(
             select(WorkspaceConfig).where(WorkspaceConfig.workspace_id == out.workspace_id),
@@ -128,6 +129,32 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
         assert ev.status == WorkspaceStatus.CREATING.value
         assert ev.payload_json["job_id"] == out.job_id
         assert ev.payload_json["job_type"] == WorkspaceJobType.CREATE.value
+
+
+def test_create_workspace_assigns_distinct_project_storage_keys(
+    workspace_unit_engine: Engine,
+    owner_user_id: int,
+) -> None:
+    with Session(workspace_unit_engine) as session:
+        first = workspace_intent_service.create_workspace(
+            session,
+            owner_user_id=owner_user_id,
+            body=CreateWorkspaceRequest(name="WS-1"),
+        )
+        second = workspace_intent_service.create_workspace(
+            session,
+            owner_user_id=owner_user_id,
+            body=CreateWorkspaceRequest(name="WS-2"),
+        )
+
+    with Session(workspace_unit_engine) as session:
+        first_ws = session.get(Workspace, first.workspace_id)
+        second_ws = session.get(Workspace, second.workspace_id)
+        assert first_ws is not None
+        assert second_ws is not None
+        assert first_ws.project_storage_key
+        assert second_ws.project_storage_key
+        assert first_ws.project_storage_key != second_ws.project_storage_key
 
 
 def test_create_workspace_commit_failure_rolls_back_no_rows(

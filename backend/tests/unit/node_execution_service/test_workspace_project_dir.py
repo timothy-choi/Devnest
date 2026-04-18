@@ -13,6 +13,7 @@ from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
     ssh_remote_ensure_workspace_project_dir,
     verify_workspace_runtime_owns_path,
+    workspace_project_dir_name,
 )
 
 
@@ -21,6 +22,18 @@ def test_default_local_creates_directory() -> None:
         p = default_local_ensure_workspace_project_dir(tmp, "ws42")
         assert Path(p).is_dir()
         assert p.endswith(f"ws42")
+
+
+def test_default_local_uses_storage_key_for_isolated_directory() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        p = default_local_ensure_workspace_project_dir(tmp, "1", "abc123")
+        assert Path(p).is_dir()
+        assert p.endswith("1-abc123")
+
+
+def test_workspace_project_dir_name_changes_when_storage_key_changes() -> None:
+    assert workspace_project_dir_name("1", "key-a") != workspace_project_dir_name("1", "key-b")
+    assert workspace_project_dir_name("1", "key-a") == workspace_project_dir_name("1", "key-a")
 
 
 def test_default_local_rejects_unsafe_workspace_id() -> None:
@@ -36,9 +49,10 @@ def test_ssh_remote_requires_absolute_base() -> None:
 
 def test_ssh_remote_mkdir() -> None:
     runner = MagicMock()
-    path = ssh_remote_ensure_workspace_project_dir(runner, "/var/devnest", "ws7")
-    assert path == "/var/devnest/ws7"
-    runner.run.assert_called_once_with(["mkdir", "-p", "/var/devnest/ws7"])
+    path = ssh_remote_ensure_workspace_project_dir(runner, "/var/devnest", "ws7", "k1")
+    assert path == "/var/devnest/ws7-k1"
+    assert runner.run.call_count == 2
+    assert runner.run.call_args_list[-1].args[0] == ["mkdir", "-p", "/var/devnest/ws7-k1"]
 
 
 def test_verify_workspace_runtime_owns_path_rejects_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

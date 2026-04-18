@@ -100,6 +100,7 @@ class _BringUpContext:
     ws_int: int
     container_name: str
     workspace_host_path: str
+    project_storage_key: str | None
     labels: dict[str, str]
 
 
@@ -221,7 +222,9 @@ class DefaultOrchestratorService(OrchestratorService):
     def _bring_up_build_context(
         self,
         workspace_id: str,
+        project_storage_key: str | None,
         requested_config_version: int | None,
+        launch_mode: str | None,
     ) -> _BringUpContext:
         # TODO: reconcile with persisted Workspace_runtime row; container label is the V1 source of truth.
         wid = (workspace_id or "").strip()
@@ -231,7 +234,11 @@ class DefaultOrchestratorService(OrchestratorService):
         ws_int = _parse_topology_workspace_id(wid)
         name = _sanitize_container_name(wid)
         try:
-            workspace_host_path = self._ensure_workspace_project_dir(self._workspace_projects_base, wid)
+            workspace_host_path = self._ensure_workspace_project_dir(
+                self._workspace_projects_base,
+                wid,
+                project_storage_key,
+            )
         except ValueError as e:
             raise WorkspaceBringUpError(str(e)) from e
 
@@ -242,11 +249,23 @@ class DefaultOrchestratorService(OrchestratorService):
         if requested_config_version is not None:
             labels[_CONFIG_VERSION_LABEL] = str(int(requested_config_version))
 
+        logger.info(
+            "orchestrator_workspace_project_path_selected",
+            extra={
+                "workspace_id": wid,
+                "project_storage_key": (project_storage_key or "").strip() or None,
+                "workspace_host_path": workspace_host_path,
+                "launch_mode": (launch_mode or "").strip() or "resume",
+                "is_resumed_workspace": ((launch_mode or "").strip().lower() != "new"),
+            },
+        )
+
         return _BringUpContext(
             wid=wid,
             ws_int=ws_int,
             container_name=name,
             workspace_host_path=workspace_host_path,
+            project_storage_key=(project_storage_key or "").strip() or None,
             labels=labels,
         )
 
@@ -268,7 +287,11 @@ class DefaultOrchestratorService(OrchestratorService):
             "PORT": str(port),
         }
 
-    def _code_server_extra_bind_mounts(self, wid: str) -> list[WorkspaceExtraBindMountSpec]:
+    def _code_server_extra_bind_mounts(
+        self,
+        wid: str,
+        workspace_host_path: str,
+    ) -> list[WorkspaceExtraBindMountSpec]:
         """Build code-server persistence bind mounts for config and data.
 
         Each workspace gets per-workspace subdirectories under ``workspace_projects_base``
@@ -279,15 +302,13 @@ class DefaultOrchestratorService(OrchestratorService):
         constructed (non-blocking; the workspace will still start without persistence for
         those dirs).
         """
-        base = os.path.realpath(os.path.expanduser((self._workspace_projects_base or "").strip()))
-        if not base:
-            return []
         wid_clean = (wid or "").strip()
         if not wid_clean:
             return []
-        # Same layout as the project bind: ``{workspace_projects_base}/{workspace_id}/code-server/…``
-        # (not ``ws-{id}``, which split state from the project tree and confused host permissions).
-        cs_base = os.path.join(base, wid_clean, "code-server")
+        project_root = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
+        if not project_root:
+            return []
+        cs_base = os.path.join(project_root, "code-server")
         cfg_host = os.path.join(cs_base, "config")
         data_host = os.path.join(cs_base, "data")
         uid, gid = workspace_container_uid_gid()
@@ -301,7 +322,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 "workspace_code_server_host_prepare_start",
                 extra={
                     "workspace_id": wid_clean,
-                    "workspace_projects_base": base,
+                    "workspace_host_path": project_root,
                     "cs_base": cs_base,
                     "cfg_host": cfg_host,
                     "data_host": data_host,
@@ -391,7 +412,7 @@ class DefaultOrchestratorService(OrchestratorService):
         merged_env: dict[str, str] = {**self._code_server_env(), **(env or {})}
 
         # Add code-server persistence bind mounts.
-        cs_extra_mounts = self._code_server_extra_bind_mounts(ctx.wid)
+        cs_extra_mounts = self._code_server_extra_bind_mounts(ctx.wid, ctx.workspace_host_path)
         for spec in cs_extra_mounts or []:
             hp = (spec.host_path or "").strip()
             if not hp:
@@ -853,11 +874,13 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         requested_config_version: int | None = None,
         cpu_limit_cores: float | None = None,
         memory_limit_mib: int | None = None,
         env: dict | None = None,
         features: dict | None = None,
+        launch_mode: str | None = None,
     ) -> WorkspaceBringUpResult:
         """
         Start workspace container, wire topology attachment, run service probe.
@@ -868,7 +891,12 @@ class DefaultOrchestratorService(OrchestratorService):
 
         Returns a :class:`WorkspaceBringUpResult` for the worker to persist on ``WorkspaceRuntime``.
         """
-        ctx = self._bring_up_build_context(workspace_id, requested_config_version)
+        ctx = self._bring_up_build_context(
+            workspace_id,
+            project_storage_key,
+            requested_config_version,
+            launch_mode,
+        )
         log_event(
             logger,
             LogEvent.ORCHESTRATOR_BRINGUP_STARTED,
@@ -1278,6 +1306,7 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         container_id: str | None = None,
         requested_by: str | None = None,
         requested_config_version: int | None = None,
@@ -1349,7 +1378,9 @@ class DefaultOrchestratorService(OrchestratorService):
         try:
             up_res = self.bring_up_workspace_runtime(
                 workspace_id=wid,
+                project_storage_key=project_storage_key,
                 requested_config_version=requested_config_version,
+                launch_mode="resume",
             )
         except WorkspaceBringUpError as e:
             issues.append(f"bringup:failed:{e}")
@@ -1406,6 +1437,7 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         container_id: str | None = None,
         requested_config_version: int,
         requested_by: str | None = None,
@@ -1483,6 +1515,7 @@ class DefaultOrchestratorService(OrchestratorService):
         try:
             r = self.restart_workspace_runtime(
                 workspace_id=wid,
+                project_storage_key=project_storage_key,
                 container_id=container_id,
                 requested_by=requested_by,
                 requested_config_version=requested_config_version,
@@ -1633,13 +1666,21 @@ class DefaultOrchestratorService(OrchestratorService):
             issues=_issues_or_none(issue_msgs),
         )
 
-    def _workspace_project_path_for_snapshot(self, workspace_id: str) -> str:
+    def _workspace_project_path_for_snapshot(
+        self,
+        workspace_id: str,
+        project_storage_key: str | None = None,
+    ) -> str:
         wid = (workspace_id or "").strip()
         if not wid:
             raise WorkspaceSnapshotError("workspace_id is empty")
         _parse_topology_workspace_id(wid)
         try:
-            return self._ensure_workspace_project_dir(self._workspace_projects_base, wid)
+            return self._ensure_workspace_project_dir(
+                self._workspace_projects_base,
+                wid,
+                project_storage_key,
+            )
         except ValueError as e:
             raise WorkspaceSnapshotError(str(e)) from e
 
@@ -1733,11 +1774,12 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         archive_path: str,
     ) -> WorkspaceSnapshotOperationResult:
         wid = (workspace_id or "").strip()
         try:
-            root = self._workspace_project_path_for_snapshot(wid)
+            root = self._workspace_project_path_for_snapshot(wid, project_storage_key)
         except WorkspaceSnapshotError as e:
             return WorkspaceSnapshotOperationResult(
                 workspace_id=wid or (workspace_id or ""),
@@ -1807,11 +1849,12 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         archive_path: str,
     ) -> WorkspaceSnapshotOperationResult:
         wid = (workspace_id or "").strip()
         try:
-            dest_root = Path(self._workspace_project_path_for_snapshot(wid)).resolve()
+            dest_root = Path(self._workspace_project_path_for_snapshot(wid, project_storage_key)).resolve()
         except WorkspaceSnapshotError as e:
             return WorkspaceSnapshotOperationResult(
                 workspace_id=wid or (workspace_id or ""),

@@ -18,6 +18,7 @@ from app.libs.topology.system.command_runner import CommandRunner
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_ID_SAFE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
+_WORKSPACE_STORAGE_KEY_SAFE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 
 
 def workspace_container_uid_gid() -> tuple[int, int]:
@@ -206,13 +207,35 @@ def ensure_host_path_owned_by_workspace_user(path: str, *, strict: bool = False)
             raise
 
 
-def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id: str) -> str:
-    """Create ``{projects_base}/{workspace_id}`` on this machine; return absolute path string."""
+def workspace_project_dir_name(workspace_id: str, project_storage_key: str | None = None) -> str:
+    """Stable host directory name for one workspace record.
+
+    Legacy rows without ``project_storage_key`` keep using ``workspace_id`` directly so existing
+    workspaces continue to see their current bind-mounted files after upgrade. New rows with a
+    persisted key use ``{workspace_id}-{project_storage_key}`` so a recycled numeric id cannot
+    accidentally reuse another workspace's project tree.
+    """
     wid = _validate_workspace_id_for_path(workspace_id)
+    key = _validate_workspace_storage_key_for_path(project_storage_key)
+    if not key:
+        return wid
+    return f"{wid}-{key}"
+
+
+def default_local_ensure_workspace_project_dir(
+    projects_base: str,
+    workspace_id: str,
+    project_storage_key: str | None = None,
+) -> str:
+    """Create the isolated workspace project directory on this machine; return absolute path."""
+    wid = _validate_workspace_id_for_path(workspace_id)
+    storage_key = _validate_workspace_storage_key_for_path(project_storage_key)
     base = (projects_base or "").strip()
     if not base:
         base = os.path.join(tempfile.gettempdir(), "devnest-workspaces")
-    p = Path(os.path.realpath(os.path.expanduser(str(Path(base) / wid))))
+    dir_name = workspace_project_dir_name(wid, storage_key)
+    p = Path(os.path.realpath(os.path.expanduser(str(Path(base) / dir_name))))
+    existed_before = p.exists()
     try:
         p.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -231,6 +254,10 @@ def default_local_ensure_workspace_project_dir(projects_base: str, workspace_id:
         extra={
             "host_path": p_str,
             "workspace_id": wid,
+            "project_storage_key": storage_key,
+            "host_dir_name": dir_name,
+            "path_mode": "legacy_workspace_id" if not storage_key else "workspace_id_plus_storage_key",
+            "directory_preexisted": existed_before,
             "uid": uid,
             "gid": gid,
             "chown_strict": _strict_chown,
@@ -247,19 +274,40 @@ def ssh_remote_ensure_workspace_project_dir(
     runner: CommandRunner,
     projects_base: str,
     workspace_id: str,
+    project_storage_key: str | None = None,
 ) -> str:
     """
-    Create ``{projects_base}/{workspace_id}`` on the SSH target using POSIX paths.
+    Create the isolated workspace project directory on the SSH target using POSIX paths.
 
     ``projects_base`` must be the path **on the remote Docker host** (same filesystem the daemon
     bind-mounts from).
     """
     wid = _validate_workspace_id_for_path(workspace_id)
+    storage_key = _validate_workspace_storage_key_for_path(project_storage_key)
     base = (projects_base or "").strip().rstrip("/")
     if not base.startswith("/"):
         raise ValueError("remote workspace_projects_base must be an absolute POSIX path")
-    remote_path = f"{base}/{wid}"
+    dir_name = workspace_project_dir_name(wid, storage_key)
+    remote_path = f"{base}/{dir_name}"
+    existed_before = False
+    try:
+        runner.run(["sh", "-lc", f"test -d {shlex.quote(remote_path)}"])
+        existed_before = True
+    except RuntimeError:
+        existed_before = False
     runner.run(["mkdir", "-p", remote_path])
+    logger.info(
+        "workspace_project_host_dir_ready",
+        extra={
+            "host_path": remote_path,
+            "workspace_id": wid,
+            "project_storage_key": storage_key,
+            "host_dir_name": dir_name,
+            "path_mode": "legacy_workspace_id" if not storage_key else "workspace_id_plus_storage_key",
+            "directory_preexisted": existed_before,
+            "execution_target": "remote",
+        },
+    )
     return remote_path
 
 
@@ -329,3 +377,14 @@ def _validate_workspace_id_for_path(workspace_id: str) -> str:
     if not wid or not _WORKSPACE_ID_SAFE.match(wid):
         raise ValueError(f"unsafe or empty workspace_id for host path: {workspace_id!r}")
     return wid
+
+
+def _validate_workspace_storage_key_for_path(project_storage_key: str | None) -> str | None:
+    if project_storage_key is None:
+        return None
+    key = str(project_storage_key).strip()
+    if not key:
+        return None
+    if not _WORKSPACE_STORAGE_KEY_SAFE.match(key):
+        raise ValueError(f"unsafe workspace project storage key for host path: {project_storage_key!r}")
+    return key
