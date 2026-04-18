@@ -101,6 +101,7 @@ class _BringUpContext:
     container_name: str
     workspace_host_path: str
     project_storage_key: str | None
+    launch_mode: str
     labels: dict[str, str]
 
 
@@ -266,6 +267,7 @@ class DefaultOrchestratorService(OrchestratorService):
             container_name=name,
             workspace_host_path=workspace_host_path,
             project_storage_key=(project_storage_key or "").strip() or None,
+            launch_mode=(launch_mode or "").strip().lower() or "resume",
             labels=labels,
         )
 
@@ -291,6 +293,7 @@ class DefaultOrchestratorService(OrchestratorService):
         self,
         wid: str,
         workspace_host_path: str | None = None,
+        launch_mode: str = "resume",
     ) -> list[WorkspaceExtraBindMountSpec]:
         """Build code-server persistence bind mounts for config and data.
 
@@ -317,6 +320,8 @@ class DefaultOrchestratorService(OrchestratorService):
         cs_base = os.path.join(project_root, "code-server")
         cfg_host = os.path.join(cs_base, "config")
         data_host = os.path.join(cs_base, "data")
+        cfg_existed_before = os.path.isdir(cfg_host)
+        data_existed_before = os.path.isdir(data_host)
         uid, gid = workspace_container_uid_gid()
         try:
             try:
@@ -341,6 +346,11 @@ class DefaultOrchestratorService(OrchestratorService):
             os.makedirs(data_host, exist_ok=True)
             cfg_host = os.path.realpath(cfg_host)
             data_host = os.path.realpath(data_host)
+            state_reset = self._reset_code_server_state_for_new_workspace(
+                workspace_id=wid_clean,
+                data_host=data_host,
+                launch_mode=launch_mode,
+            )
             # Seed ``config.yaml`` before chown so the workspace user can read it (auth/proxy contract).
             ensure_code_server_bind_auth_proxy_config(cfg_host)
             # Chown the whole ``code-server`` tree (``chown -R`` as root; Python walk fallback).
@@ -355,6 +365,9 @@ class DefaultOrchestratorService(OrchestratorService):
                         "workspace_id": wid_clean,
                         "role": label,
                         "host_path": host,
+                        "launch_mode": launch_mode,
+                        "directory_preexisted": data_existed_before if label == "data" else cfg_existed_before,
+                        "state_reset_for_new_workspace": state_reset if label == "data" else False,
                         "stat_uid": su,
                         "stat_gid": sg,
                         "target_uid": uid,
@@ -397,6 +410,57 @@ class DefaultOrchestratorService(OrchestratorService):
             ),
         ]
 
+    @staticmethod
+    def _reset_code_server_state_for_new_workspace(
+        *,
+        workspace_id: str,
+        data_host: str,
+        launch_mode: str,
+    ) -> bool:
+        """
+        For newly created workspaces, clear persisted code-server UI/session state before start.
+
+        This keeps a surprising stale bind mount from reopening unrelated tabs/files while
+        preserving ``extensions/`` if present. Resume flows keep the directory intact.
+        """
+        mode = (launch_mode or "").strip().lower() or "resume"
+        if mode != "new":
+            logger.info(
+                "workspace_code_server_state_reuse",
+                extra={
+                    "workspace_id": workspace_id,
+                    "data_host": data_host,
+                    "launch_mode": mode,
+                    "state_reset": False,
+                },
+            )
+            return False
+        if not os.path.isdir(data_host):
+            return False
+        removed_any = False
+        for entry in os.listdir(data_host):
+            if entry == "extensions":
+                continue
+            target = os.path.join(data_host, entry)
+            try:
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target, ignore_errors=False)
+                else:
+                    os.unlink(target)
+                removed_any = True
+            except FileNotFoundError:
+                continue
+        logger.info(
+            "workspace_code_server_state_reset",
+            extra={
+                "workspace_id": workspace_id,
+                "data_host": data_host,
+                "launch_mode": mode,
+                "state_reset": removed_any,
+            },
+        )
+        return removed_any
+
     def _bring_up_start_container(
         self,
         ctx: _BringUpContext,
@@ -418,7 +482,11 @@ class DefaultOrchestratorService(OrchestratorService):
         merged_env: dict[str, str] = {**self._code_server_env(), **(env or {})}
 
         # Add code-server persistence bind mounts.
-        cs_extra_mounts = self._code_server_extra_bind_mounts(ctx.wid, ctx.workspace_host_path)
+        cs_extra_mounts = self._code_server_extra_bind_mounts(
+            ctx.wid,
+            ctx.workspace_host_path,
+            ctx.launch_mode,
+        )
         for spec in cs_extra_mounts or []:
             hp = (spec.host_path or "").strip()
             if not hp:
