@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -957,6 +958,7 @@ def create_workspace(
         name=body.name,
         description=body.description,
         owner_user_id=owner_user_id,
+        project_storage_key=uuid4().hex,
         status=WorkspaceStatus.CREATING.value,
         is_private=body.is_private,
         created_at=now,

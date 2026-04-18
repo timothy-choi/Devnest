@@ -270,6 +270,55 @@ def default_local_ensure_workspace_project_dir(
     return p_str
 
 
+def prune_orphaned_workspace_project_dirs(
+    projects_base: str,
+    live_workspace_refs: list[tuple[str, str | None]],
+) -> list[str]:
+    """
+    Remove workspace project directories under ``projects_base`` that are not referenced by current DB rows.
+
+    This is intentionally conservative: only direct child directories are considered, and a child is
+    kept when its name matches the derived host dir name for any live workspace reference.
+    """
+    base = (projects_base or "").strip()
+    if not base:
+        return []
+    root = Path(os.path.realpath(os.path.expanduser(base)))
+    if not root.exists() or not root.is_dir():
+        return []
+    live_dir_names = {
+        workspace_project_dir_name(str(workspace_id), project_storage_key)
+        for workspace_id, project_storage_key in live_workspace_refs
+        if str(workspace_id).strip()
+    }
+    removed: list[str] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        if child.name in live_dir_names:
+            continue
+        shutil.rmtree(child, ignore_errors=False)
+        removed.append(str(child))
+        logger.info(
+            "workspace_project_host_dir_pruned",
+            extra={
+                "host_path": str(child),
+                "host_dir_name": child.name,
+                "prune_reason": "orphaned_after_startup_db_scan",
+            },
+        )
+    logger.info(
+        "workspace_project_host_dir_prune_complete",
+        extra={
+            "projects_base": str(root),
+            "live_workspace_count": len(live_workspace_refs),
+            "removed_count": len(removed),
+            "cleanup_occurred": bool(removed),
+        },
+    )
+    return removed
+
+
 def ssh_remote_ensure_workspace_project_dir(
     runner: CommandRunner,
     projects_base: str,
