@@ -422,8 +422,8 @@ jobs:
             fi
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
             export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${{ secrets.EC2_HOST }}:3000"
-            export GITHUB_CLIENT_ID="${{ secrets.GITHUB_CLIENT_ID }}"
-            export GITHUB_CLIENT_SECRET="${{ secrets.GITHUB_CLIENT_SECRET }}"
+            export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
+            export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
             export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
             export GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}"
             docker compose -f "${COMPOSE}" --project-directory "${REPO_DIR}" down || true
