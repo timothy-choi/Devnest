@@ -233,6 +233,26 @@ def test_legacy_numeric_host_allows(engine):
         assert resp.status_code == 200, f"body={resp.text!r}"
 
 
+def test_storage_key_host_allows(engine):
+    """Per-workspace hosts like ``ws-{id}-{storage_key}.{base}`` still resolve to the workspace id."""
+    ws_id, token = _seed_data(engine, ws_status=WorkspaceStatus.RUNNING.value)
+    host = f"ws-{ws_id}-deadbeef.{BASE_DOMAIN}"
+
+    with patch(
+        "app.services.workspace_service.api.routers.internal_gateway_auth.get_settings",
+        return_value=_settings_auth_enabled(),
+    ):
+        client = TestClient(_make_app(engine))
+        resp = client.get(
+            "/internal/gateway/auth",
+            headers={
+                "X-Forwarded-Host": host,
+                WORKSPACE_SESSION_HTTP_HEADER: token,
+            },
+        )
+        assert resp.status_code == 200, f"body={resp.text!r}"
+
+
 def test_missing_session_token_denied(engine):
     """No session header → 401."""
     with Session(engine) as s:

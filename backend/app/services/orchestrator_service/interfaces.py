@@ -26,11 +26,13 @@ class OrchestratorService(ABC):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         requested_config_version: int | None = None,
         cpu_limit_cores: float | None = None,
         memory_limit_mib: int | None = None,
         env: dict | None = None,
         features: dict | None = None,
+        launch_mode: str | None = None,
     ) -> WorkspaceBringUpResult:
         """Provision or start a workspace runtime.
 
@@ -79,6 +81,7 @@ class OrchestratorService(ABC):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         container_id: str | None = None,
         requested_by: str | None = None,
         requested_config_version: int | None = None,
@@ -94,6 +97,7 @@ class OrchestratorService(ABC):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         container_id: str | None = None,
         requested_config_version: int,
         requested_by: str | None = None,
@@ -124,6 +128,7 @@ class OrchestratorService(ABC):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         archive_path: str,
     ) -> WorkspaceSnapshotOperationResult:
         """Write a compressed archive of the workspace project directory to ``archive_path``."""
@@ -133,6 +138,7 @@ class OrchestratorService(ABC):
         self,
         *,
         workspace_id: str,
+        project_storage_key: str | None = None,
         archive_path: str,
     ) -> WorkspaceSnapshotOperationResult:
         """Extract a snapshot archive into the workspace project directory (V1: overwrites files)."""

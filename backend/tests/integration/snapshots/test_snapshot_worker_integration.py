@@ -40,9 +40,11 @@ NODE_ID = "node-snap-1"
 def _export_writes_minimal_archive(
     *,
     workspace_id: str,
+    project_storage_key: str | None = None,
     archive_path: str,
 ) -> WorkspaceSnapshotOperationResult:
     """Autospec export mock must materialize a file: restore job checks ``os.path.isfile``."""
+    _ = project_storage_key
     p = Path(archive_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(p, "w:gz") as tf:

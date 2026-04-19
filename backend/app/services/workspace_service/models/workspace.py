@@ -1,6 +1,7 @@
 """Workspace aggregate root (control-plane metadata and transactional status)."""
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import Column, DateTime
 from sqlmodel import Field, SQLModel
@@ -12,6 +13,11 @@ class Workspace(SQLModel, table=True):
     __tablename__ = "workspace"
 
     workspace_id: int | None = Field(default=None, primary_key=True)
+    project_storage_key: str | None = Field(
+        default_factory=lambda: uuid4().hex,
+        index=True,
+        max_length=64,
+    )
     name: str = Field(index=True, max_length=255)
     description: str | None = Field(default=None, max_length=8192)
     owner_user_id: int = Field(foreign_key="user_auth.user_auth_id", index=True)

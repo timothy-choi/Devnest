@@ -249,6 +249,68 @@ class TestBringUpHappyPath:
             timeout_seconds=8.0,
         )
 
+    def test_same_workspace_id_with_different_storage_keys_uses_different_project_paths(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="run-a",
+            launch_mode="new",
+        )
+        first_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        mock_runtime.reset_mock()
+        _runtime_ok(mock_runtime)
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="run-b",
+            launch_mode="new",
+        )
+        second_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        assert first_path != second_path
+        assert first_path.endswith(f"{WORKSPACE_ID}-run-a")
+        assert second_path.endswith(f"{WORKSPACE_ID}-run-b")
+
+    def test_same_workspace_resume_reuses_same_project_path(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="persist-me",
+            launch_mode="new",
+        )
+        first_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        mock_runtime.reset_mock()
+        _runtime_ok(mock_runtime)
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="persist-me",
+            launch_mode="resume",
+        )
+        second_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        assert first_path == second_path
+
 
 class TestBringUpRuntimeFailures:
     def test_ensure_empty_container_id_raises_and_skips_topology_and_probe(

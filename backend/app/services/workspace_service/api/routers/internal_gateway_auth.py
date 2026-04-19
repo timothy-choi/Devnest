@@ -47,8 +47,10 @@ router = APIRouter(
     tags=["internal-gateway"],
 )
 
-# Primary pattern: ws-{integer}.{base_domain}
-_WS_HOST_RE = re.compile(r"^ws-(\d+)\.")
+# Primary patterns:
+#   ws-{integer}.{base_domain}
+#   ws-{integer}-{storage_key}.{base_domain}
+_WS_HOST_RE = re.compile(r"^ws-(\d+)(?:-[a-z0-9-]+)?\.")
 
 
 def _correlation_id_from_request(request: Request) -> str | None:
@@ -56,10 +58,11 @@ def _correlation_id_from_request(request: Request) -> str | None:
 
 
 def _workspace_id_from_host(host: str, base_domain: str) -> int | None:
-    """Extract workspace integer id from a hostname like ``ws-42.app.devnest.local``.
+    """Extract workspace integer id from hostnames like ``ws-42.app.devnest.local``.
 
-    Also accepts legacy ``{id}.{base_domain}`` (without the ``ws-`` prefix) for older route-admin
-    registrations so ForwardAuth and Traefik stay aligned when hosts are migrated.
+    Also accepts unique per-workspace hosts like ``ws-42-deadbeef.app.devnest.local`` and legacy
+    ``{id}.{base_domain}`` (without the ``ws-`` prefix) for older route-admin registrations so
+    ForwardAuth and Traefik stay aligned when hosts are migrated.
     """
     host_clean = (host or "").strip().split(":")[0].lower()
     m = _WS_HOST_RE.match(host_clean)

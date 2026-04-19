@@ -4,6 +4,7 @@ from collections.abc import Generator
 
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy import select
 
 from ..common.config import get_settings
 from ..topology.models import (  # noqa: F401 — register metadata
@@ -42,6 +43,7 @@ from ...services.integration_service.models import (  # noqa: F401 — register 
     WorkspaceCIConfig,
     WorkspaceRepository,
 )
+from ...services.node_execution_service.workspace_project_dir import prune_orphaned_workspace_project_dirs
 
 _engine = None
 _session_factory = None
@@ -95,6 +97,14 @@ def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     from app.services.placement_service.bootstrap import ensure_default_local_execution_node
 
+    settings = get_settings()
     with Session(engine) as session:
         ensure_default_local_execution_node(session)
+        if settings.devnest_workspace_projects_prune_orphans_on_startup:
+            live_refs = list(
+                session.exec(
+                    select(Workspace.workspace_id, Workspace.project_storage_key),  # type: ignore[arg-type]
+                ).all()
+            )
+            prune_orphaned_workspace_project_dirs(settings.workspace_projects_base, live_refs)
         session.commit()

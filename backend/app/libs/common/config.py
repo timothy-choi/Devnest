@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # the control plane container — mkdir/chown there do not fix host bind sources → set WORKSPACE_PROJECTS_BASE
     # to a path mounted from the host (see docker-compose.integration.yml).
     workspace_projects_base: str = ""
+    # When true, startup removes workspace project directories under ``workspace_projects_base`` that
+    # are no longer referenced by any current ``workspace`` row. Intended for ephemeral integration /
+    # EC2 restart flows where the DB resets but the host filesystem persists.
+    devnest_workspace_projects_prune_orphans_on_startup: bool = False
     # Root directory for snapshot archives (local filesystem provider). Empty → system temp / devnest-snapshots.
     devnest_snapshot_storage_root: str = ""
     # Snapshot storage backend: "local" (default) or "s3".
@@ -123,6 +127,7 @@ class Settings(BaseSettings):
     @field_validator(
         "devnest_gateway_enabled",
         "devnest_gateway_auth_enabled",
+        "devnest_workspace_projects_prune_orphans_on_startup",
         "devnest_reconcile_enabled",
         "devnest_topology_janitor_enabled",
         "devnest_rate_limit_enabled",

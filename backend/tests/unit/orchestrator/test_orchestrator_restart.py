@@ -116,7 +116,12 @@ class TestRestartHappyPath:
                 )
 
         m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by="operator-1")
-        m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=99)
+        m_up.assert_called_once_with(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key=None,
+            requested_config_version=99,
+            launch_mode="resume",
+        )
 
         assert out.success is True
         assert out.workspace_id == WORKSPACE_ID
@@ -298,7 +303,12 @@ class TestRestartPassthrough:
                     requested_config_version=42,
                 )
         m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by=None)
-        m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=42)
+        m_up.assert_called_once_with(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key=None,
+            requested_config_version=42,
+            launch_mode="resume",
+        )
 
     def test_requested_config_version_none_passthrough(
         self,
@@ -311,7 +321,12 @@ class TestRestartPassthrough:
         with patch.object(svc, "stop_workspace_runtime", return_value=_stop_ok_result()):
             with patch.object(svc, "bring_up_workspace_runtime", return_value=_bringup_ok_result()) as m_up:
                 svc.restart_workspace_runtime(workspace_id=WORKSPACE_ID, requested_config_version=None)
-        m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=None)
+        m_up.assert_called_once_with(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key=None,
+            requested_config_version=None,
+            launch_mode="resume",
+        )
 
     def test_requested_by_forwarded_to_stop_only(
         self,
@@ -329,7 +344,12 @@ class TestRestartPassthrough:
                     requested_config_version=3,
                 )
         m_stop.assert_called_once_with(workspace_id=WORKSPACE_ID, container_id=None, requested_by="audit-subject")
-        m_up.assert_called_once_with(workspace_id=WORKSPACE_ID, requested_config_version=3)
+        m_up.assert_called_once_with(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key=None,
+            requested_config_version=3,
+            launch_mode="resume",
+        )
 
 
 class TestRestartValidation:

@@ -198,6 +198,36 @@ def _workspace_project_bind(bind_mounts: tuple[BindMountInfo, ...]) -> BindMount
     return None
 
 
+def _bind_mount_signature(bind: BindMountInfo) -> tuple[str, str, bool]:
+    return (
+        str(bind.host_path).strip(),
+        str(bind.container_path).rstrip("/"),
+        bool(bind.read_only),
+    )
+
+
+def _requested_bind_signatures(
+    workspace_host_path: str | None,
+    extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None,
+) -> tuple[tuple[str, str, bool], ...] | None:
+    requested: list[tuple[str, str, bool]] = []
+    if workspace_host_path and str(workspace_host_path).strip():
+        host_path, proj_ro = _resolve_project_host_path_for_create(None, workspace_host_path)
+        requested.append((host_path, WORKSPACE_PROJECT_CONTAINER_PATH, proj_ro))
+    if extra_bind_mounts:
+        for spec in extra_bind_mounts:
+            hp = str(spec.host_path or "").strip()
+            cp = str(spec.container_path or "").strip().rstrip("/")
+            requested.append((hp, cp, bool(spec.read_only)))
+    if not requested:
+        return None
+    return tuple(sorted(requested))
+
+
+def _existing_bind_signatures(bind_mounts: tuple[BindMountInfo, ...]) -> tuple[tuple[str, str, bool], ...]:
+    return tuple(sorted(_bind_mount_signature(b) for b in bind_mounts))
+
+
 def _resolve_project_host_path_for_create(
     project_mount: WorkspaceProjectMountSpec | None,
     workspace_host_path: str | None,
@@ -450,6 +480,30 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             existing = self._get_container_if_exists(rid)
         if existing is None:
             existing = self._get_container_if_exists(name)
+
+        if existing is not None:
+            ins = _normalize_inspection(existing.attrs)
+            requested_binds = _requested_bind_signatures(workspace_host_path, extra_bind_mounts)
+            existing_binds = _existing_bind_signatures(ins.bind_mounts)
+            if requested_binds is not None and existing_binds != requested_binds:
+                logger.warning(
+                    "workspace_runtime_container_recreate_for_bind_mismatch",
+                    extra={
+                        "container_name": name,
+                        "container_id": ins.container_id,
+                        "requested_binds": requested_binds,
+                        "existing_binds": existing_binds,
+                    },
+                )
+                try:
+                    existing.remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+                except docker.errors.APIError as e:
+                    raise ContainerCreateError(
+                        f"failed to replace stale container {name!r} with mismatched bind mounts: {e}",
+                    ) from e
+                existing = None
 
         if existing is not None:
             ins = _normalize_inspection(existing.attrs)

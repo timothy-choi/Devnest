@@ -151,6 +151,8 @@ class TestCodeServerBindMounts:
         mounts = svc._code_server_extra_bind_mounts("99")
         for m in mounts:
             assert Path(m.host_path).is_dir()
+        cfg = tmp_path / "workspaces" / "99" / "code-server" / "config" / "config.yaml"
+        assert cfg.is_file()
 
     def test_no_mounts_when_wid_empty_and_no_base(self) -> None:
         """Empty workspace_id returns empty mounts."""
@@ -165,6 +167,45 @@ class TestCodeServerBindMounts:
         svc = _make_svc(tmp_path)
         mounts = svc._code_server_extra_bind_mounts("")
         assert mounts == []
+
+    def test_new_workspace_clears_stale_code_server_state_but_keeps_extensions(self, tmp_path: Path) -> None:
+        svc = _make_svc(tmp_path)
+        project_root = tmp_path / "workspaces" / "42-key"
+        data_root = project_root / "code-server" / "data"
+        (data_root / "User" / "workspaceStorage").mkdir(parents=True, exist_ok=True)
+        (data_root / "User" / "workspaceStorage" / "stale.txt").write_text("old")
+        (data_root / "History").mkdir(parents=True, exist_ok=True)
+        (data_root / "History" / "old.txt").write_text("old")
+        (data_root / "extensions").mkdir(parents=True, exist_ok=True)
+        (data_root / "extensions" / "keep.txt").write_text("keep")
+
+        mounts = svc._code_server_extra_bind_mounts(
+            "42",
+            str(project_root),
+            "new",
+        )
+
+        assert len(mounts) == 2
+        assert not (data_root / "User").exists()
+        assert not (data_root / "History").exists()
+        assert (data_root / "extensions" / "keep.txt").exists()
+
+    def test_resume_workspace_preserves_code_server_state(self, tmp_path: Path) -> None:
+        svc = _make_svc(tmp_path)
+        project_root = tmp_path / "workspaces" / "42-key"
+        data_root = project_root / "code-server" / "data"
+        (data_root / "User" / "workspaceStorage").mkdir(parents=True, exist_ok=True)
+        stale = data_root / "User" / "workspaceStorage" / "stale.txt"
+        stale.write_text("old")
+
+        mounts = svc._code_server_extra_bind_mounts(
+            "42",
+            str(project_root),
+            "resume",
+        )
+
+        assert len(mounts) == 2
+        assert stale.exists()
 
 
 class TestCodeServerBringUp:

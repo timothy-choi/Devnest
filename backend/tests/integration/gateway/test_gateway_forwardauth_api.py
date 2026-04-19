@@ -42,7 +42,14 @@ from app.services.workspace_service.services.workspace_session_service import (
 _BASE_DOMAIN = "app.devnest.local"
 
 
-def _ws_forwarded_host(workspace_id: int, base_domain: str = _BASE_DOMAIN) -> str:
+def _ws_forwarded_host(
+    workspace_id: int,
+    base_domain: str = _BASE_DOMAIN,
+    *,
+    storage_key: str | None = None,
+) -> str:
+    if storage_key:
+        return f"ws-{workspace_id}-{storage_key}.{base_domain}"
     return f"ws-{workspace_id}.{base_domain}"
 
 
@@ -243,6 +250,19 @@ class TestForwardAuthEnforcementMode:
             headers=_forwardauth_headers(
                 plain_token=plain_token,
                 forwarded_host=f"ws-{ws.workspace_id}.{_BASE_DOMAIN}:443",
+            ),
+        )
+        assert r.status_code == status.HTTP_200_OK
+
+    def test_storage_key_forwarded_host_returns_200(self, client, db_session: Session) -> None:
+        ws = _seed_running_workspace(db_session)
+        plain_token, _ = _seed_active_session(db_session, workspace_id=ws.workspace_id)
+
+        r = client.get(
+            "/internal/gateway/auth",
+            headers=_forwardauth_headers(
+                plain_token=plain_token,
+                forwarded_host=_ws_forwarded_host(ws.workspace_id, storage_key="deadbeef"),
             ),
         )
         assert r.status_code == status.HTTP_200_OK
