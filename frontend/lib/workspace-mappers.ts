@@ -113,6 +113,8 @@ function getStatusDetail(record: WorkspaceRecord) {
 
 export function toWorkspace(record: WorkspaceRecord): Workspace {
   const isBusy = BUSY_STATUSES.has(record.status);
+  const canOpen = record.status === "RUNNING";
+  const canStart = record.status === "STOPPED";
 
   return {
     id: record.id,
@@ -130,6 +132,8 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
     lastModifiedLabel: formatRelativeDate(record.updatedAt),
     pendingAction: null,
     isBusy,
+    canOpen,
+    canStart,
     canStop: record.status === "RUNNING",
     canRestart: record.status === "RUNNING" || record.status === "STOPPED",
     canDelete: record.status === "RUNNING" || record.status === "STOPPED" || record.status === "ERROR",

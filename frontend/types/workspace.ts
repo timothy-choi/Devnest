@@ -12,6 +12,8 @@ export type Workspace = {
   lastModifiedLabel: string;
   pendingAction: string | null;
   isBusy: boolean;
+  canOpen: boolean;
+  canStart: boolean;
   canStop: boolean;
   canRestart: boolean;
   canDelete: boolean;

@@ -3,6 +3,7 @@ import { useRouter } from "next/router";
 import { useEffect, useRef, useState } from "react";
 import { Code2, Loader2 } from "lucide-react";
 
+import { useAuth } from "@/hooks/use-auth";
 import { AuthGuard } from "@/components/auth/auth-guard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -20,12 +21,46 @@ type AttachJson = {
 
 export default function WorkspacePage() {
   const router = useRouter();
+  const { isAuthenticated, isLoading, isCheckingSession } = useAuth();
   const workspaceId = typeof router.query.id === "string" ? router.query.id : "preview";
   const [message, setMessage] = useState<string | null>(null);
   const opened = useRef(false);
 
+  const redirectToDashboard = () => {
+    if (typeof window === "undefined") {
+      void router.replace("/dashboard");
+      return;
+    }
+    window.location.replace("/dashboard");
+  };
+
   useEffect(() => {
-    if (workspaceId === "preview" || opened.current) {
+    opened.current = false;
+    setMessage(null);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!router.isReady || isLoading || isCheckingSession) {
+      return;
+    }
+    if (!isAuthenticated) {
+      return;
+    }
+    if (workspaceId === "preview") {
+      return;
+    }
+
+    const navEntry = typeof window !== "undefined" ? window.performance.getEntriesByType("navigation")[0] : null;
+    const navType =
+      navEntry && "type" in navEntry
+        ? String((navEntry as PerformanceNavigationTiming).type || "")
+        : "";
+    if (navType === "back_forward") {
+      opened.current = true;
+      redirectToDashboard();
+      return;
+    }
+    if (opened.current) {
       return;
     }
 
@@ -38,12 +73,14 @@ export default function WorkspacePage() {
         const detail = (await detailRes.json()) as WorkspaceDetailJson & { detail?: string };
         if (!detailRes.ok) {
           setMessage(typeof detail.detail === "string" ? detail.detail : "Unable to load workspace.");
+          redirectToDashboard();
           return;
         }
         if ((detail.status || "").toUpperCase() !== "RUNNING") {
           setMessage(
             "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
           );
+          redirectToDashboard();
           return;
         }
 
@@ -55,17 +92,19 @@ export default function WorkspacePage() {
         const attach = (await attachRes.json()) as AttachJson;
         if (!attachRes.ok) {
           setMessage(typeof attach.detail === "string" ? attach.detail : "Unable to attach to this workspace.");
+          redirectToDashboard();
           return;
         }
         if (!attach.accepted) {
           const fromIssues = attach.issues?.length ? attach.issues.join("; ") : null;
           setMessage(fromIssues || "Attach was not accepted for this workspace.");
+          redirectToDashboard();
           return;
         }
 
         const gatewayUrl = (attach.gateway_url || "").trim();
         if (gatewayUrl) {
-          window.location.assign(gatewayUrl);
+          window.location.replace(gatewayUrl);
           return;
         }
 
@@ -74,9 +113,11 @@ export default function WorkspacePage() {
             "(route-admin), and DEVNEST_BASE_DOMAIN aligned with Traefik Host rules. If Traefik is published on a " +
             "non-default port, set DEVNEST_GATEWAY_PUBLIC_PORT to match (see docker-compose.integration.yml).",
         );
+        redirectToDashboard();
       } catch {
         if (!cancelled) {
           setMessage("Something went wrong while opening the workspace.");
+          redirectToDashboard();
         }
       }
     };
@@ -85,7 +126,7 @@ export default function WorkspacePage() {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId]);
+  }, [isAuthenticated, isCheckingSession, isLoading, router, workspaceId]);
 
   return (
     <AuthGuard>
