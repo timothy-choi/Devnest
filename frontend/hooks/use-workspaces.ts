@@ -89,6 +89,13 @@ export function useWorkspaces() {
     },
     onMutate: async ({ id, action }) => {
       setActionError(null);
+      const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
+      if (action === "delete") {
+        queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+          current.filter((workspace) => workspace.id !== id),
+        );
+        return { previousWorkspaces };
+      }
       queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
         current.map((workspace) =>
           workspace.id === id
@@ -112,8 +119,12 @@ export function useWorkspaces() {
             : workspace,
         ),
       );
+      return { previousWorkspaces };
     },
-    onError: (error) => {
+    onError: (error, _variables, context) => {
+      if (context?.previousWorkspaces) {
+        queryClient.setQueryData<Workspace[]>(["workspaces"], context.previousWorkspaces);
+      }
       setActionError(error instanceof ApiError ? error.detail : "Unable to update the workspace right now.");
     },
     onSettled: () => {
