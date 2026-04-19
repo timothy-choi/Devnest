@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { browserApi } from "@/lib/api/browser-client";
@@ -139,11 +139,6 @@ export function useWorkspaces() {
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });
     },
   });
-
-  useEffect(() => {
-    const listedIds = new Set((workspacesQuery.data || []).map((workspace) => workspace.id));
-    setHiddenDeletedIds((current) => current.filter((id) => listedIds.has(id)));
-  }, [workspacesQuery.data]);
 
   const workspaces = useMemo(() => {
     return [...optimisticWorkspaces, ...(workspacesQuery.data || [])].filter(
