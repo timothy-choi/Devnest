@@ -254,10 +254,12 @@ services:
       dockerfile: Dockerfile.integration
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
+      NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
     depends_on:
       backend:
         condition: service_healthy
