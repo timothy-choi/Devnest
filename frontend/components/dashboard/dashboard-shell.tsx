@@ -1,6 +1,7 @@
 "use client";
 
 import { Plus, Search } from "lucide-react";
+import { useEffect } from "react";
 
 import { CreateWorkspaceDialog } from "@/components/dashboard/create-workspace-dialog";
 import { DashboardSidebar } from "@/components/dashboard/dashboard-sidebar";
@@ -12,6 +13,21 @@ import { useWorkspaces } from "@/hooks/use-workspaces";
 
 export function DashboardShell() {
   const workspaceState = useWorkspaces();
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.sessionStorage.removeItem("devnestWorkspaceReturnTarget");
+
+    const currentUrl = new URL(window.location.href);
+    if (currentUrl.pathname !== "/dashboard" || currentUrl.searchParams.get("workspaceReturn") !== "1") {
+      return;
+    }
+
+    window.history.replaceState(window.history.state, "", "/dashboard");
+  }, []);
 
   return (
     <main className="min-h-screen bg-[linear-gradient(180deg,_#f8fafc_0%,_#eef2ff_100%)] text-slate-900">

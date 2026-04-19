@@ -212,9 +212,10 @@ export function useWorkspaces() {
 
       const browserWindow = typeof globalThis !== "undefined" ? globalThis.window : undefined;
       if (browserWindow) {
-        const dashboardUrl = `${browserWindow.location.origin}/dashboard`;
+        browserWindow.sessionStorage.setItem("devnestWorkspaceReturnTarget", "/dashboard");
+        const dashboardUrl = new URL("/dashboard?workspaceReturn=1", browserWindow.location.origin).toString();
         browserWindow.history.pushState({ devnestWorkspaceReturn: true }, "", dashboardUrl);
-        browserWindow.location.replace(gatewayUrl);
+        browserWindow.location.assign(gatewayUrl);
         return;
       }
 
