@@ -77,7 +77,13 @@ def _process_job(client, db_session: Session, job_id: int) -> dict:
     return body
 
 
-def _export_writes_minimal_archive(*, workspace_id: str, archive_path: str) -> WorkspaceSnapshotOperationResult:
+def _export_writes_minimal_archive(
+    *,
+    workspace_id: str,
+    project_storage_key: str | None = None,
+    archive_path: str,
+) -> WorkspaceSnapshotOperationResult:
+    _ = project_storage_key
     p = Path(archive_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"x" * 32)

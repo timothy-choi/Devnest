@@ -23,14 +23,21 @@ class NodeExecutionBundle:
     ``ssm_docker`` sets ``runtime_adapter`` to :class:`~app.libs.runtime.ssm_docker_runtime.SsmDockerRuntimeAdapter`.
 
     ``service_reachability_runner`` when set causes :class:`~app.libs.probes.probe_runner.DefaultProbeRunner`
-    to verify IDE TCP reachability **from the execution host**.
+    to verify IDE TCP/HTTP reachability **from the execution host** (``nc``/``curl`` via that runner).
+    For local Docker + ``DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER``, this is a host-netns wrapper so probes
+    share routing with topology ``ip`` (see :class:`~app.libs.topology.system.host_nsenter_command_runner.HostPid1NsenterProbeRunner`).
     """
 
     docker_client: docker.DockerClient | None
     topology_command_runner: CommandRunner
     service_reachability_runner: CommandRunner | None
-    _ensure_project_dir: Callable[[str, str], str]
+    _ensure_project_dir: Callable[[str, str, str | None], str]
     runtime_adapter: RuntimeAdapter | None = None
 
-    def ensure_workspace_project_dir(self, projects_base: str, workspace_id: str) -> str:
-        return self._ensure_project_dir(projects_base, workspace_id)
+    def ensure_workspace_project_dir(
+        self,
+        projects_base: str,
+        workspace_id: str,
+        project_storage_key: str | None = None,
+    ) -> str:
+        return self._ensure_project_dir(projects_base, workspace_id, project_storage_key)

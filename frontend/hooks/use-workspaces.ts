@@ -14,6 +14,7 @@ export function useWorkspaces() {
   const [query, setQuery] = useState("");
   const [isCreateDialogOpen, setCreateDialogOpen] = useState(false);
   const [optimisticWorkspaces, setOptimisticWorkspaces] = useState<Workspace[]>([]);
+  const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -54,6 +55,8 @@ export function useWorkspaces() {
         lastModifiedLabel: "Just now",
         pendingAction: "Creating",
         isBusy: true,
+        canOpen: false,
+        canStart: false,
         canStop: false,
         canRestart: false,
         canDelete: false,
@@ -87,13 +90,19 @@ export function useWorkspaces() {
     },
     onMutate: async ({ id, action }) => {
       setActionError(null);
+      const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
       queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
         current.map((workspace) =>
           workspace.id === id
             ? {
                 ...workspace,
                 pendingAction: action === "stop" ? "Stopping" : action === "restart" ? "Restarting" : "Deleting",
-                status: action === "restart" ? "restarting" : action === "stop" ? "setting-up" : workspace.status,
+                status:
+                  action === "restart"
+                    ? "restarting"
+                    : action === "stop"
+                      ? "setting-up"
+                      : workspace.status,
                 rawStatus: action === "restart" ? "RESTARTING" : action === "stop" ? "STOPPING" : "DELETING",
                 statusLabel: action === "restart" ? "Restarting..." : action === "stop" ? "Stopping..." : "Deleting...",
                 statusDetail:
@@ -110,8 +119,20 @@ export function useWorkspaces() {
             : workspace,
         ),
       );
+      return { previousWorkspaces };
     },
-    onError: (error) => {
+    onSuccess: (_response, variables) => {
+      if (variables.action === "delete") {
+        setHiddenDeletedIds((current) => (current.includes(variables.id) ? current : [...current, variables.id]));
+        queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+          current.filter((workspace) => workspace.id !== variables.id),
+        );
+      }
+    },
+    onError: (error, _variables, context) => {
+      if (context?.previousWorkspaces) {
+        queryClient.setQueryData<Workspace[]>(["workspaces"], context.previousWorkspaces);
+      }
       setActionError(error instanceof ApiError ? error.detail : "Unable to update the workspace right now.");
     },
     onSettled: () => {
@@ -120,8 +141,10 @@ export function useWorkspaces() {
   });
 
   const workspaces = useMemo(() => {
-    return [...optimisticWorkspaces, ...(workspacesQuery.data || [])];
-  }, [optimisticWorkspaces, workspacesQuery.data]);
+    return [...optimisticWorkspaces, ...(workspacesQuery.data || [])].filter(
+      (workspace) => !hiddenDeletedIds.includes(workspace.id),
+    );
+  }, [hiddenDeletedIds, optimisticWorkspaces, workspacesQuery.data]);
 
   const filteredWorkspaces = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -137,6 +160,72 @@ export function useWorkspaces() {
       );
     });
   }, [query, workspaces]);
+
+  const openWorkspace = async (id: string) => {
+    const workspaceId = Number(id);
+    if (!Number.isFinite(workspaceId)) {
+      setActionError("Invalid workspace id.");
+      return;
+    }
+
+    setActionError(null);
+    const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
+    queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+      current.map((workspace) =>
+        workspace.id === workspaceId
+          ? {
+              ...workspace,
+              pendingAction: "Opening",
+              statusDetail: "Preparing workspace session and redirecting to the IDE.",
+              isBusy: true,
+              canOpen: false,
+              canStart: false,
+              canStop: false,
+              canRestart: false,
+              canDelete: false,
+            }
+          : workspace,
+      ),
+    );
+
+    try {
+        const detail = await browserApi.workspaces.get(workspaceId);
+        if ((detail.status || "").toUpperCase() !== "RUNNING") {
+          throw new ApiError(
+            409,
+            "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
+          );
+        }
+
+      const attach = await browserApi.workspaces.attach(workspaceId);
+      if (!attach.accepted) {
+        throw new ApiError(
+          409,
+          attach.issues?.length ? attach.issues.join("; ") : "Attach was not accepted for this workspace.",
+        );
+      }
+
+      const gatewayUrl = (attach.gateway_url || "").trim();
+      if (!gatewayUrl) {
+        throw new ApiError(502, "No gateway URL was returned for this workspace.");
+      }
+
+      const browserWindow = typeof globalThis !== "undefined" ? globalThis.window : undefined;
+      if (browserWindow) {
+        browserWindow.sessionStorage.setItem("devnestWorkspaceReturnTarget", "/dashboard");
+        const dashboardUrl = new URL("/dashboard?workspaceReturn=1", browserWindow.location.origin).toString();
+        browserWindow.history.pushState({ devnestWorkspaceReturn: true }, "", dashboardUrl);
+        browserWindow.location.assign(gatewayUrl);
+        return;
+      }
+
+      globalThis.location?.assign(gatewayUrl);
+      return;
+    } catch (error) {
+      queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);
+      setActionError(error instanceof ApiError ? error.detail : "Unable to open the workspace right now.");
+    }
+  };
 
   return {
     workspaces,
@@ -155,6 +244,7 @@ export function useWorkspaces() {
     createWorkspace: async (values: WorkspaceFormValues) => {
       await createMutation.mutateAsync(values);
     },
+    openWorkspace,
     stopWorkspace: async (id: string) => {
       await actionMutation.mutateAsync({ id: Number(id), action: "stop" });
     },

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
+import time
 from collections.abc import Mapping, Sequence
 
 import docker
@@ -30,6 +33,8 @@ from .models import (
     WorkspaceProjectMountSpec,
 )
 
+logger = logging.getLogger(__name__)
+
 # Matches Dockerfile.workspace default tag; override with DEVNEST_WORKSPACE_IMAGE.
 _DEFAULT_WORKSPACE_IMAGE = "devnest/workspace:latest"
 # Seconds between SIGTERM and SIGKILL on ``docker stop`` (override via env).
@@ -46,6 +51,14 @@ def _default_stop_timeout_s() -> int:
 def _container_state_needs_engine_stop(container_state: str) -> bool:
     """States where Docker should receive ``stop`` (running or transient/active)."""
     return container_state in frozenset({"running", "restarting", "paused"})
+
+
+def _image_cmd_hint_from_attrs(attrs: dict) -> str:
+    """Human-readable ``Config.Entrypoint`` / ``Config.Cmd`` for startup failure messages."""
+    cfg = attrs.get("Config") or {}
+    ep = cfg.get("Entrypoint")
+    cmd = cfg.get("Cmd")
+    return f"; image entrypoint={ep!r} cmd={cmd!r}"
 
 
 def _default_workspace_image() -> str:
@@ -70,6 +83,9 @@ def _inspection_not_found() -> ContainerInspectionResult:
         bind_mounts=(),
         workspace_project_mount=None,
         labels=(),
+        started_at=None,
+        finished_at=None,
+        exit_code=None,
     )
 
 
@@ -182,6 +198,36 @@ def _workspace_project_bind(bind_mounts: tuple[BindMountInfo, ...]) -> BindMount
     return None
 
 
+def _bind_mount_signature(bind: BindMountInfo) -> tuple[str, str, bool]:
+    return (
+        str(bind.host_path).strip(),
+        str(bind.container_path).rstrip("/"),
+        bool(bind.read_only),
+    )
+
+
+def _requested_bind_signatures(
+    workspace_host_path: str | None,
+    extra_bind_mounts: Sequence[WorkspaceExtraBindMountSpec] | None,
+) -> tuple[tuple[str, str, bool], ...] | None:
+    requested: list[tuple[str, str, bool]] = []
+    if workspace_host_path and str(workspace_host_path).strip():
+        host_path, proj_ro = _resolve_project_host_path_for_create(None, workspace_host_path)
+        requested.append((host_path, WORKSPACE_PROJECT_CONTAINER_PATH, proj_ro))
+    if extra_bind_mounts:
+        for spec in extra_bind_mounts:
+            hp = str(spec.host_path or "").strip()
+            cp = str(spec.container_path or "").strip().rstrip("/")
+            requested.append((hp, cp, bool(spec.read_only)))
+    if not requested:
+        return None
+    return tuple(sorted(requested))
+
+
+def _existing_bind_signatures(bind_mounts: tuple[BindMountInfo, ...]) -> tuple[tuple[str, str, bool], ...]:
+    return tuple(sorted(_bind_mount_signature(b) for b in bind_mounts))
+
+
 def _resolve_project_host_path_for_create(
     project_mount: WorkspaceProjectMountSpec | None,
     workspace_host_path: str | None,
@@ -255,7 +301,26 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
     if raw_pid is None or raw_pid == 0:
         pid = None
     else:
-        pid = int(raw_pid)
+        try:
+            p = int(raw_pid)
+        except (TypeError, ValueError):
+            pid = None
+        else:
+            pid = None if p <= 0 else p
+
+    started_raw = state.get("StartedAt")
+    finished_raw = state.get("FinishedAt")
+    started_at = str(started_raw).strip() if started_raw not in (None, "") else None
+    finished_at = str(finished_raw).strip() if finished_raw not in (None, "") else None
+    raw_exit = state.get("ExitCode")
+    exit_code: int | None
+    if raw_exit is None:
+        exit_code = None
+    else:
+        try:
+            exit_code = int(raw_exit)
+        except (TypeError, ValueError):
+            exit_code = None
 
     cid = attrs.get("Id")
     if cid is None:
@@ -276,6 +341,9 @@ def _normalize_inspection(attrs: dict) -> ContainerInspectionResult:
         bind_mounts=bind_mounts,
         workspace_project_mount=_workspace_project_bind(bind_mounts),
         labels=_normalize_inspection_labels(attrs),
+        started_at=started_at,
+        finished_at=finished_at,
+        exit_code=exit_code,
     )
 
 
@@ -356,6 +424,17 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             return _inspection_not_found()
         return _normalize_inspection(ctr.attrs)
 
+    def fetch_container_log_tail(self, *, container_id: str, lines: int = 80) -> str:
+        n = max(1, min(int(lines), 4096))
+        try:
+            ctr = self._client.containers.get(container_id)
+            raw = ctr.logs(tail=n)
+        except Exception:
+            return ""
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return str(raw)
+
     def ensure_container(
         self,
         *,
@@ -401,6 +480,30 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             existing = self._get_container_if_exists(rid)
         if existing is None:
             existing = self._get_container_if_exists(name)
+
+        if existing is not None:
+            ins = _normalize_inspection(existing.attrs)
+            requested_binds = _requested_bind_signatures(workspace_host_path, extra_bind_mounts)
+            existing_binds = _existing_bind_signatures(ins.bind_mounts)
+            if requested_binds is not None and existing_binds != requested_binds:
+                logger.warning(
+                    "workspace_runtime_container_recreate_for_bind_mismatch",
+                    extra={
+                        "container_name": name,
+                        "container_id": ins.container_id,
+                        "requested_binds": requested_binds,
+                        "existing_binds": existing_binds,
+                    },
+                )
+                try:
+                    existing.remove(force=True)
+                except docker.errors.NotFound:
+                    pass
+                except docker.errors.APIError as e:
+                    raise ContainerCreateError(
+                        f"failed to replace stale container {name!r} with mismatched bind mounts: {e}",
+                    ) from e
+                existing = None
 
         if existing is not None:
             ins = _normalize_inspection(existing.attrs)
@@ -477,6 +580,16 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         ctr.reload()
         ins = _normalize_inspection(ctr.attrs)
         resolved = ins.ports if ins.ports else _resolved_ports_tuple(port_bindings)
+        logger.info(
+            "workspace_runtime_docker_create",
+            extra={
+                "container_id": ins.container_id,
+                "container_state": ins.container_state,
+                "started_at": ins.started_at,
+                "finished_at": ins.finished_at,
+                "pid": ins.pid,
+            },
+        )
         return RuntimeEnsureResult(
             container_id=ins.container_id or "",
             exists=True,
@@ -531,13 +644,35 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             raise ContainerStartError(str(e)) from e
 
         after = self.inspect_container(container_id=container_id)
+        logger.info(
+            "workspace_runtime_docker_start",
+            extra={
+                "container_id": after.container_id or container_id,
+                "container_state": after.container_state,
+                "pid": after.pid,
+                "started_at": after.started_at,
+                "finished_at": after.finished_at,
+                "exit_code": after.exit_code,
+            },
+        )
+        if after.container_state == "running":
+            return RuntimeActionResult(
+                container_id=after.container_id or container_id,
+                container_state=after.container_state,
+                success=True,
+                message=None,
+            )
+        hint = ""
+        try:
+            ctr = self._client.containers.get(container_id)
+            hint = _image_cmd_hint_from_attrs(ctr.attrs)
+        except Exception:
+            pass
         return RuntimeActionResult(
             container_id=after.container_id or container_id,
             container_state=after.container_state,
-            success=after.container_state == "running",
-            message=None
-            if after.container_state == "running"
-            else f"unexpected state after start: {after.container_state}",
+            success=False,
+            message=f"unexpected state after start: {after.container_state}{hint}",
         )
 
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
@@ -641,11 +776,24 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             raise ContainerNotFoundError(f"container not found after restart: {container_id!r}")
         cid_out = after.container_id or container_id
         ok = after.container_state == "running"
+        if ok:
+            return RuntimeActionResult(
+                container_id=cid_out,
+                container_state=after.container_state,
+                success=True,
+                message=None,
+            )
+        hint = ""
+        try:
+            ctr = self._client.containers.get(container_id)
+            hint = _image_cmd_hint_from_attrs(ctr.attrs)
+        except Exception:
+            pass
         return RuntimeActionResult(
             container_id=cid_out,
             container_state=after.container_state,
-            success=ok,
-            message=None if ok else f"unexpected state after restart: {after.container_state}",
+            success=False,
+            message=f"unexpected state after restart: {after.container_state}{hint}",
         )
 
     def delete_container(self, *, container_id: str) -> RuntimeActionResult:
@@ -719,16 +867,49 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         Uses Docker ``State.Pid`` (host PID namespace, container init) per Engine API; ``netns_ref``
         is the Linux path ``/proc/<pid>/ns/net`` on the Docker host.
 
+        Retries briefly while the engine reports running but PID is not yet visible (startup race).
+
         Raises:
             NetnsRefError: Missing container, or no valid host PID (typically when not running).
         """
-        ins = self.inspect_container(container_id=container_id)
-        if not ins.exists or not ins.container_id:
-            raise NetnsRefError(f"container not found: {container_id!r}")
-        if ins.pid is None or ins.pid <= 0:
-            raise NetnsRefError(
-                f"no host PID for container {ins.container_id!r} (is the container running?)",
-            )
-        # Engine reports init PID in the host PID namespace for running containers.
-        ref = f"/proc/{ins.pid}/ns/net"
-        return NetnsRefResult(container_id=ins.container_id, pid=ins.pid, netns_ref=ref)
+        last_ins: ContainerInspectionResult | None = None
+        for _ in range(50):
+            ins = self.inspect_container(container_id=container_id)
+            last_ins = ins
+            if not ins.exists or not ins.container_id:
+                raise NetnsRefError(f"container not found: {container_id!r}")
+            if ins.pid is not None and ins.pid > 0:
+                # /proc only exists on Linux; topology attach is Linux-only in production.
+                if sys.platform != "linux" or os.path.isdir(f"/proc/{ins.pid}"):
+                    ref = f"/proc/{ins.pid}/ns/net"
+                    return NetnsRefResult(container_id=ins.container_id, pid=ins.pid, netns_ref=ref)
+                raise NetnsRefError(
+                    f"host PID {ins.pid} for container {ins.container_id!r} is not visible under "
+                    f"/proc/{ins.pid} in this process namespace — run the control plane with "
+                    f"`pid: host` (Docker Compose) so `ip link set … netns` can resolve workspace PIDs",
+                )
+            if ins.container_state not in ("running", "restarting", "created", "paused"):
+                break
+            time.sleep(0.1)
+        ins = last_ins
+        assert ins is not None
+        log_hint = ""
+        cid = ins.container_id or container_id
+        if ins.container_state == "exited":
+            try:
+                ctr = self._client.containers.get(cid)
+                raw = ctr.logs(tail=48).decode("utf-8", errors="replace").strip()
+                if raw:
+                    tail = raw[-2000:]
+                    log_hint = (
+                        "\n--- workspace container log tail (runtime startup; not topology) ---\n"
+                        f"{tail}"
+                    )
+            except Exception:
+                log_hint = ""
+        raise NetnsRefError(
+            f"no host PID for container {cid!r} after waiting (state={ins.container_state!r}). "
+            "If the container exited immediately, this is usually a workspace runtime startup failure "
+            "(e.g. code-server cannot write bind-mounted config under /home/coder/.config/code-server), "
+            f"not a topology attachment issue.{log_hint}",
+        )

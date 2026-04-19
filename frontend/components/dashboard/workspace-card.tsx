@@ -1,7 +1,6 @@
 "use client";
 
-import Link from "next/link";
-import { Download, MoreVertical, PlayCircle, RotateCcw, Square, Trash2 } from "lucide-react";
+import { Download, Loader2, MoreVertical, PlayCircle, RotateCcw, Square, Trash2 } from "lucide-react";
 
 import { DetailedStatusBadge } from "@/components/dashboard/workspace-status-badge";
 import {
@@ -16,6 +15,7 @@ import { Workspace } from "@/types/workspace";
 
 type WorkspaceCardProps = {
   workspace: Workspace;
+  onOpen: (id: string) => void;
   onStop: (id: string) => void;
   onRestart: (id: string) => void;
   onDelete: (id: string) => void;
@@ -25,6 +25,7 @@ type WorkspaceCardProps = {
 
 export function WorkspaceCard({
   workspace,
+  onOpen,
   onStop,
   onRestart,
   onDelete,
@@ -32,9 +33,22 @@ export function WorkspaceCard({
   onRunWorkflow,
 }: WorkspaceCardProps) {
   const isPending = workspace.pendingAction !== null;
+  const isDeleting = workspace.pendingAction === "Deleting";
+  const primaryActionDisabled = isPending || (!workspace.canOpen && !workspace.canStart);
+  const primaryActionLabel = workspace.pendingAction
+    ? `${workspace.pendingAction}...`
+    : workspace.canOpen
+      ? "Open workspace"
+      : workspace.canStart
+        ? "Start workspace"
+        : workspace.statusLabel;
 
   return (
-    <Card className="group overflow-hidden rounded-[28px] border-white/80 bg-white/88 shadow-[0_24px_65px_-42px_rgba(15,23,42,0.5)] transition hover:-translate-y-0.5 hover:shadow-[0_28px_75px_-42px_rgba(15,23,42,0.55)]">
+    <Card
+      className={`group overflow-hidden rounded-[28px] border-white/80 bg-white/88 shadow-[0_24px_65px_-42px_rgba(15,23,42,0.5)] transition ${
+        isDeleting ? "opacity-75" : "hover:-translate-y-0.5 hover:shadow-[0_28px_75px_-42px_rgba(15,23,42,0.55)]"
+      }`}
+    >
       <CardHeader className="flex flex-row items-start justify-between gap-4 pb-4">
         <div className="space-y-3">
           <DetailedStatusBadge workspace={workspace} />
@@ -49,8 +63,9 @@ export function WorkspaceCard({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-800"
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 transition hover:border-slate-300 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label={`Open actions for ${workspace.name}`}
+              disabled={isPending}
             >
               <MoreVertical className="h-4 w-4" />
             </button>
@@ -62,7 +77,7 @@ export function WorkspaceCard({
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onRestart(String(workspace.id))} disabled={isPending || !workspace.canRestart}>
               <RotateCcw className="h-4 w-4" />
-              Restart
+              {workspace.canStart ? "Start" : "Restart"}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onDownload(String(workspace.id))} disabled>
               <Download className="h-4 w-4" />
@@ -97,21 +112,29 @@ export function WorkspaceCard({
           </div>
         </div>
 
-        <Link href={`/workspace/${workspace.id}`}>
-          <a
-            className={`flex items-center justify-center rounded-2xl px-4 py-3 text-sm font-medium text-white transition ${
-              workspace.isBusy ? "cursor-not-allowed bg-slate-400" : "bg-slate-950 hover:bg-slate-800"
-            }`}
-            aria-disabled={workspace.isBusy}
-            onClick={(event) => {
-              if (workspace.isBusy) {
-                event.preventDefault();
-              }
-            }}
-          >
-            {workspace.pendingAction ? `${workspace.pendingAction}...` : workspace.isBusy ? workspace.statusLabel : "Open workspace"}
-          </a>
-        </Link>
+        <button
+          type="button"
+          className={`flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium text-white transition ${
+            primaryActionDisabled
+              ? "cursor-not-allowed bg-slate-400"
+              : workspace.canOpen
+                ? "bg-slate-950 hover:bg-slate-800"
+                : "bg-sky-700 hover:bg-sky-600"
+          }`}
+          disabled={primaryActionDisabled}
+          onClick={() => {
+            if (workspace.canOpen) {
+              onOpen(String(workspace.id));
+              return;
+            }
+            if (workspace.canStart) {
+              onRestart(String(workspace.id));
+            }
+          }}
+        >
+          {isDeleting || workspace.pendingAction === "Opening" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          {primaryActionLabel}
+        </button>
       </CardContent>
     </Card>
   );

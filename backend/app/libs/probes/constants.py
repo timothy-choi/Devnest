@@ -32,5 +32,6 @@ class ProbeIssueCode(str, Enum):
     # HTTP-level readiness: TCP connected but service returned an error or is still initialising.
     SERVICE_HTTP_NOT_READY = "SERVICE_HTTP_NOT_READY"
 
-    # Probe runner / execution
+    # Probe runner / execution (host TCP probe uses ``nc`` + ``timeout`` from the worker/API image)
     PROBE_EXECUTION_FAILED = "PROBE_EXECUTION_FAILED"
+    PROBE_RUNTIME_BINARY_MISSING = "PROBE_RUNTIME_BINARY_MISSING"

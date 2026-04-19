@@ -65,6 +65,25 @@ def check_bridge_link_up(bridge_name: str, *, runner: CommandRunner | None = Non
     return False
 
 
+def _ipv4_iface_on_dev_from_ip_addr_output(out: str, want_if: ipaddress.IPv4Interface) -> bool:
+    """Parse ``ip -4 addr show`` / ``ip -o -4 addr show`` text for ``inet …/prefix`` matching ``want_if``."""
+    for line in out.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+        i = parts.index("inet")
+        if i + 1 >= len(parts):
+            continue
+        token = parts[i + 1]
+        try:
+            iface = ipaddress.ip_interface(token)
+        except ValueError:
+            continue
+        if iface.ip == want_if.ip and iface.network.prefixlen == want_if.network.prefixlen:
+            return True
+    return False
+
+
 def check_bridge_has_ipv4_address(
     bridge_name: str,
     gateway_ip: str,
@@ -89,23 +108,16 @@ def check_bridge_has_ipv4_address(
     want_if = ipaddress.ip_interface(f"{gw}/{net.prefixlen}")
     try:
         out = r.run(["ip", "-o", "-4", "addr", "show", "dev", br])
+        if _ipv4_iface_on_dev_from_ip_addr_output(out, want_if):
+            return True
+    except RuntimeError:
+        pass
+    # Fallback: some iproute2 builds / wrappers omit fields in ``-o`` output; full ``show`` is more stable.
+    try:
+        out2 = r.run(["ip", "-4", "addr", "show", "dev", br])
+        return _ipv4_iface_on_dev_from_ip_addr_output(out2, want_if)
     except RuntimeError:
         return False
-    for line in out.splitlines():
-        parts = line.split()
-        if "inet" not in parts:
-            continue
-        i = parts.index("inet")
-        if i + 1 >= len(parts):
-            continue
-        token = parts[i + 1]
-        try:
-            iface = ipaddress.ip_interface(token)
-        except ValueError:
-            continue
-        if iface.ip == want_if.ip and iface.network.prefixlen == want_if.network.prefixlen:
-            return True
-    return False
 
 
 def remove_bridge_if_exists(bridge_name: str, *, runner: CommandRunner | None = None) -> None:
@@ -186,8 +198,21 @@ def ensure_bridge_address(
         return
     try:
         r.run(["ip", "addr", "add", addr, "dev", br])
-    except RuntimeError:
+    except RuntimeError as e:
         if check_bridge_has_ipv4_address(br, gw_s, cidr, runner=r):
             return
+        # Race or iproute2 duplicate wording: treat as success if the address is now present.
+        err_l = str(e).lower()
+        if any(
+            token in err_l
+            for token in (
+                "file exists",
+                "already exists",
+                "address already",
+                "rtnetlink answers: file exists",
+            )
+        ):
+            if check_bridge_has_ipv4_address(br, gw_s, cidr, runner=r):
+                return
         raise
 

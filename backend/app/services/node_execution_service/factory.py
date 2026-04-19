@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from urllib.parse import quote
 
 import docker
@@ -10,6 +11,10 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 from app.libs.runtime.ssm_docker_runtime import SsmDockerRuntimeAdapter
 from app.libs.topology.system.command_runner import CommandRunner
+from app.libs.topology.system.host_nsenter_command_runner import (
+    HostPid1NsenterProbeRunner,
+    HostPid1NsenterRunner,
+)
 
 from app.services.placement_service.models import (
     ExecutionNode,
@@ -98,6 +103,16 @@ def resolve_node_execution_bundle(
     return _bundle_local_docker()
 
 
+def _topology_ip_should_use_host_nsenter() -> bool:
+    """When true, topology ``ip`` runs under ``nsenter -t 1 …`` (host init net/pid/mount view)."""
+    return os.environ.get("DEVNEST_TOPOLOGY_IP_VIA_HOST_NSENTER", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _bundle_local_docker() -> NodeExecutionBundle:
     try:
         client = docker.from_env()
@@ -106,11 +121,19 @@ def _bundle_local_docker() -> NodeExecutionBundle:
         raise NodeExecutionBindingError(
             f"Docker engine not available for local execution: {e}",
         ) from e
-    runner = CommandRunner()
+    base_runner = CommandRunner()
+    if _topology_ip_should_use_host_nsenter():
+        topology_runner: CommandRunner = HostPid1NsenterRunner(base_runner)
+        # IDE TCP/HTTP probes must use the host netns too; ``socket`` from the sidecar netns is not
+        # reliably routed to topology bridge addresses (see HostPid1NsenterProbeRunner docstring).
+        service_runner: CommandRunner | None = HostPid1NsenterProbeRunner(base_runner)
+    else:
+        topology_runner = base_runner
+        service_runner = None
     return NodeExecutionBundle(
         docker_client=client,
-        topology_command_runner=runner,
-        service_reachability_runner=None,
+        topology_command_runner=topology_runner,
+        service_reachability_runner=service_runner,
         _ensure_project_dir=default_local_ensure_workspace_project_dir,
         runtime_adapter=None,
     )
@@ -143,8 +166,8 @@ def _bundle_ssm_docker(node: ExecutionNode) -> NodeExecutionBundle:
 
     runtime = SsmDockerRuntimeAdapter(ssm_runner)
 
-    def _ensure(base: str, wid: str) -> str:
-        return remote_shell_ensure_workspace_project_dir(ssm_runner, base, wid)
+    def _ensure(base: str, wid: str, project_storage_key: str | None = None) -> str:
+        return remote_shell_ensure_workspace_project_dir(ssm_runner, base, wid, project_storage_key)
 
     return NodeExecutionBundle(
         docker_client=None,
@@ -182,8 +205,8 @@ def _bundle_ssh_docker(node: ExecutionNode) -> NodeExecutionBundle:
 
     ssh_runner = SshRemoteCommandRunner(ssh_user=user, ssh_host=host, ssh_port=port)
 
-    def _ensure(base: str, wid: str) -> str:
-        return ssh_remote_ensure_workspace_project_dir(ssh_runner, base, wid)
+    def _ensure(base: str, wid: str, project_storage_key: str | None = None) -> str:
+        return ssh_remote_ensure_workspace_project_dir(ssh_runner, base, wid, project_storage_key)
 
     return NodeExecutionBundle(
         docker_client=client,

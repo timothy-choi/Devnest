@@ -8,6 +8,7 @@ Project bind paths must be **absolute on the remote Linux host** (``/var/...``),
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 
 from app.libs.topology.system.command_runner import CommandRunner
@@ -20,6 +21,7 @@ from .docker_runtime import (
     _container_state_needs_engine_stop,
     _default_stop_timeout_s,
     _extra_bind_strings,
+    _image_cmd_hint_from_attrs,
     _inspection_not_found,
     _normalize_inspection,
     _port_bindings_from_spec,
@@ -41,6 +43,8 @@ from .models import (
     RuntimeActionResult,
     RuntimeEnsureResult,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_project_host_path_remote(
@@ -95,6 +99,13 @@ class SsmDockerRuntimeAdapter(RuntimeAdapter):
         if not data or not isinstance(data, list):
             return _inspection_not_found()
         return _normalize_inspection(data[0])
+
+    def fetch_container_log_tail(self, *, container_id: str, lines: int = 80) -> str:
+        n = max(1, min(int(lines), 4096))
+        try:
+            return (self._runner.run(["docker", "logs", "--tail", str(n), container_id]) or "").strip()
+        except Exception:
+            return ""
 
     def ensure_container(
         self,
@@ -202,6 +213,16 @@ class SsmDockerRuntimeAdapter(RuntimeAdapter):
 
         ins = self.inspect_container(container_id=cid)
         resolved = ins.ports if ins.ports else _resolved_ports_tuple(port_bindings)
+        logger.info(
+            "workspace_runtime_docker_create_remote",
+            extra={
+                "container_id": ins.container_id or cid,
+                "container_state": ins.container_state,
+                "started_at": ins.started_at,
+                "finished_at": ins.finished_at,
+                "pid": ins.pid,
+            },
+        )
         return RuntimeEnsureResult(
             container_id=ins.container_id or cid,
             exists=True,
@@ -237,13 +258,37 @@ class SsmDockerRuntimeAdapter(RuntimeAdapter):
         except RuntimeError as e:
             raise ContainerStartError(str(e)) from e
         after = self.inspect_container(container_id=container_id)
+        logger.info(
+            "workspace_runtime_docker_start_remote",
+            extra={
+                "container_id": after.container_id or container_id,
+                "container_state": after.container_state,
+                "pid": after.pid,
+                "started_at": after.started_at,
+                "finished_at": after.finished_at,
+                "exit_code": after.exit_code,
+            },
+        )
+        if after.container_state == "running":
+            return RuntimeActionResult(
+                container_id=after.container_id or container_id,
+                container_state=after.container_state,
+                success=True,
+                message=None,
+            )
+        hint = ""
+        try:
+            out = self._runner.run(["docker", "inspect", container_id])
+            data = json.loads(out)
+            if data and isinstance(data, list) and isinstance(data[0], dict):
+                hint = _image_cmd_hint_from_attrs(data[0])
+        except Exception:
+            pass
         return RuntimeActionResult(
             container_id=after.container_id or container_id,
             container_state=after.container_state,
-            success=after.container_state == "running",
-            message=None
-            if after.container_state == "running"
-            else f"unexpected state after start: {after.container_state}",
+            success=False,
+            message=f"unexpected state after start: {after.container_state}{hint}",
         )
 
     def stop_container(self, *, container_id: str) -> RuntimeActionResult:
@@ -319,11 +364,26 @@ class SsmDockerRuntimeAdapter(RuntimeAdapter):
             raise ContainerNotFoundError(f"container not found after restart: {container_id!r}")
         cid_out = after.container_id or container_id
         ok = after.container_state == "running"
+        if ok:
+            return RuntimeActionResult(
+                container_id=cid_out,
+                container_state=after.container_state,
+                success=True,
+                message=None,
+            )
+        hint = ""
+        try:
+            out = self._runner.run(["docker", "inspect", container_id])
+            data = json.loads(out)
+            if data and isinstance(data, list) and isinstance(data[0], dict):
+                hint = _image_cmd_hint_from_attrs(data[0])
+        except Exception:
+            pass
         return RuntimeActionResult(
             container_id=cid_out,
             container_state=after.container_state,
-            success=ok,
-            message=None if ok else f"unexpected state after restart: {after.container_state}",
+            success=False,
+            message=f"unexpected state after restart: {after.container_state}{hint}",
         )
 
     def delete_container(self, *, container_id: str) -> RuntimeActionResult:

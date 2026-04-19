@@ -39,6 +39,29 @@ export type WorkspaceRecord = {
   lastErrorMessage: string | null;
 };
 
+export type WorkspaceDetail = {
+  id: number;
+  name: string;
+  description: string;
+  status: string;
+  lastOpenedLabel: string;
+  lastModifiedLabel: string;
+  createdAt: string;
+  updatedAt: string;
+  lastStarted: string | null;
+  lastStopped: string | null;
+  activeSessionsCount: number;
+  statusReason: string | null;
+  lastErrorMessage: string | null;
+};
+
+export type WorkspaceAttachResponse = {
+  accepted?: boolean;
+  gateway_url?: string | null;
+  issues?: string[];
+  detail?: string;
+};
+
 export type LoginInput = {
   username: string;
   password: string;
@@ -89,6 +112,17 @@ export const browserApi = {
     async list() {
       return request<{ items: WorkspaceRecord[]; total: number }>("/api/workspaces", {
         method: "GET",
+      });
+    },
+    async get(id: number) {
+      return request<WorkspaceDetail>(`/api/workspaces/${id}`, {
+        method: "GET",
+      });
+    },
+    async attach(id: number) {
+      return request<WorkspaceAttachResponse>(`/api/workspaces/${id}/attach`, {
+        method: "POST",
+        body: JSON.stringify({}),
       });
     },
     async create(payload: CreateWorkspaceInput) {

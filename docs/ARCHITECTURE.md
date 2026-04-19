@@ -380,7 +380,7 @@ Scale-down now uses a **two-phase drain**:
 ### code-server Integration (Tasks 12 + 13)
 
 - **Standard env vars** (`CODE_SERVER_AUTH=none`, `PORT=8080`, `CS_DISABLE_GETTING_STARTED_OVERRIDE=1`) are injected at bring-up. Per-workspace `env` overrides win.
-- **Persistence bind mounts** for `/home/coder/.config/code-server` and `/home/coder/.local/share/code-server` are created automatically at `<DEVNEST_WORKSPACE_PROJECTS_BASE>/ws-<id>/code-server/{config,data}`.
+- **Persistence bind mounts** for `/home/coder/.config/code-server` and `/home/coder/.local/share/code-server` are created automatically at `<DEVNEST_WORKSPACE_PROJECTS_BASE>/<id>/code-server/{config,data}`.
 - **Workspace terminal** is feature-gated via `features.terminal_enabled`. See [CODE_SERVER.md](CODE_SERVER.md) and [WORKSPACE_PERSISTENCE.md](WORKSPACE_PERSISTENCE.md).
 
 ### Authoritative runtime placement, IDE readiness, durable cleanup (final hardening)

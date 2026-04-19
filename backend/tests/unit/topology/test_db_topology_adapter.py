@@ -52,6 +52,11 @@ class _RecordingLinuxRunner:
     def __init__(self, *, fail_on_netns_move: bool = False) -> None:
         self.commands: list[list[str]] = []
         self._fail_on_netns_move = fail_on_netns_move
+        self._veth_host: str | None = None
+        self._veth_ctr: str | None = None
+        self._master: tuple[str, str] | None = None
+        self._ctr_addrs: dict[str, str] = {}
+        self._default_gw: str | None = None
 
     def run(self, cmd: list[str]) -> str:
         argv = list(cmd)
@@ -59,6 +64,102 @@ class _RecordingLinuxRunner:
         # ``move_container_if_to_netns``: ip link set dev <if> netns <pid>
         if self._fail_on_netns_move and len(argv) >= 7 and argv[5] == "netns":
             raise RuntimeError("simulated netns move failure")
+
+        # ``create_veth_pair``: ip link add H type veth peer name C
+        if (
+            len(argv) >= 8
+            and argv[0] == "ip"
+            and argv[1] == "link"
+            and argv[2] == "add"
+            and argv[4] == "type"
+            and argv[5] == "veth"
+            and "peer" in argv
+        ):
+            pi = argv.index("peer")
+            if pi + 2 < len(argv) and argv[pi + 1] == "name":
+                self._veth_host = argv[3]
+                self._veth_ctr = argv[pi + 2]
+            return ""
+
+        # ``attach_host_if_to_bridge``: ip link set dev H master BR
+        if len(argv) >= 6 and argv[:4] == ["ip", "link", "set", "dev"] and "master" in argv:
+            h = argv[4]
+            mi = argv.index("master")
+            if mi + 1 < len(argv):
+                self._master = (h, argv[mi + 1])
+            return ""
+
+        # ``assign_ip_in_netns``: nsenter … -- ip addr add A dev IF
+        if argv and argv[0] == "nsenter" and "ip" in argv and "addr" in argv and "add" in argv:
+            ai = argv.index("add")
+            spec = argv[ai + 1]
+            di = argv.index("dev", ai)
+            ifn = argv[di + 1]
+            self._ctr_addrs[ifn] = spec
+            return ""
+
+        # ``ensure_default_route_in_netns``: nsenter … -- ip route replace default via GW
+        if argv and argv[0] == "nsenter" and "route" in argv and "replace" in argv and "via" in argv:
+            vi = argv.index("via")
+            if vi + 1 < len(argv):
+                self._default_gw = argv[vi + 1]
+            return ""
+
+        # ``topology_attach_plumbing_failures``: default route check
+        if (
+            argv
+            and argv[0] == "nsenter"
+            and argv[-5:] == ["ip", "-brief", "route", "show", "default"]
+            and self._default_gw
+        ):
+            return f"default via {self._default_gw} dev vc0 proto kernel\n"
+
+        # nsenter … ip link show dev <ctr_if> (workspace netns)
+        if (
+            len(argv) >= 8
+            and argv[0] == "nsenter"
+            and argv[-4:] == ["ip", "link", "show", "dev"]
+        ):
+            ifn = argv[-1]
+            if self._veth_ctr and ifn == self._veth_ctr:
+                return f"2: {ifn}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+            return ""
+
+        # Post-attach: nsenter … ip -brief addr show dev IF
+        if (
+            len(argv) >= 10
+            and argv[0] == "nsenter"
+            and argv[-4] == "addr"
+            and argv[-3] == "show"
+            and argv[-2] == "dev"
+        ):
+            ifn = argv[-1]
+            spec = self._ctr_addrs.get(ifn, "")
+            if spec:
+                return f"{ifn}            UP             {spec} \n"
+            return ""
+
+        # ``check_host_veth_enslaved_to_bridge`` / ``ip link show dev H``
+        if len(argv) == 5 and argv[:4] == ["ip", "link", "show", "dev"]:
+            h = argv[4]
+            if self._master and self._master[0] == h:
+                br = self._master[1]
+                return (
+                    f"4: {h}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
+                    f"qdisc noqueue master {br} state UP\n"
+                )
+            return ""
+
+        # ``check_bridge_master_list_contains_if``: ip link show master BR
+        if len(argv) == 5 and argv[:4] == ["ip", "link", "show", "master"]:
+            br = argv[4]
+            h = self._master[0] if self._master and self._master[1] == br else (self._veth_host or "")
+            if h:
+                return (
+                    f"9: {h}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 master {br} state UP\n"
+                )
+            return ""
+
         return ""
 
 
@@ -1394,21 +1495,45 @@ class TestCheckAttachment:
             topo_session,
             spec={"cidr": "10.77.63.0/24", "gateway_ip": "10.77.63.1", "bridge_name": "br-veth"},
         )
-        host_if, _ = _veth_pair_names(tid, "n1", 63)
-
-        class GoodRunner:
-            def run(self, cmd: list[str]) -> str:
-                if cmd[:4] == ["ip", "link", "show", "dev"]:
-                    if cmd[4] == host_if:
-                        return (
-                            f"9: {host_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
-                            f"qdisc noqueue master br-veth state UP mode DEFAULT group default\n"
-                        )
-                raise AssertionError(f"unexpected cmd: {cmd}")
+        host_if, ctr_if = _veth_pair_names(tid, "n1", 63)
+        gw = "10.77.63.1"
 
         adapter = DbTopologyAdapter(topo_session)
         adapter.ensure_node_topology(topology_id=tid, node_id="n1")
         ip = adapter.allocate_workspace_ip(topology_id=tid, node_id="n1", workspace_id=63)
+
+        class GoodRunner:
+            def run(self, cmd: list[str]) -> str:
+                # PID must exist under /proc on Linux: ``_netns_prefix`` calls
+                # ``_assert_netns_target_pid_visible`` before ``nsenter``.
+                if cmd[:3] == ["docker", "inspect", "-f"]:
+                    return "1\n"
+                if cmd[:4] == ["ip", "link", "show", "dev"]:
+                    if len(cmd) >= 5 and cmd[4] == host_if:
+                        return (
+                            f"9: {host_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
+                            f"qdisc noqueue master br-veth state UP mode DEFAULT group default\n"
+                        )
+                if len(cmd) == 5 and cmd[:4] == ["ip", "link", "show", "master"] and cmd[4] == "br-veth":
+                    return (
+                        f"9: {host_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
+                        f"master br-veth state UP\n"
+                    )
+                if len(cmd) >= 9 and cmd[0] == "nsenter" and cmd[-5:] == ["ip", "link", "show", "dev", ctr_if]:
+                    return f"2: {ctr_if}: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                if (
+                    len(cmd) >= 11
+                    and cmd[0] == "nsenter"
+                    and cmd[-6:] == ["ip", "-brief", "addr", "show", "dev", ctr_if]
+                ):
+                    return f"{ctr_if}            UP             {ip.workspace_ip}/24 \n"
+                if (
+                    len(cmd) >= 10
+                    and cmd[0] == "nsenter"
+                    and cmd[-5:] == ["ip", "-brief", "route", "show", "default"]
+                ):
+                    return f"default via {gw} dev {ctr_if} proto kernel\n"
+                raise AssertionError(f"unexpected cmd: {cmd}")
         adapter.attach_workspace(
             topology_id=tid,
             node_id="n1",
@@ -1421,6 +1546,7 @@ class TestCheckAttachment:
             topo_session,
             command_runner=GoodRunner(),
             apply_linux_attachment=True,
+            container_init_pid_resolver=lambda _cid: 1,
         )
         res = chk.check_attachment(topology_id=tid, node_id="n1", workspace_id=63)
         assert res.healthy is True

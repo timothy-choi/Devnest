@@ -5,6 +5,7 @@ type WorkspaceGridProps = {
   workspaces: Workspace[];
   isLoading?: boolean;
   errorMessage?: string | null;
+  onOpen: (id: string) => void;
   onStop: (id: string) => void;
   onRestart: (id: string) => void;
   onDelete: (id: string) => void;
@@ -16,6 +17,7 @@ export function WorkspaceGrid({
   workspaces,
   isLoading = false,
   errorMessage = null,
+  onOpen,
   onStop,
   onRestart,
   onDelete,
@@ -55,6 +57,7 @@ export function WorkspaceGrid({
         <WorkspaceCard
           key={workspace.id}
           workspace={workspace}
+          onOpen={onOpen}
           onDelete={onDelete}
           onDownload={onDownload}
           onRestart={onRestart}

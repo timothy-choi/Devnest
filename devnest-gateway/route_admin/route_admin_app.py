@@ -18,6 +18,7 @@ import os
 import re
 import tempfile
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -46,8 +47,80 @@ _lock = threading.Lock()
 _routes: dict[str, dict[str, str]] = {}
 
 _SAFE_WID = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
+_HOST_RULE = re.compile(r"^Host\(`([^`]+)`\)\s*$")
 
-app = FastAPI(title="DevNest route-admin", version="0.1.0")
+
+def _hydrate_routes_from_disk_locked() -> None:
+    """Load persisted workspace routes into memory so GET /routes and Traefik match after container restart."""
+    path = ROUTES_FILE
+    if not path.is_file():
+        return
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(
+            "route_admin_hydrate_parse_failed",
+            extra={"path": str(path), "error": str(e)},
+        )
+        return
+    if not isinstance(raw, dict):
+        return
+    http = raw.get("http")
+    if not isinstance(http, dict):
+        return
+    routers = http.get("routers") or {}
+    services = http.get("services") or {}
+    if not isinstance(routers, dict) or not isinstance(services, dict):
+        return
+    prefix = "devnest-reg-"
+    loaded = 0
+    for rname, rdef in routers.items():
+        if not isinstance(rname, str) or not rname.startswith(prefix):
+            continue
+        if not isinstance(rdef, dict):
+            continue
+        wid = rname[len(prefix) :]
+        if not _SAFE_WID.match(wid):
+            continue
+        rule = str(rdef.get("rule") or "").strip()
+        m = _HOST_RULE.match(rule)
+        if not m:
+            continue
+        public_host = m.group(1).strip()
+        svc_name = f"{rname}-upstream"
+        svc = services.get(svc_name)
+        if not isinstance(svc, dict):
+            continue
+        lb = svc.get("loadBalancer") or {}
+        if not isinstance(lb, dict):
+            continue
+        servers = lb.get("servers") or []
+        if not servers or not isinstance(servers, list):
+            continue
+        first = servers[0]
+        if not isinstance(first, dict):
+            continue
+        target = str(first.get("url") or "").strip()
+        if not target:
+            continue
+        try:
+            target = _normalize_target(target)
+        except ValueError:
+            continue
+        _routes[wid] = {"workspace_id": wid, "public_host": public_host, "target": target}
+        loaded += 1
+    if loaded:
+        logger.info("route_admin_hydrated", extra={"path": str(path), "count": loaded})
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    with _lock:
+        _hydrate_routes_from_disk_locked()
+    yield
+
+
+app = FastAPI(title="DevNest route-admin", version="0.1.0", lifespan=_lifespan)
 
 
 class RouteRegisterBody(BaseModel):

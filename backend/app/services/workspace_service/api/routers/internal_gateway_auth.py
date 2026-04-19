@@ -25,7 +25,7 @@ import hmac
 import logging
 import re
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Cookie, Depends, Header, Request
 from fastapi.responses import Response
 from sqlmodel import Session, select
 
@@ -35,6 +35,7 @@ from app.libs.observability.log_events import LogEvent, log_event
 from app.services.workspace_service.models import Workspace, WorkspaceSession
 from app.services.workspace_service.models.enums import WorkspaceSessionStatus, WorkspaceStatus
 from app.services.workspace_service.services.workspace_session_service import (
+    WORKSPACE_SESSION_COOKIE_NAME,
     WORKSPACE_SESSION_HTTP_HEADER,
     hash_workspace_session_token,
 )
@@ -46,8 +47,10 @@ router = APIRouter(
     tags=["internal-gateway"],
 )
 
-# Pattern: ws-{integer}.{base_domain}
-_WS_HOST_RE = re.compile(r"^ws-(\d+)\.")
+# Primary patterns:
+#   ws-{integer}.{base_domain}
+#   ws-{integer}-{storage_key}.{base_domain}
+_WS_HOST_RE = re.compile(r"^ws-(\d+)(?:-[a-z0-9-]+)?\.")
 
 
 def _correlation_id_from_request(request: Request) -> str | None:
@@ -55,18 +58,32 @@ def _correlation_id_from_request(request: Request) -> str | None:
 
 
 def _workspace_id_from_host(host: str, base_domain: str) -> int | None:
-    """Extract workspace integer id from a hostname like ``ws-42.app.devnest.local``.
+    """Extract workspace integer id from hostnames like ``ws-42.app.devnest.local``.
 
-    Returns ``None`` if the host does not match the expected pattern.
+    Also accepts unique per-workspace hosts like ``ws-42-deadbeef.app.devnest.local`` and legacy
+    ``{id}.{base_domain}`` (without the ``ws-`` prefix) for older route-admin registrations so
+    ForwardAuth and Traefik stay aligned when hosts are migrated.
     """
     host_clean = (host or "").strip().split(":")[0].lower()
     m = _WS_HOST_RE.match(host_clean)
-    if not m:
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    dom = (base_domain or "").strip().lower().strip(".")
+    if not dom:
         return None
-    try:
-        return int(m.group(1))
-    except ValueError:
+    suffix = f".{dom}"
+    if not host_clean.endswith(suffix):
         return None
+    prefix = host_clean[: -len(suffix)]
+    if prefix.isdigit():
+        try:
+            return int(prefix)
+        except ValueError:
+            return None
+    return None
 
 
 @router.get(
@@ -81,6 +98,7 @@ def gateway_forward_auth(
     session: Session = Depends(get_db),
     x_forwarded_host: str | None = Header(default=None, alias="X-Forwarded-Host"),
     x_devnest_ws_session: str | None = Header(default=None, alias=WORKSPACE_SESSION_HTTP_HEADER),
+    devnest_ws_session_cookie: str | None = Cookie(default=None, alias=WORKSPACE_SESSION_COOKIE_NAME),
 ) -> Response:
     """
     Validate the workspace session for Traefik ForwardAuth.
@@ -109,8 +127,10 @@ def gateway_forward_auth(
         )
         return Response(status_code=401, content="workspace host not recognized")
 
-    # Require the workspace session header.
+    # Session token: header (API clients) or HttpOnly cookie (browser navigations to the gateway).
     token_plain = (x_devnest_ws_session or "").strip()
+    if not token_plain:
+        token_plain = (devnest_ws_session_cookie or "").strip()
     if not token_plain:
         log_event(
             _logger,
@@ -121,7 +141,10 @@ def gateway_forward_auth(
         )
         return Response(
             status_code=401,
-            content="workspace session token required (X-DevNest-Workspace-Session)",
+            content=(
+                "workspace session required: send X-DevNest-Workspace-Session or attach cookie "
+                f"(HttpOnly {WORKSPACE_SESSION_COOKIE_NAME} from POST /workspaces/attach/{{id}})"
+            ),
         )
 
     # Look up session by token hash.

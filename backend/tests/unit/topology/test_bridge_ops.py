@@ -65,6 +65,8 @@ def test_ensure_bridge_address_swallows_add_failure_if_addr_now_visible() -> Non
                 if self._phase == 1:
                     return ""
                 return "3: br-rec    inet 10.20.2.1/24 scope global br-rec\n"
+            if len(cmd) >= 6 and cmd[:5] == ["ip", "-4", "addr", "show", "dev"]:
+                return "3: br-rec    inet 10.20.2.1/24 scope global br-rec\n"
             if len(cmd) >= 4 and cmd[1:3] == ["addr", "add"]:
                 raise RuntimeError("RTNETLINK answers: weird duplicate message")
             raise AssertionError(f"unexpected: {cmd}")

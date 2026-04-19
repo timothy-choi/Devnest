@@ -81,6 +81,36 @@ _OSR_UNREACHABLE_ERRNOS: frozenset[int] = frozenset(
 )
 
 
+def _prepend_topology_ok_no_listener_hint(
+    issues: tuple[HealthIssue, ...],
+    *,
+    expected_port: int,
+) -> tuple[HealthIssue, ...]:
+    """When DB+Linux topology is healthy but TCP fails, clarify this is usually IDE bind/start lag."""
+    dial = {
+        ProbeIssueCode.SERVICE_UNREACHABLE.value,
+        ProbeIssueCode.SERVICE_TIMEOUT.value,
+    }
+    prefix = (
+        f"workspace topology attached but nothing is listening on 0.0.0.0:{expected_port} "
+        "(IDE still starting or process exited); "
+    )
+    out: list[HealthIssue] = []
+    for iss in issues:
+        if iss.component == "service" and iss.code in dial and not iss.message.startswith(prefix):
+            out.append(
+                HealthIssue(
+                    code=iss.code,
+                    component=iss.component,
+                    message=(prefix + iss.message)[:5000],
+                    severity=iss.severity,
+                ),
+            )
+        else:
+            out.append(iss)
+    return tuple(out)
+
+
 def _service_issue(
     *,
     code: ProbeIssueCode,
@@ -91,6 +121,42 @@ def _service_issue(
             code=code.value,
             component="service",
             message=message,
+            severity=HealthIssueSeverity.ERROR,
+        ),
+    )
+
+
+def _missing_probe_binary_from_runner_error(exc: BaseException) -> str | None:
+    """
+    Return ``nc`` / ``timeout`` / ``curl`` when :class:`~app.libs.topology.system.command_runner.CommandRunner`
+    failed because the executable was missing (ENOENT / exit 127), as in::
+
+        timeout: failed to run command 'nc': No such file or directory
+    """
+    t = str(exc)
+    low = t.lower()
+    if "no such file or directory" not in low and "exit=127)" not in t:
+        return None
+    for name in ("nc", "timeout", "curl"):
+        if f"'{name}'" in t or f"`{name}`" in t:
+            return name
+    return None
+
+
+def _probe_runtime_binary_issue(*, binary: str, exc: BaseException) -> tuple[HealthIssue, ...]:
+    hint = (
+        "install netcat-openbsd (nc) on the backend/workspace-worker image"
+        if binary == "nc"
+        else "install the missing package on the probe image"
+    )
+    return (
+        HealthIssue(
+            code=ProbeIssueCode.PROBE_RUNTIME_BINARY_MISSING.value,
+            component="probe",
+            message=(
+                f"probe runtime missing required binary: {binary} ({hint}). "
+                f"Details: {exc!s}"[:2400]
+            ),
             severity=HealthIssueSeverity.ERROR,
         ),
     )
@@ -268,6 +334,14 @@ class DefaultProbeRunner(ProbeRunner):
         except AttachmentHealthCheckError as e:
             return _exec_failed(step="check_attachment", exc=e)
         except Exception as e:
+            if isinstance(e, FileNotFoundError):
+                wrapped = RuntimeError(
+                    f"{e!s} [check_attachment: docker CLI missing from PATH — topology checks should use "
+                    "Docker SDK PID resolution via DbTopologyAdapter(container_init_pid_resolver=…); "
+                    "see orchestrator app_factory.]",
+                )
+                wrapped.__cause__ = e
+                return _exec_failed(step="check_attachment", exc=wrapped)
             return _exec_failed(step="check_attachment", exc=e)
 
         issues: list[HealthIssue] = []
@@ -368,6 +442,24 @@ class DefaultProbeRunner(ProbeRunner):
         try:
             runner.run(["timeout", str(w), "nc", "-z", ip, str(port)])
         except RuntimeError as e:
+            missing = _missing_probe_binary_from_runner_error(e)
+            if missing:
+                return ServiceProbeResult(
+                    healthy=False,
+                    workspace_ip=ip,
+                    port=port,
+                    latency_ms=None,
+                    issues=_probe_runtime_binary_issue(binary=missing, exc=e),
+                )
+            msg = f"remote nc probe failed for {ip!r}:{port}: {e}"
+            es = str(e)
+            if "exit=1)" in es and "nc" in es.lower():
+                msg += (
+                    " [hint: netcat-openbsd often uses exit 1 for TCP refused or failed connect; "
+                    "if the topology bridge is NO-CARRIER with no `ip link show master <bridge>` ports, "
+                    "host L2 to the workspace netns is broken despite DB ATTACHED — see "
+                    "topology_linux_attach_* logs / attach fast-path stale plumbing warning.]"
+                )
             return ServiceProbeResult(
                 healthy=False,
                 workspace_ip=ip,
@@ -375,7 +467,7 @@ class DefaultProbeRunner(ProbeRunner):
                 latency_ms=None,
                 issues=_service_issue(
                     code=ProbeIssueCode.SERVICE_UNREACHABLE,
-                    message=f"remote nc probe failed for {ip!r}:{port}: {e}",
+                    message=msg,
                 ),
             )
         t1 = time.perf_counter()
@@ -565,6 +657,15 @@ class DefaultProbeRunner(ProbeRunner):
         try:
             runner.run(["timeout", str(w), "curl", "-sf", "--max-time", str(w), url])
         except RuntimeError as e:
+            missing = _missing_probe_binary_from_runner_error(e)
+            if missing:
+                return ServiceProbeResult(
+                    healthy=False,
+                    workspace_ip=ip,
+                    port=port,
+                    latency_ms=None,
+                    issues=_probe_runtime_binary_issue(binary=missing, exc=e),
+                )
             return ServiceProbeResult(
                 healthy=False,
                 workspace_ip=ip,
@@ -636,6 +737,56 @@ class DefaultProbeRunner(ProbeRunner):
             ),
         )
 
+    def _augment_unreachable_service_probe(
+        self,
+        svc: ServiceProbeResult,
+        *,
+        topology_id: int,
+        node_id: str,
+        workspace_id: int,
+    ) -> ServiceProbeResult:
+        """Append host + workspace-netns diagnostics for failed TCP reachability (bounded)."""
+        if svc.healthy:
+            return svc
+        fmt = getattr(self._topology, "format_service_reachability_diagnostics", None)
+        if not callable(fmt):
+            return svc
+        dial_codes = {
+            ProbeIssueCode.SERVICE_UNREACHABLE.value,
+            ProbeIssueCode.SERVICE_TIMEOUT.value,
+        }
+        if not any(i.component == "service" and i.code in dial_codes for i in svc.issues):
+            return svc
+        try:
+            blob = fmt(topology_id=topology_id, node_id=node_id, workspace_id=workspace_id)
+        except Exception as e:
+            blob = f"diagnostics_error={e!r}"
+        blob = (blob or "").strip()[:2400]
+        if not blob:
+            return svc
+        new_issues: list[HealthIssue] = []
+        appended = False
+        for iss in svc.issues:
+            if not appended and iss.component == "service" and iss.code in dial_codes:
+                new_issues.append(
+                    HealthIssue(
+                        code=iss.code,
+                        component=iss.component,
+                        message=f"{iss.message}; host/workspace diagnostics: {blob}",
+                        severity=iss.severity,
+                    ),
+                )
+                appended = True
+            else:
+                new_issues.append(iss)
+        return ServiceProbeResult(
+            healthy=svc.healthy,
+            workspace_ip=svc.workspace_ip,
+            port=svc.port,
+            latency_ms=svc.latency_ms,
+            issues=tuple(new_issues),
+        )
+
     def check_workspace_health(
         self,
         *,
@@ -660,6 +811,12 @@ class DefaultProbeRunner(ProbeRunner):
                 workspace_ip=ws_ip,
                 port=expected_port,
                 timeout_seconds=timeout_seconds,
+            )
+            svc = self._augment_unreachable_service_probe(
+                svc,
+                topology_id=topo.topology_id,
+                node_id=topo.node_id,
+                workspace_id=topo.workspace_id,
             )
             if svc.healthy:
                 # TCP connected — optionally verify HTTP (code-server readiness). When disabled
@@ -686,7 +843,13 @@ class DefaultProbeRunner(ProbeRunner):
                     service_issues = svc.issues
             else:
                 service_healthy = False
-                service_issues = svc.issues
+                if topo.healthy and ws_ip:
+                    service_issues = _prepend_topology_ok_no_listener_hint(
+                        svc.issues,
+                        expected_port=expected_port,
+                    )
+                else:
+                    service_issues = svc.issues
         else:
             service_healthy = False
             missing_ip_code = ProbeIssueCode.TOPOLOGY_WORKSPACE_IP_MISSING.value

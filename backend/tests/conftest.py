@@ -17,6 +17,15 @@ os.environ["DATABASE_URL"] = _DEFAULT_TEST_DB
 os.environ.setdefault("DEVNEST_ALLOW_RUNTIME_ENV_FALLBACK", "true")
 os.environ.setdefault("DEVNEST_REQUIRE_IDE_HTTP_PROBE", "false")
 
+# Non-root pytest (e.g. macOS dev): chown to uid 1000 fails; align workspace runtime UID/GID with
+# the test process so host bind-mount prep + ownership verification match the filesystem.
+try:
+    if os.geteuid() != 0:  # type: ignore[attr-defined]
+        os.environ.setdefault("DEVNEST_WORKSPACE_CONTAINER_UID", str(os.getuid()))
+        os.environ.setdefault("DEVNEST_WORKSPACE_CONTAINER_GID", str(os.getgid()))
+except AttributeError:
+    pass
+
 from app.libs.common.config import get_settings  # noqa: E402
 from app.libs.db.database import reset_engine  # noqa: E402
 

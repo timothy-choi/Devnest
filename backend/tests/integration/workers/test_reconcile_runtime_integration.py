@@ -506,7 +506,7 @@ def test_reconcile_deleted_deregisters_when_route_present(
 
     inst = mock_client_cls.from_settings.return_value
     inst.get_registered_routes.return_value = [
-        {"workspace_id": str(wid), "public_host": f"{wid}.app.devnest.local", "target": "http://x"},
+        {"workspace_id": str(wid), "public_host": f"ws-{wid}.app.devnest.local", "target": "http://x"},
     ]
 
     orch = _orch()

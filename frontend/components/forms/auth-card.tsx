@@ -89,7 +89,7 @@ export function AuthCard({
         username: values.username,
         password: values.password,
       });
-      await router.push("/dashboard");
+      await router.replace("/dashboard");
     } catch (error) {
       setSubmitError(error instanceof ApiError ? error.detail : "Unable to complete authentication.");
     }

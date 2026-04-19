@@ -7,8 +7,14 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from app.libs.common.config import get_settings
 from app.libs.probes.interfaces import ProbeRunner
-from app.libs.probes.results import HealthIssue, HealthIssueSeverity, WorkspaceHealthResult
+from app.libs.probes.results import (
+    HealthIssue,
+    HealthIssueSeverity,
+    ServiceProbeResult,
+    WorkspaceHealthResult,
+)
 from app.libs.runtime.errors import NetnsRefError
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import (
@@ -59,6 +65,15 @@ def mock_probe() -> MagicMock:
     return MagicMock(spec=ProbeRunner)
 
 
+@pytest.fixture(autouse=True)
+def _short_ide_tcp_bringup_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS", "2.5")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS", "0.1")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def ws_root(tmp_path: Path) -> Path:
     return tmp_path / "devnest-workspaces"
@@ -91,6 +106,7 @@ def _runtime_ok(mock_runtime: MagicMock) -> None:
         pid=12345,
         netns_ref=NETNS_REF,
     )
+    mock_runtime.fetch_container_log_tail.return_value = ""
 
 
 def _topology_ok(mock_topology: MagicMock) -> None:
@@ -115,6 +131,13 @@ def _topology_ok(mock_topology: MagicMock) -> None:
 
 
 def _probe_ok(mock_probe: MagicMock) -> None:
+    mock_probe.check_service_reachable.return_value = ServiceProbeResult(
+        healthy=True,
+        workspace_ip=WORKSPACE_IP,
+        port=WORKSPACE_IDE_CONTAINER_PORT,
+        latency_ms=1.0,
+        issues=(),
+    )
     mock_probe.check_workspace_health.return_value = WorkspaceHealthResult(
         workspace_id=int(WORKSPACE_ID),
         healthy=True,
@@ -193,11 +216,10 @@ class TestBringUpHappyPath:
         container_paths = [m.container_path for m in extra]
         assert "/home/coder/.config/code-server" in container_paths
         assert "/home/coder/.local/share/code-server" in container_paths
-        # Remaining calls in order
         assert mock_runtime.mock_calls[1] == call.start_container(container_id=CONTAINER_ID)
-        assert mock_runtime.mock_calls[2] == call.inspect_container(container_id=CONTAINER_ID)
-        assert mock_runtime.mock_calls[3] == call.get_container_netns_ref(container_id=CONTAINER_ID)
-        assert mock_runtime.mock_calls[4] == call.get_container_netns_ref(container_id=CONTAINER_ID)
+        names = [c[0] for c in mock_runtime.mock_calls]
+        assert names.count("get_container_netns_ref") == 2
+        assert names.count("inspect_container") >= 3  # post-start wait + two pre-topology liveness gates
 
         mock_topology.ensure_node_topology.assert_called_once_with(
             topology_id=TOPOLOGY_ID,
@@ -217,14 +239,77 @@ class TestBringUpHappyPath:
             workspace_ip=WORKSPACE_IP,
         )
 
+        mock_probe.check_service_reachable.assert_called()
         mock_probe.check_workspace_health.assert_called_once_with(
             workspace_id=WORKSPACE_ID,
             topology_id=str(TOPOLOGY_ID),
             node_id=NODE_ID,
             container_id=CONTAINER_ID,
             expected_port=WORKSPACE_IDE_CONTAINER_PORT,
-            timeout_seconds=5.0,
+            timeout_seconds=8.0,
         )
+
+    def test_same_workspace_id_with_different_storage_keys_uses_different_project_paths(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="run-a",
+            launch_mode="new",
+        )
+        first_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        mock_runtime.reset_mock()
+        _runtime_ok(mock_runtime)
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="run-b",
+            launch_mode="new",
+        )
+        second_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        assert first_path != second_path
+        assert first_path.endswith(f"{WORKSPACE_ID}-run-a")
+        assert second_path.endswith(f"{WORKSPACE_ID}-run-b")
+
+    def test_same_workspace_resume_reuses_same_project_path(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="persist-me",
+            launch_mode="new",
+        )
+        first_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        mock_runtime.reset_mock()
+        _runtime_ok(mock_runtime)
+        svc.bring_up_workspace_runtime(
+            workspace_id=WORKSPACE_ID,
+            project_storage_key="persist-me",
+            launch_mode="resume",
+        )
+        second_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
+
+        assert first_path == second_path
 
 
 class TestBringUpRuntimeFailures:
@@ -280,6 +365,41 @@ class TestBringUpRuntimeFailures:
         mock_probe.check_workspace_health.assert_not_called()
 
 
+class TestBringUpWorkspaceDeadBeforeTopology:
+    def test_exited_before_ensure_topology_skips_attach(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        ins_running = ContainerInspectionResult(
+            exists=True,
+            container_id=CONTAINER_ID,
+            container_state="running",
+            pid=12345,
+            ports=((32000, WORKSPACE_IDE_CONTAINER_PORT),),
+            mounts=(),
+        )
+        ins_exited = ContainerInspectionResult(
+            exists=True,
+            container_id=CONTAINER_ID,
+            container_state="exited",
+            pid=None,
+            ports=(),
+            mounts=(),
+        )
+        mock_runtime.inspect_container.side_effect = [ins_running, ins_exited]
+
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with pytest.raises(WorkspaceBringUpError, match="exited before topology attach"):
+            svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
+
+        mock_topology.ensure_node_topology.assert_not_called()
+        mock_probe.check_workspace_health.assert_not_called()
+
+
 class TestBringUpNetnsFailureBeforeAttach:
     def test_second_get_netns_ref_failure_skips_attach_and_probe(
         self,
@@ -307,7 +427,7 @@ class TestBringUpNetnsFailureBeforeAttach:
 
         svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
         # First call: ``ensure_running_runtime_only``; second: attach handoff — wrapped as bring-up error.
-        with pytest.raises(WorkspaceBringUpError, match="runtime topology handoff failed"):
+        with pytest.raises(WorkspaceBringUpError, match="workspace runtime not ready for topology"):
             svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
 
         mock_topology.ensure_node_topology.assert_called_once()
@@ -387,6 +507,20 @@ class TestBringUpProbeUnhealthy:
     ) -> None:
         _runtime_ok(mock_runtime)
         _topology_ok(mock_topology)
+        mock_probe.check_service_reachable.return_value = ServiceProbeResult(
+            healthy=False,
+            workspace_ip=WORKSPACE_IP,
+            port=WORKSPACE_IDE_CONTAINER_PORT,
+            latency_ms=None,
+            issues=(
+                HealthIssue(
+                    code="SERVICE_UNREACHABLE",
+                    component="service",
+                    message="remote nc probe failed",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            ),
+        )
         issue = HealthIssue(
             code="SERVICE_TIMEOUT",
             component="service",
@@ -430,6 +564,7 @@ class TestBringUpProbeUnhealthy:
         assert out.rollback_attempted is True
         assert out.rollback_succeeded is True
         assert not out.rollback_issues
+        assert mock_probe.check_service_reachable.call_count >= 2
         mock_probe.check_workspace_health.assert_called_once()
         assert mock_topology.detach_workspace.call_count >= 1
         assert mock_runtime.stop_container.call_count >= 1
@@ -448,6 +583,20 @@ class TestBringUpProbeUnhealthy:
     ) -> None:
         _runtime_ok(mock_runtime)
         _topology_ok(mock_topology)
+        mock_probe.check_service_reachable.return_value = ServiceProbeResult(
+            healthy=False,
+            workspace_ip=WORKSPACE_IP,
+            port=WORKSPACE_IDE_CONTAINER_PORT,
+            latency_ms=None,
+            issues=(
+                HealthIssue(
+                    code="SERVICE_UNREACHABLE",
+                    component="service",
+                    message="remote nc probe failed",
+                    severity=HealthIssueSeverity.ERROR,
+                ),
+            ),
+        )
         mock_probe.check_workspace_health.return_value = WorkspaceHealthResult(
             workspace_id=int(WORKSPACE_ID),
             healthy=False,

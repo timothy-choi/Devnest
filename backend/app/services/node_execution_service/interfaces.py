@@ -16,7 +16,7 @@ import docker
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology.system.command_runner import CommandRunner
 
-_EnsureProjectDir = Callable[[str, str], str]
+_EnsureProjectDir = Callable[[str, str, str | None], str]
 
 
 @runtime_checkable
@@ -39,6 +39,11 @@ class NodeExecutionBackend(Protocol):
     topology_command_runner: CommandRunner
     service_reachability_runner: CommandRunner | None
 
-    def ensure_workspace_project_dir(self, projects_base: str, workspace_id: str) -> str:
+    def ensure_workspace_project_dir(
+        self,
+        projects_base: str,
+        workspace_id: str,
+        project_storage_key: str | None = None,
+    ) -> str:
         """Return absolute project path on the execution host, creating directories if needed."""
         ...
