@@ -27,7 +27,11 @@ export default function WorkspacePage() {
   const opened = useRef(false);
 
   const redirectToDashboard = () => {
-    void router.replace("/dashboard");
+    if (typeof window === "undefined") {
+      void router.replace("/dashboard");
+      return;
+    }
+    window.location.replace("/dashboard");
   };
 
   useEffect(() => {
