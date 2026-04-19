@@ -64,6 +64,7 @@ export function DashboardShell() {
             workspaces={workspaceState.filteredWorkspaces}
             isLoading={workspaceState.isLoading}
             errorMessage={workspaceState.errorMessage}
+            onOpen={workspaceState.openWorkspace}
             onDelete={workspaceState.deleteWorkspace}
             onRestart={workspaceState.restartWorkspace}
             onStop={workspaceState.stopWorkspace}

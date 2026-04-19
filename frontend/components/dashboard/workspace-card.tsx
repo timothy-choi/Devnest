@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { Download, Loader2, MoreVertical, PlayCircle, RotateCcw, Square, Trash2 } from "lucide-react";
 
 import { DetailedStatusBadge } from "@/components/dashboard/workspace-status-badge";
@@ -16,6 +15,7 @@ import { Workspace } from "@/types/workspace";
 
 type WorkspaceCardProps = {
   workspace: Workspace;
+  onOpen: (id: string) => void;
   onStop: (id: string) => void;
   onRestart: (id: string) => void;
   onDelete: (id: string) => void;
@@ -25,6 +25,7 @@ type WorkspaceCardProps = {
 
 export function WorkspaceCard({
   workspace,
+  onOpen,
   onStop,
   onRestart,
   onDelete,
@@ -111,29 +112,29 @@ export function WorkspaceCard({
           </div>
         </div>
 
-        {workspace.canOpen ? (
-          <Link href={`/workspace/${workspace.id}`}>
-            <a className="flex items-center justify-center gap-2 rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-slate-800">
-              {primaryActionLabel}
-            </a>
-          </Link>
-        ) : (
-          <button
-            type="button"
-            className={`flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium text-white transition ${
-              primaryActionDisabled ? "cursor-not-allowed bg-slate-400" : "bg-sky-700 hover:bg-sky-600"
-            }`}
-            disabled={primaryActionDisabled}
-            onClick={() => {
-              if (workspace.canStart) {
-                onRestart(String(workspace.id));
-              }
-            }}
-          >
-            {isDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            {primaryActionLabel}
-          </button>
-        )}
+        <button
+          type="button"
+          className={`flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium text-white transition ${
+            primaryActionDisabled
+              ? "cursor-not-allowed bg-slate-400"
+              : workspace.canOpen
+                ? "bg-slate-950 hover:bg-slate-800"
+                : "bg-sky-700 hover:bg-sky-600"
+          }`}
+          disabled={primaryActionDisabled}
+          onClick={() => {
+            if (workspace.canOpen) {
+              onOpen(String(workspace.id));
+              return;
+            }
+            if (workspace.canStart) {
+              onRestart(String(workspace.id));
+            }
+          }}
+        >
+          {isDeleting || workspace.pendingAction === "Opening" ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          {primaryActionLabel}
+        </button>
       </CardContent>
     </Card>
   );

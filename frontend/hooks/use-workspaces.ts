@@ -161,6 +161,63 @@ export function useWorkspaces() {
     });
   }, [query, workspaces]);
 
+  const openWorkspace = async (id: string) => {
+    const workspaceId = Number(id);
+    if (!Number.isFinite(workspaceId)) {
+      setActionError("Invalid workspace id.");
+      return;
+    }
+
+    setActionError(null);
+    const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
+    queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+      current.map((workspace) =>
+        workspace.id === workspaceId
+          ? {
+              ...workspace,
+              pendingAction: "Opening",
+              statusDetail: "Preparing workspace session and redirecting to the IDE.",
+              isBusy: true,
+              canOpen: false,
+              canStart: false,
+              canStop: false,
+              canRestart: false,
+              canDelete: false,
+            }
+          : workspace,
+      ),
+    );
+
+    try {
+        const detail = await browserApi.workspaces.get(workspaceId);
+        if ((detail.status || "").toUpperCase() !== "RUNNING") {
+          throw new ApiError(
+            409,
+            "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
+          );
+        }
+
+      const attach = await browserApi.workspaces.attach(workspaceId);
+      if (!attach.accepted) {
+        throw new ApiError(
+          409,
+          attach.issues?.length ? attach.issues.join("; ") : "Attach was not accepted for this workspace.",
+        );
+      }
+
+      const gatewayUrl = (attach.gateway_url || "").trim();
+      if (!gatewayUrl) {
+        throw new ApiError(502, "No gateway URL was returned for this workspace.");
+      }
+
+      window.location.assign(gatewayUrl);
+      return;
+    } catch (error) {
+      queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);
+      setActionError(error instanceof ApiError ? error.detail : "Unable to open the workspace right now.");
+    }
+  };
+
   return {
     workspaces,
     filteredWorkspaces,
@@ -178,6 +235,7 @@ export function useWorkspaces() {
     createWorkspace: async (values: WorkspaceFormValues) => {
       await createMutation.mutateAsync(values);
     },
+    openWorkspace,
     stopWorkspace: async (id: string) => {
       await actionMutation.mutateAsync({ id: Number(id), action: "stop" });
     },
