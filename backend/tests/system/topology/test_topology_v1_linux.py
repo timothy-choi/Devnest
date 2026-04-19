@@ -235,14 +235,14 @@ def test_attach_detach_check_attachment_round_trip(
             node_id=node_id,
             workspace_id=ws_id,
         )
-        _cname, pid = alpine_netns_container
+        container_name, pid = alpine_netns_container
         netns_ref = f"/proc/{pid}/ns/net"
 
         att = linux_topology_adapter.attach_workspace(
             topology_id=tid,
             node_id=node_id,
             workspace_id=ws_id,
-            container_id=f"cid-{uuid.uuid4().hex[:8]}",
+            container_id=container_name,
             netns_ref=netns_ref,
             workspace_ip=ip_res.workspace_ip,
         )
