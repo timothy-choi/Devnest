@@ -105,7 +105,7 @@ export default function WorkspacePage() {
         const gatewayUrl = (attach.gateway_url || "").trim();
         if (gatewayUrl) {
           replaceCurrentHistoryWithDashboard();
-          window.location.assign(gatewayUrl);
+          window.location.replace(gatewayUrl);
           return;
         }
 
