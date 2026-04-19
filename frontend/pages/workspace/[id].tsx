@@ -26,18 +26,6 @@ export default function WorkspacePage() {
   const [message, setMessage] = useState<string | null>(null);
   const opened = useRef(false);
 
-  const replaceCurrentHistoryWithDashboard = () => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    const nextState = {
-      ...(window.history.state || {}),
-      as: "/dashboard",
-      url: "/dashboard",
-    };
-    window.history.replaceState(nextState, "", "/dashboard");
-  };
-
   const redirectToDashboard = () => {
     void router.replace("/dashboard");
   };
@@ -104,7 +92,6 @@ export default function WorkspacePage() {
 
         const gatewayUrl = (attach.gateway_url || "").trim();
         if (gatewayUrl) {
-          replaceCurrentHistoryWithDashboard();
           window.location.replace(gatewayUrl);
           return;
         }
