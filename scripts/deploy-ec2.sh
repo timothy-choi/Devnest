@@ -42,6 +42,26 @@ if [[ -z "${DEVNEST_BASE_DOMAIN:-}" ]]; then
   unset _meta_token _pub_ip || true
 fi
 
+# OAuth callbacks must return to the frontend app, not the API. When unset on EC2, default to
+# the public instance IP on port 3000 so backend /auth/oauth/* start URLs point at the Next.js
+# callback pages added by the frontend.
+if [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
+  _meta_token=""
+  if _meta_token="$(curl -sSf --connect-timeout 1 -X PUT \
+    "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)"; then
+    _pub_ip="$(curl -sSf --connect-timeout 1 -H "X-aws-ec2-metadata-token: ${_meta_token}" \
+      "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null)" || true
+  else
+    _pub_ip="$(curl -sSf --connect-timeout 1 "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null)" || true
+  fi
+  if [[ -n "${_pub_ip:-}" ]] && [[ "${_pub_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${_pub_ip}:3000"
+    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL unset: using ${DEVNEST_FRONTEND_PUBLIC_BASE_URL} for OAuth callbacks."
+  fi
+  unset _meta_token _pub_ip || true
+fi
+
 if [ "${BRANCH}" = "main" ]; then
   git checkout main
   git reset --hard origin/main
