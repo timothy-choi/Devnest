@@ -70,6 +70,10 @@ export function AuthCard({
 
   const showRegisteredMessage =
     router.isReady && mode === "login" && router.query.registered === "1";
+  const oauthError =
+    router.isReady && typeof router.query.oauth_error === "string"
+      ? decodeURIComponent(router.query.oauth_error)
+      : null;
 
   const handleSubmit = form.handleSubmit(async (values) => {
     setSubmitError(null);
@@ -110,13 +114,17 @@ export function AuthCard({
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="grid gap-3 sm:grid-cols-2">
-              <Button variant="secondary" className="rounded-2xl border border-slate-200 bg-white" type="button" disabled>
-                <Github className="h-4 w-4" />
-                GitHub
+              <Button asChild variant="secondary" className="rounded-2xl border border-slate-200 bg-white" type="button">
+                <a href="/api/auth/oauth/github/start">
+                  <Github className="h-4 w-4" />
+                  GitHub
+                </a>
               </Button>
-              <Button variant="secondary" className="rounded-2xl border border-slate-200 bg-white" type="button" disabled>
-                <Mail className="h-4 w-4" />
-                Google
+              <Button asChild variant="secondary" className="rounded-2xl border border-slate-200 bg-white" type="button">
+                <a href="/api/auth/oauth/google/start">
+                  <Mail className="h-4 w-4" />
+                  Google
+                </a>
               </Button>
             </div>
 
@@ -134,6 +142,9 @@ export function AuthCard({
                 <p className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
                   Account created successfully. Please log in.
                 </p>
+              ) : null}
+              {oauthError ? (
+                <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{oauthError}</p>
               ) : null}
 
               <div className="space-y-2">
