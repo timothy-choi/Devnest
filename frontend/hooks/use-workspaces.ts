@@ -14,7 +14,6 @@ export function useWorkspaces() {
   const [query, setQuery] = useState("");
   const [isCreateDialogOpen, setCreateDialogOpen] = useState(false);
   const [optimisticWorkspaces, setOptimisticWorkspaces] = useState<Workspace[]>([]);
-  const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -91,20 +90,18 @@ export function useWorkspaces() {
     onMutate: async ({ id, action }) => {
       setActionError(null);
       const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
-      if (action === "delete") {
-        setHiddenDeletedIds((current) => (current.includes(id) ? current : [...current, id]));
-        queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
-          current.filter((workspace) => workspace.id !== id),
-        );
-        return { previousWorkspaces };
-      }
       queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
         current.map((workspace) =>
           workspace.id === id
             ? {
                 ...workspace,
                 pendingAction: action === "stop" ? "Stopping" : action === "restart" ? "Restarting" : "Deleting",
-                status: action === "restart" ? "restarting" : action === "stop" ? "setting-up" : workspace.status,
+                status:
+                  action === "restart"
+                    ? "restarting"
+                    : action === "stop"
+                      ? "setting-up"
+                      : workspace.status,
                 rawStatus: action === "restart" ? "RESTARTING" : action === "stop" ? "STOPPING" : "DELETING",
                 statusLabel: action === "restart" ? "Restarting..." : action === "stop" ? "Stopping..." : "Deleting...",
                 statusDetail:
@@ -123,11 +120,17 @@ export function useWorkspaces() {
       );
       return { previousWorkspaces };
     },
+    onSuccess: (_response, variables) => {
+      if (variables.action === "delete") {
+        queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+          current.filter((workspace) => workspace.id !== variables.id),
+        );
+      }
+    },
     onError: (error, _variables, context) => {
       if (context?.previousWorkspaces) {
         queryClient.setQueryData<Workspace[]>(["workspaces"], context.previousWorkspaces);
       }
-      setHiddenDeletedIds([]);
       setActionError(error instanceof ApiError ? error.detail : "Unable to update the workspace right now.");
     },
     onSettled: () => {
@@ -136,10 +139,8 @@ export function useWorkspaces() {
   });
 
   const workspaces = useMemo(() => {
-    return [...optimisticWorkspaces, ...(workspacesQuery.data || [])].filter(
-      (workspace) => !hiddenDeletedIds.includes(workspace.id),
-    );
-  }, [hiddenDeletedIds, optimisticWorkspaces, workspacesQuery.data]);
+    return [...optimisticWorkspaces, ...(workspacesQuery.data || [])];
+  }, [optimisticWorkspaces, workspacesQuery.data]);
 
   const filteredWorkspaces = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
