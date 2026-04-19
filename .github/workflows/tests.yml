@@ -642,7 +642,18 @@ jobs:
           script: |
             set -e
             echo "Deploying branch: ${{ github.ref_name }}"
+            EC2_HOST_PUBLIC="${{ secrets.EC2_HOST }}"
+            if [[ "${EC2_HOST_PUBLIC}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              EC2_HOST_OAUTH="${EC2_HOST_PUBLIC//./-}.sslip.io"
+            else
+              EC2_HOST_OAUTH="${EC2_HOST_PUBLIC}"
+            fi
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
+            export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
+            export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
+            export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
+            export GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}"
             export DEVNEST_DEPLOY_DIR="${HOME}/Devnest"
             if [ ! -d "${DEVNEST_DEPLOY_DIR}/.git" ]; then
               git clone https://github.com/timothy-choi/Devnest.git "${DEVNEST_DEPLOY_DIR}"
@@ -721,7 +732,18 @@ jobs:
           script: |
             set -e
             echo "Deploying production branch: main"
+            EC2_HOST_PUBLIC="${{ secrets.EC2_HOST }}"
+            if [[ "${EC2_HOST_PUBLIC}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              EC2_HOST_OAUTH="${EC2_HOST_PUBLIC//./-}.sslip.io"
+            else
+              EC2_HOST_OAUTH="${EC2_HOST_PUBLIC}"
+            fi
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
+            export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
+            export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
+            export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
+            export GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}"
             export DEVNEST_DEPLOY_DIR="${HOME}/Devnest"
             if [ ! -d "${DEVNEST_DEPLOY_DIR}/.git" ]; then
               git clone https://github.com/timothy-choi/Devnest.git "${DEVNEST_DEPLOY_DIR}"

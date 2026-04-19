@@ -118,6 +118,16 @@ services:
       DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
       DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
       DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
+      GITHUB_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      GCLOUD_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
+      OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       # Some CI runners provide a minimal PATH; console scripts live under /usr/local/bin.
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
@@ -167,6 +177,16 @@ services:
       DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
       DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
       DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
+      GITHUB_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      GCLOUD_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
+      OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
+      OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       # Topology ``ip`` must run in the Docker *host* netns when this worker uses docker.sock from a
       # container; otherwise veth/bridge are created in the sidecar netns and ``ip link set … netns``
       # fails with ``Invalid "netns" value`` while the workspace container stays healthy.
@@ -234,10 +254,12 @@ services:
       dockerfile: Dockerfile.integration
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
+      NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
     depends_on:
       backend:
         condition: service_healthy

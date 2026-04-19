@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Self
 
 from pydantic import field_validator, model_validator
@@ -114,6 +115,71 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from_address: str = ""
     smtp_use_tls: bool = True
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _repo_env_fallbacks() -> dict[str, str]:
+        candidates = (
+            Path.cwd() / ".env",
+            Path.cwd() / "backend" / ".env",
+        )
+        values: dict[str, str] = {}
+        for path in candidates:
+            if not path.exists():
+                continue
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                if not key:
+                    continue
+                values.setdefault(key, value.strip())
+            if values:
+                break
+        return values
+
+    @field_validator(
+        "github_oauth_public_base_url",
+        "gcloud_oauth_public_base_url",
+        "oauth_github_client_id",
+        "oauth_github_client_secret",
+        "oauth_google_client_id",
+        "oauth_google_client_secret",
+        mode="before",
+    )
+    @classmethod
+    def _oauth_env_aliases(cls, v, info):  # noqa: ANN001
+        if isinstance(v, str) and v.strip():
+            return v
+
+        alias_map = {
+            "github_oauth_public_base_url": ("GITHUB_OAUTH_PUBLIC_BASE_URL",),
+            "gcloud_oauth_public_base_url": ("GCLOUD_OAUTH_PUBLIC_BASE_URL",),
+            "oauth_github_client_id": ("OAUTH_GITHUB_CLIENT_ID", "GITHUB_CLIENT_ID", "GITHUB_OAUTH_CLIENT_ID"),
+            "oauth_github_client_secret": (
+                "OAUTH_GITHUB_CLIENT_SECRET",
+                "GITHUB_CLIENT_SECRET",
+                "GITHUB_OAUTH_CLIENT_SECRET",
+            ),
+            "oauth_google_client_id": ("OAUTH_GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"),
+            "oauth_google_client_secret": (
+                "OAUTH_GOOGLE_CLIENT_SECRET",
+                "GOOGLE_CLIENT_SECRET",
+                "GOOGLE_OAUTH_CLIENT_SECRET",
+            ),
+        }
+        for env_name in alias_map.get(info.field_name, ()):
+            raw = os.getenv(env_name, "")
+            if raw.strip():
+                return raw
+
+        for env_name in alias_map.get(info.field_name, ()):
+            raw = cls._repo_env_fallbacks().get(env_name, "")
+            if raw.strip():
+                return raw
+        return v
 
     @field_validator("smtp_use_tls", mode="before")
     @classmethod
