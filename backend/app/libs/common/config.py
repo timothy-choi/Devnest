@@ -115,6 +115,42 @@ class Settings(BaseSettings):
     smtp_from_address: str = ""
     smtp_use_tls: bool = True
 
+    @field_validator(
+        "github_oauth_public_base_url",
+        "gcloud_oauth_public_base_url",
+        "oauth_github_client_id",
+        "oauth_github_client_secret",
+        "oauth_google_client_id",
+        "oauth_google_client_secret",
+        mode="before",
+    )
+    @classmethod
+    def _oauth_env_aliases(cls, v, info):  # noqa: ANN001
+        if isinstance(v, str) and v.strip():
+            return v
+
+        alias_map = {
+            "github_oauth_public_base_url": ("GITHUB_OAUTH_PUBLIC_BASE_URL",),
+            "gcloud_oauth_public_base_url": ("GCLOUD_OAUTH_PUBLIC_BASE_URL",),
+            "oauth_github_client_id": ("OAUTH_GITHUB_CLIENT_ID", "GITHUB_CLIENT_ID", "GITHUB_OAUTH_CLIENT_ID"),
+            "oauth_github_client_secret": (
+                "OAUTH_GITHUB_CLIENT_SECRET",
+                "GITHUB_CLIENT_SECRET",
+                "GITHUB_OAUTH_CLIENT_SECRET",
+            ),
+            "oauth_google_client_id": ("OAUTH_GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_ID"),
+            "oauth_google_client_secret": (
+                "OAUTH_GOOGLE_CLIENT_SECRET",
+                "GOOGLE_CLIENT_SECRET",
+                "GOOGLE_OAUTH_CLIENT_SECRET",
+            ),
+        }
+        for env_name in alias_map.get(info.field_name, ()):
+            raw = os.getenv(env_name, "")
+            if raw.strip():
+                return raw
+        return v
+
     @field_validator("smtp_use_tls", mode="before")
     @classmethod
     def _parse_smtp_use_tls(cls, v):  # noqa: ANN001 — pydantic coerces env strings
