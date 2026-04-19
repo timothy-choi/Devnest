@@ -35,13 +35,18 @@ export default function WorkspacePage() {
   };
 
   useEffect(() => {
+    opened.current = false;
+    setMessage(null);
+  }, [workspaceId]);
+
+  useEffect(() => {
     if (!router.isReady || isLoading || isCheckingSession) {
       return;
     }
     if (!isAuthenticated) {
       return;
     }
-    if (workspaceId === "preview" || opened.current) {
+    if (workspaceId === "preview") {
       return;
     }
 
@@ -53,6 +58,9 @@ export default function WorkspacePage() {
     if (navType === "back_forward") {
       opened.current = true;
       redirectToDashboard();
+      return;
+    }
+    if (opened.current) {
       return;
     }
 
