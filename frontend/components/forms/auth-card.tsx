@@ -74,6 +74,8 @@ export function AuthCard({
     router.isReady && typeof router.query.oauth_error === "string"
       ? decodeURIComponent(router.query.oauth_error)
       : null;
+  const oauthStartHref = (provider: "github" | "google") =>
+    `/api/auth/oauth/${provider}/start?source=${encodeURIComponent(mode)}`;
 
   const handleSubmit = form.handleSubmit(async (values) => {
     setSubmitError(null);
@@ -115,13 +117,13 @@ export function AuthCard({
           <CardContent className="space-y-6">
             <div className="grid gap-3 sm:grid-cols-2">
               <Button asChild variant="secondary" className="rounded-2xl border border-slate-200 bg-white" type="button">
-                <a href="/api/auth/oauth/github/start">
+                <a href={oauthStartHref("github")}>
                   <Github className="h-4 w-4" />
                   GitHub
                 </a>
               </Button>
               <Button asChild variant="secondary" className="rounded-2xl border border-slate-200 bg-white" type="button">
-                <a href="/api/auth/oauth/google/start">
+                <a href={oauthStartHref("google")}>
                   <Mail className="h-4 w-4" />
                   Google
                 </a>

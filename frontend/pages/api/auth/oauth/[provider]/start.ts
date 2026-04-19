@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import { serialize } from "cookie";
 
 import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
 import { sendMethodNotAllowed } from "@/lib/server/http";
@@ -7,8 +8,27 @@ type OAuthStartPayload = {
   authorization_url: string;
 };
 
-function redirectToLoginWithError(res: NextApiResponse, detail: string) {
-  res.redirect(302, `/login?oauth_error=${encodeURIComponent(detail)}`);
+const OAUTH_RETURN_COOKIE = "devnest_oauth_return_to";
+
+function authRouteFromSource(source: string | string[] | undefined) {
+  return source === "signup" ? "/signup" : "/login";
+}
+
+function setOAuthReturnCookie(res: NextApiResponse, route: string) {
+  res.setHeader(
+    "Set-Cookie",
+    serialize(OAUTH_RETURN_COOKIE, route, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.AUTH_COOKIE_SECURE === "true",
+      path: "/",
+      maxAge: 60 * 10,
+    }),
+  );
+}
+
+function redirectToAuthWithError(res: NextApiResponse, route: string, detail: string) {
+  res.redirect(302, `${route}?oauth_error=${encodeURIComponent(detail)}`);
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -18,10 +38,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const provider = typeof req.query.provider === "string" ? req.query.provider : "";
+  const authRoute = authRouteFromSource(req.query.source);
   if (!provider) {
-    redirectToLoginWithError(res, "Unsupported OAuth provider.");
+    redirectToAuthWithError(res, authRoute, "Unsupported OAuth provider.");
     return;
   }
+  setOAuthReturnCookie(res, authRoute);
 
   const response = await backendRequest({
     req,
@@ -39,13 +61,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       data && typeof data === "object" && "detail" in data && typeof data.detail === "string"
         ? data.detail
         : "Unable to start OAuth right now.";
-    redirectToLoginWithError(res, detail);
+    redirectToAuthWithError(res, authRoute, detail);
     return;
   }
 
   const authorizationUrl = (data as OAuthStartPayload).authorization_url?.trim();
   if (!authorizationUrl) {
-    redirectToLoginWithError(res, "OAuth provider did not return an authorization URL.");
+    redirectToAuthWithError(res, authRoute, "OAuth provider did not return an authorization URL.");
     return;
   }
 

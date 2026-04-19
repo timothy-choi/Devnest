@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import { serialize } from "cookie";
 
 import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
 import { clearAuthCookies, setAuthCookies } from "@/lib/server/auth-cookies";
@@ -7,6 +8,8 @@ import { sendMethodNotAllowed } from "@/lib/server/http";
 type OAuthCallbackPayload = {
   access_token: string;
 };
+
+const OAUTH_RETURN_COOKIE = "devnest_oauth_return_to";
 
 function extractCookieValue(setCookieHeaders: string[] | undefined, cookieName: string): string | null {
   for (const header of setCookieHeaders || []) {
@@ -18,9 +21,27 @@ function extractCookieValue(setCookieHeaders: string[] | undefined, cookieName: 
   return null;
 }
 
-function redirectToLoginWithError(res: NextApiResponse, detail: string) {
+function resolveAuthReturnRoute(req: NextApiRequest) {
+  return req.cookies[OAUTH_RETURN_COOKIE] === "/signup" ? "/signup" : "/login";
+}
+
+function clearOAuthReturnCookie(res: NextApiResponse) {
+  res.appendHeader(
+    "Set-Cookie",
+    serialize(OAUTH_RETURN_COOKIE, "", {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.AUTH_COOKIE_SECURE === "true",
+      path: "/",
+      maxAge: 0,
+    }),
+  );
+}
+
+function redirectToAuthWithError(req: NextApiRequest, res: NextApiResponse, detail: string) {
   clearAuthCookies(res);
-  res.redirect(302, `/login?oauth_error=${encodeURIComponent(detail)}`);
+  clearOAuthReturnCookie(res);
+  res.redirect(302, `${resolveAuthReturnRoute(req)}?oauth_error=${encodeURIComponent(detail)}`);
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -34,7 +55,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const state = typeof req.query.state === "string" ? req.query.state : "";
 
   if (!provider || !code || !state) {
-    redirectToLoginWithError(res, "OAuth callback is missing required parameters.");
+    redirectToAuthWithError(req, res, "OAuth callback is missing required parameters.");
     return;
   }
 
@@ -54,7 +75,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       data && typeof data === "object" && "detail" in data && typeof data.detail === "string"
         ? data.detail
         : "OAuth sign-in failed.";
-    redirectToLoginWithError(res, detail);
+    redirectToAuthWithError(req, res, detail);
     return;
   }
 
@@ -62,7 +83,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const refreshToken = extractCookieValue(response.headers.raw()["set-cookie"], "refresh_token");
 
   if (!accessToken || !refreshToken) {
-    redirectToLoginWithError(res, "OAuth sign-in completed, but the session could not be established.");
+    redirectToAuthWithError(req, res, "OAuth sign-in completed, but the session could not be established.");
     return;
   }
 
@@ -70,5 +91,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     accessToken,
     refreshToken,
   });
+  clearOAuthReturnCookie(res);
   res.redirect(302, "/dashboard");
 }

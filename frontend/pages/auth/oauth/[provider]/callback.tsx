@@ -4,6 +4,12 @@ type OAuthCallbackPageProps = {
   provider: string;
 };
 
+function authRouteFromCookie(cookieHeader: string | undefined) {
+  const match = (cookieHeader || "").match(/(?:^|;\s*)devnest_oauth_return_to=([^;]+)/);
+  const value = match?.[1] ? decodeURIComponent(match[1]) : "";
+  return value === "/signup" ? "/signup" : "/login";
+}
+
 export const getServerSideProps: GetServerSideProps<OAuthCallbackPageProps> = async (context) => {
   const provider = typeof context.params?.provider === "string" ? context.params.provider : "";
   const code = typeof context.query.code === "string" ? context.query.code : "";
@@ -11,11 +17,12 @@ export const getServerSideProps: GetServerSideProps<OAuthCallbackPageProps> = as
   const error = typeof context.query.error === "string" ? context.query.error : "";
   const errorDescription =
     typeof context.query.error_description === "string" ? context.query.error_description : "";
+  const authRoute = authRouteFromCookie(context.req.headers.cookie);
 
   if (!provider) {
     return {
       redirect: {
-        destination: "/login?oauth_error=Unsupported%20OAuth%20provider.",
+        destination: `${authRoute}?oauth_error=Unsupported%20OAuth%20provider.`,
         permanent: false,
       },
     };
@@ -25,7 +32,7 @@ export const getServerSideProps: GetServerSideProps<OAuthCallbackPageProps> = as
     const detail = errorDescription || error || "OAuth sign-in was cancelled.";
     return {
       redirect: {
-        destination: `/login?oauth_error=${encodeURIComponent(detail)}`,
+        destination: `${authRoute}?oauth_error=${encodeURIComponent(detail)}`,
         permanent: false,
       },
     };
@@ -34,7 +41,7 @@ export const getServerSideProps: GetServerSideProps<OAuthCallbackPageProps> = as
   if (!code || !state) {
     return {
       redirect: {
-        destination: "/login?oauth_error=OAuth%20callback%20is%20missing%20required%20parameters.",
+        destination: `${authRoute}?oauth_error=OAuth%20callback%20is%20missing%20required%20parameters.`,
         permanent: false,
       },
     };
