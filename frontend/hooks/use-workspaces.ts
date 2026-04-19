@@ -24,7 +24,9 @@ export function useWorkspaces() {
     queryKey: ["workspaces"],
     queryFn: async () => {
       const response = await browserApi.workspaces.list();
-      return response.items.map(toWorkspace);
+      return response.items
+        .map(toWorkspace)
+        .filter((workspace) => workspace.rawStatus !== "DELETED");
     },
     retry: false,
     refetchInterval: (data) => {
@@ -142,7 +144,7 @@ export function useWorkspaces() {
 
   const workspaces = useMemo(() => {
     return [...optimisticWorkspaces, ...(workspacesQuery.data || [])].filter(
-      (workspace) => !hiddenDeletedIds.includes(workspace.id),
+      (workspace) => workspace.rawStatus !== "DELETED" && !hiddenDeletedIds.includes(workspace.id),
     );
   }, [hiddenDeletedIds, optimisticWorkspaces, workspacesQuery.data]);
 
