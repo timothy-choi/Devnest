@@ -5,7 +5,6 @@ export const workspaceFormSchema = z.object({
   repositoryUrl: z.union([z.literal(""), z.string().url("Enter a valid repository URL.")]).optional(),
   enableCiCd: z.boolean(),
   enableAiTools: z.boolean(),
-  enableTerminal: z.boolean(),
 });
 
 export type WorkspaceFormValues = z.infer<typeof workspaceFormSchema>;

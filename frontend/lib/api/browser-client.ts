@@ -78,7 +78,6 @@ export type CreateWorkspaceInput = {
   repositoryUrl?: string;
   enableCiCd: boolean;
   enableAiTools: boolean;
-  enableTerminal: boolean;
 };
 
 export type SignupSuccess = {

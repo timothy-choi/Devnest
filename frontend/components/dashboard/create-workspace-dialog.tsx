@@ -39,7 +39,6 @@ export function CreateWorkspaceDialog({
       repositoryUrl: "",
       enableCiCd: true,
       enableAiTools: true,
-      enableTerminal: true,
     },
   });
 
@@ -94,12 +93,6 @@ export function CreateWorkspaceDialog({
               label="Enable AI Tools"
               description="Reserve UI space for AI-assisted developer tooling."
               onCheckedChange={(checked) => form.setValue("enableAiTools", checked)}
-            />
-            <ToggleRow
-              checked={form.watch("enableTerminal")}
-              label="Enable Terminal"
-              description="Keep the future terminal integration visible in the workspace shape."
-              onCheckedChange={(checked) => form.setValue("enableTerminal", checked)}
             />
           </div>
 

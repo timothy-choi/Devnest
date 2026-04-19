@@ -95,7 +95,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       repositoryUrl?: string;
       enableCiCd: boolean;
       enableAiTools: boolean;
-      enableTerminal: boolean;
     };
 
     const createResponse = await backendRequest({
@@ -110,7 +109,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           : undefined,
         runtime: {
           features: {
-            terminal_enabled: body.enableTerminal,
+            terminal_enabled: true,
             ci_enabled: body.enableCiCd,
             ai_tools_enabled: body.enableAiTools,
           },
