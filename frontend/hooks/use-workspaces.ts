@@ -210,7 +210,15 @@ export function useWorkspaces() {
         throw new ApiError(502, "No gateway URL was returned for this workspace.");
       }
 
-      window.location.assign(gatewayUrl);
+      const browserWindow = typeof globalThis !== "undefined" ? globalThis.window : undefined;
+      if (browserWindow) {
+        const dashboardUrl = `${browserWindow.location.origin}/dashboard`;
+        browserWindow.history.pushState({ devnestWorkspaceReturn: true }, "", dashboardUrl);
+        browserWindow.location.replace(gatewayUrl);
+        return;
+      }
+
+      globalThis.location?.assign(gatewayUrl);
       return;
     } catch (error) {
       queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);
