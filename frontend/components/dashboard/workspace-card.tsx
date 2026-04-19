@@ -32,6 +32,14 @@ export function WorkspaceCard({
   onRunWorkflow,
 }: WorkspaceCardProps) {
   const isPending = workspace.pendingAction !== null;
+  const primaryActionDisabled = isPending || (!workspace.canOpen && !workspace.canStart);
+  const primaryActionLabel = workspace.pendingAction
+    ? `${workspace.pendingAction}...`
+    : workspace.canOpen
+      ? "Open workspace"
+      : workspace.canStart
+        ? "Start workspace"
+        : workspace.statusLabel;
 
   return (
     <Card className="group overflow-hidden rounded-[28px] border-white/80 bg-white/88 shadow-[0_24px_65px_-42px_rgba(15,23,42,0.5)] transition hover:-translate-y-0.5 hover:shadow-[0_28px_75px_-42px_rgba(15,23,42,0.55)]">
@@ -62,7 +70,7 @@ export function WorkspaceCard({
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onRestart(String(workspace.id))} disabled={isPending || !workspace.canRestart}>
               <RotateCcw className="h-4 w-4" />
-              Restart
+              {workspace.canStart ? "Start" : "Restart"}
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onDownload(String(workspace.id))} disabled>
               <Download className="h-4 w-4" />
@@ -97,21 +105,28 @@ export function WorkspaceCard({
           </div>
         </div>
 
-        <Link href={`/workspace/${workspace.id}`}>
-          <a
-            className={`flex items-center justify-center rounded-2xl px-4 py-3 text-sm font-medium text-white transition ${
-              workspace.isBusy ? "cursor-not-allowed bg-slate-400" : "bg-slate-950 hover:bg-slate-800"
+        {workspace.canOpen ? (
+          <Link href={`/workspace/${workspace.id}`}>
+            <a className="flex items-center justify-center rounded-2xl bg-slate-950 px-4 py-3 text-sm font-medium text-white transition hover:bg-slate-800">
+              {primaryActionLabel}
+            </a>
+          </Link>
+        ) : (
+          <button
+            type="button"
+            className={`flex w-full items-center justify-center rounded-2xl px-4 py-3 text-sm font-medium text-white transition ${
+              primaryActionDisabled ? "cursor-not-allowed bg-slate-400" : "bg-sky-700 hover:bg-sky-600"
             }`}
-            aria-disabled={workspace.isBusy}
-            onClick={(event) => {
-              if (workspace.isBusy) {
-                event.preventDefault();
+            disabled={primaryActionDisabled}
+            onClick={() => {
+              if (workspace.canStart) {
+                onRestart(String(workspace.id));
               }
             }}
           >
-            {workspace.pendingAction ? `${workspace.pendingAction}...` : workspace.isBusy ? workspace.statusLabel : "Open workspace"}
-          </a>
-        </Link>
+            {primaryActionLabel}
+          </button>
+        )}
       </CardContent>
     </Card>
   );

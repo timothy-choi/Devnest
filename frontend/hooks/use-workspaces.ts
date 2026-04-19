@@ -54,6 +54,8 @@ export function useWorkspaces() {
         lastModifiedLabel: "Just now",
         pendingAction: "Creating",
         isBusy: true,
+        canOpen: false,
+        canStart: false,
         canStop: false,
         canRestart: false,
         canDelete: false,
