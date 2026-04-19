@@ -3,6 +3,7 @@ import { useRouter } from "next/router";
 import { useEffect, useRef, useState } from "react";
 import { Code2, Loader2 } from "lucide-react";
 
+import { useAuth } from "@/hooks/use-auth";
 import { AuthGuard } from "@/components/auth/auth-guard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -20,12 +21,30 @@ type AttachJson = {
 
 export default function WorkspacePage() {
   const router = useRouter();
+  const { isAuthenticated, isLoading, isCheckingSession } = useAuth();
   const workspaceId = typeof router.query.id === "string" ? router.query.id : "preview";
   const [message, setMessage] = useState<string | null>(null);
   const opened = useRef(false);
 
   useEffect(() => {
+    if (!router.isReady || isLoading || isCheckingSession) {
+      return;
+    }
+    if (!isAuthenticated) {
+      return;
+    }
     if (workspaceId === "preview" || opened.current) {
+      return;
+    }
+
+    const navEntry = typeof window !== "undefined" ? window.performance.getEntriesByType("navigation")[0] : null;
+    const navType =
+      navEntry && "type" in navEntry
+        ? String((navEntry as PerformanceNavigationTiming).type || "")
+        : "";
+    if (navType === "back_forward") {
+      opened.current = true;
+      void router.replace("/dashboard");
       return;
     }
 
@@ -85,7 +104,7 @@ export default function WorkspacePage() {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId]);
+  }, [isAuthenticated, isCheckingSession, isLoading, router, workspaceId]);
 
   return (
     <AuthGuard>

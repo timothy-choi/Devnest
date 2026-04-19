@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { browserApi } from "@/lib/api/browser-client";
@@ -14,6 +14,7 @@ export function useWorkspaces() {
   const [query, setQuery] = useState("");
   const [isCreateDialogOpen, setCreateDialogOpen] = useState(false);
   const [optimisticWorkspaces, setOptimisticWorkspaces] = useState<Workspace[]>([]);
+  const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -122,6 +123,7 @@ export function useWorkspaces() {
     },
     onSuccess: (_response, variables) => {
       if (variables.action === "delete") {
+        setHiddenDeletedIds((current) => (current.includes(variables.id) ? current : [...current, variables.id]));
         queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
           current.filter((workspace) => workspace.id !== variables.id),
         );
@@ -138,9 +140,16 @@ export function useWorkspaces() {
     },
   });
 
+  useEffect(() => {
+    const listedIds = new Set((workspacesQuery.data || []).map((workspace) => workspace.id));
+    setHiddenDeletedIds((current) => current.filter((id) => listedIds.has(id)));
+  }, [workspacesQuery.data]);
+
   const workspaces = useMemo(() => {
-    return [...optimisticWorkspaces, ...(workspacesQuery.data || [])];
-  }, [optimisticWorkspaces, workspacesQuery.data]);
+    return [...optimisticWorkspaces, ...(workspacesQuery.data || [])].filter(
+      (workspace) => !hiddenDeletedIds.includes(workspace.id),
+    );
+  }, [hiddenDeletedIds, optimisticWorkspaces, workspacesQuery.data]);
 
   const filteredWorkspaces = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
