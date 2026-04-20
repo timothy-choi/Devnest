@@ -126,6 +126,7 @@ export function DashboardShell() {
         enabledTypes={notificationState.enabledTypes}
         inAppEnabled={notificationState.channelSettings.inAppEnabled}
         pushEnabled={notificationState.channelSettings.pushEnabled}
+        unreadCount={notificationState.unreadCount}
       />
     </main>
   );

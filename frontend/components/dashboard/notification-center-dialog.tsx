@@ -176,13 +176,21 @@ export function NotificationCenterDialog({
                 />
                 <ChannelRow
                   label="Push"
-                  description="Send push notifications to registered devices or browsers."
+                  description="Send browser notifications when supported. On plain HTTP, DevNest falls back to updating the tab title while you are away."
                   checked={draftChannels.pushEnabled}
                   onCheckedChange={(checked) =>
                     setDraftChannels((current) => ({ ...current, pushEnabled: checked }))
                   }
                 />
               </div>
+
+              {draftChannels.pushEnabled && typeof window !== "undefined" && !window.isSecureContext ? (
+                <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                  Browser notification popups usually require HTTPS or localhost. On this HTTP app origin,
+                  DevNest can still highlight the tab title when new notifications arrive, but OS-level popup
+                  notifications may not appear.
+                </p>
+              ) : null}
 
               <div className="space-y-3">
                 {MANAGED_WORKSPACE_NOTIFICATION_TYPES.map((item) => (

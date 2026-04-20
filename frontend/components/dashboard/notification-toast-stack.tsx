@@ -19,6 +19,7 @@ type NotificationToastStackProps = {
   enabledTypes: Record<string, boolean>;
   inAppEnabled: boolean;
   pushEnabled: boolean;
+  unreadCount: number;
 };
 
 const TOAST_TTL_MS = 6000;
@@ -28,10 +29,39 @@ export function NotificationToastStack({
   enabledTypes,
   inAppEnabled,
   pushEnabled,
+  unreadCount,
 }: NotificationToastStackProps) {
   const initialized = useRef(false);
   const knownIds = useRef<Set<number>>(new Set());
+  const originalTitle = useRef<string>("");
   const [toasts, setToasts] = useState<NotificationToast[]>([]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    if (!originalTitle.current) {
+      originalTitle.current = document.title;
+    }
+
+    const syncTitle = () => {
+      if (!pushEnabled || unreadCount <= 0 || !document.hidden) {
+        document.title = originalTitle.current;
+        return;
+      }
+
+      document.title = `(${unreadCount}) ${originalTitle.current}`;
+    };
+
+    syncTitle();
+    document.addEventListener("visibilitychange", syncTitle);
+
+    return () => {
+      document.removeEventListener("visibilitychange", syncTitle);
+      document.title = originalTitle.current;
+    };
+  }, [pushEnabled, unreadCount]);
 
   useEffect(() => {
     if (!initialized.current) {
@@ -69,6 +99,7 @@ export function NotificationToastStack({
         pushEnabled &&
         typeof window !== "undefined" &&
         typeof Notification !== "undefined" &&
+        window.isSecureContext &&
         Notification.permission === "granted"
       ) {
         new Notification(item.title, {
