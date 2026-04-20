@@ -51,8 +51,8 @@ export function CreateWorkspaceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
-        <DialogHeader>
+      <DialogContent className="max-h-[85vh] overflow-hidden p-0 sm:max-w-lg">
+        <DialogHeader className="border-b border-slate-200/80 px-6 py-5">
           <DialogTitle>Create a new workspace</DialogTitle>
           <DialogDescription>
             Every workspace includes a terminal plus a default AI-ready toolset. Optional repository and CI/CD setup
@@ -60,7 +60,8 @@ export function CreateWorkspaceDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form className="space-y-6" onSubmit={form.handleSubmit(onSubmit)}>
+        <form className="flex max-h-[calc(85vh-96px)] flex-col" onSubmit={form.handleSubmit(onSubmit)}>
+          <div className="space-y-6 overflow-y-auto px-6 py-5">
           <div className="space-y-2">
             <Label htmlFor="workspace-name">Workspace Name</Label>
             <Input id="workspace-name" placeholder="Platform migration spike" {...form.register("name")} />
@@ -155,17 +156,20 @@ export function CreateWorkspaceDialog({
               </p>
             </div>
           </div>
+          </div>
 
-          {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
+          <div className="border-t border-slate-200/80 px-6 py-5">
+            {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
 
-          <DialogFooter className="sm:justify-between">
-            <Button type="button" variant="secondary" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "Creating..." : "Create Workspace"}
-            </Button>
-          </DialogFooter>
+            <DialogFooter className="mt-4 sm:justify-between">
+              <Button type="button" variant="secondary" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? "Creating..." : "Create Workspace"}
+              </Button>
+            </DialogFooter>
+          </div>
         </form>
       </DialogContent>
     </Dialog>

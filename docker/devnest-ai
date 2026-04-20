@@ -31,6 +31,26 @@ require_env() {
   fi
 }
 
+run_curl() {
+  if output="$(curl -fsSL --connect-timeout 10 "$@" 2>&1)"; then
+    printf '%s' "$output"
+    return 0
+  fi
+  status=$?
+  case "$output" in
+    *"Could not resolve host"*|*"could not resolve host"*)
+      echo "Network/DNS error: the workspace could not resolve the AI provider host. Check outbound internet access and DNS from inside the workspace." >&2
+      ;;
+    *"Failed to connect"*|*"Connection timed out"*|*"Operation timed out"*)
+      echo "Network error: the workspace could not reach the AI provider. Check outbound internet access from inside the workspace." >&2
+      ;;
+    *)
+      printf '%s\n' "$output" >&2
+      ;;
+  esac
+  exit "$status"
+}
+
 read_prompt() {
   if [ "$#" -gt 0 ]; then
     printf '%s' "$*"
@@ -83,7 +103,7 @@ case "$provider" in
           }
         ]
       }')"
-    response="$(curl -fsSL https://api.openai.com/v1/chat/completions \
+    response="$(run_curl https://api.openai.com/v1/chat/completions \
       -H "Authorization: Bearer $OPENAI_API_KEY" \
       -H "Content-Type: application/json" \
       -d "$payload")"
@@ -105,7 +125,7 @@ case "$provider" in
           }
         ]
       }')"
-    response="$(curl -fsSL https://api.anthropic.com/v1/messages \
+    response="$(run_curl https://api.anthropic.com/v1/messages \
       -H "x-api-key: $ANTHROPIC_API_KEY" \
       -H "anthropic-version: 2023-06-01" \
       -H "content-type: application/json" \
