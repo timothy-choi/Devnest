@@ -1,18 +1,23 @@
 "use client";
 
 import { Plus, Search } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { CreateWorkspaceDialog } from "@/components/dashboard/create-workspace-dialog";
 import { DashboardSidebar } from "@/components/dashboard/dashboard-sidebar";
+import { NotificationCenterDialog } from "@/components/dashboard/notification-center-dialog";
+import { NotificationToastStack } from "@/components/dashboard/notification-toast-stack";
 import { DashboardTopNav } from "@/components/dashboard/dashboard-top-nav";
 import { WorkspaceGrid } from "@/components/dashboard/workspace-grid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useNotifications } from "@/hooks/use-notifications";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 
 export function DashboardShell() {
   const workspaceState = useWorkspaces();
+  const notificationState = useNotifications();
+  const [isNotificationCenterOpen, setNotificationCenterOpen] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -31,7 +36,10 @@ export function DashboardShell() {
 
   return (
     <main className="min-h-screen bg-[linear-gradient(180deg,_#f8fafc_0%,_#eef2ff_100%)] text-slate-900">
-      <DashboardTopNav />
+      <DashboardTopNav
+        unreadCount={notificationState.unreadCount}
+        onOpenNotifications={() => setNotificationCenterOpen(true)}
+      />
       <div className="mx-auto flex max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:px-8">
         <DashboardSidebar onCreateWorkspace={workspaceState.openCreateDialog} />
 
@@ -96,6 +104,29 @@ export function DashboardShell() {
         onCreateWorkspace={workspaceState.createWorkspace}
         isSubmitting={workspaceState.isCreating}
         submitError={workspaceState.createError}
+      />
+
+      <NotificationCenterDialog
+        open={isNotificationCenterOpen}
+        onOpenChange={setNotificationCenterOpen}
+        notifications={notificationState.notifications}
+        unreadCount={notificationState.unreadCount}
+        enabledTypes={notificationState.enabledTypes}
+        channelSettings={notificationState.channelSettings}
+        isLoading={notificationState.isLoading}
+        isSaving={notificationState.isSavingPreferences}
+        isMarkingAllRead={notificationState.isMarkingAllRead}
+        errorMessage={notificationState.errorMessage}
+        onSavePreferences={notificationState.savePreferences}
+        onMarkAllRead={notificationState.markAllRead}
+      />
+
+      <NotificationToastStack
+        notifications={notificationState.notifications}
+        enabledTypes={notificationState.enabledTypes}
+        inAppEnabled={notificationState.channelSettings.inAppEnabled}
+        pushEnabled={notificationState.channelSettings.pushEnabled}
+        unreadCount={notificationState.unreadCount}
       />
     </main>
   );

@@ -12,7 +12,13 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 
-export function DashboardTopNav() {
+export function DashboardTopNav({
+  unreadCount = 0,
+  onOpenNotifications,
+}: {
+  unreadCount?: number;
+  onOpenNotifications: () => void;
+}) {
   const router = useRouter();
   const { user, logout } = useAuth();
   const initials = user?.displayName
@@ -40,8 +46,18 @@ export function DashboardTopNav() {
         </div>
 
         <div className="flex items-center gap-3">
-          <Button variant="secondary" size="icon" className="rounded-full border border-slate-200 bg-white">
+          <Button
+            variant="secondary"
+            size="icon"
+            className="relative rounded-full border border-slate-200 bg-white"
+            onClick={onOpenNotifications}
+          >
             <Bell className="h-4 w-4" />
+            {unreadCount ? (
+              <span className="absolute -right-0.5 -top-0.5 inline-flex min-w-5 items-center justify-center rounded-full bg-sky-500 px-1.5 text-[10px] font-semibold text-white">
+                {unreadCount > 9 ? "9+" : unreadCount}
+              </span>
+            ) : null}
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

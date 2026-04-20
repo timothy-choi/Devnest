@@ -79,6 +79,9 @@ from app.services.workspace_service.models import (
 from app.services.workspace_service.services.workspace_secret_service import (
     resolve_workspace_runtime_secret_env,
 )
+from app.services.notification_service.services.workspace_lifecycle_notifications import (
+    maybe_emit_workspace_lifecycle_notification,
+)
 from app.services.workspace_service.models.enums import (
     FailureStage,
     WorkspaceJobStatus,
@@ -1627,6 +1630,7 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
             )
         return
     if job.status == WorkspaceJobStatus.SUCCEEDED.value:
+        maybe_emit_workspace_lifecycle_notification(session, workspace=ws, job=job)
         log_event(
             logger,
             LogEvent.WORKSPACE_JOB_SUCCEEDED,
@@ -1644,6 +1648,7 @@ def _emit_job_outcome_event(session: Session, *, wid: int, ws: Workspace, job: W
             payload=base_payload,
         )
     elif job.status == WorkspaceJobStatus.FAILED.value:
+        maybe_emit_workspace_lifecycle_notification(session, workspace=ws, job=job)
         exhausted = int(job.attempt or 0) >= max_a
         terminal_payload = {
             **base_payload,

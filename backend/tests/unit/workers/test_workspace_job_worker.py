@@ -17,6 +17,7 @@ from app.services.orchestrator_service.results import (
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
+from app.services.notification_service.models import Notification, NotificationDelivery, NotificationRecipient
 from app.services.workspace_service.models import (
     Workspace,
     WorkspaceConfig,
@@ -440,6 +441,19 @@ class TestDispatchCreate:
             assert len(evs) == 2
             assert evs[0].event_type == WorkspaceStreamEventType.JOB_RUNNING
             assert evs[1].event_type == WorkspaceStreamEventType.JOB_SUCCEEDED
+            notif = session.exec(select(Notification).where(Notification.type == "workspace.create.succeeded")).first()
+            assert notif is not None
+            assert notif.title == "Workspace created"
+            recipient = session.exec(
+                select(NotificationRecipient).where(NotificationRecipient.notification_id == notif.notification_id)
+            ).first()
+            assert recipient is not None and recipient.user_id == owner_user_id
+            deliveries = list(
+                session.exec(
+                    select(NotificationDelivery).where(NotificationDelivery.notification_id == notif.notification_id)
+                ).all()
+            )
+            assert len(deliveries) == 3
 
     def test_create_dispatch_merges_encrypted_workspace_secrets_into_runtime_env(
         self,
@@ -884,6 +898,9 @@ class TestOrchestratorException:
             assert ws is not None
             assert ws.status == WorkspaceStatus.ERROR.value
             assert ws.last_error_code == "ORCHESTRATOR_EXCEPTION"
+            notif = session.exec(select(Notification).where(Notification.type == "workspace.create.failed")).first()
+            assert notif is not None
+            assert "engine blew up" in notif.body
 
 
 class TestUnsuccessfulOrchestratorResult:
