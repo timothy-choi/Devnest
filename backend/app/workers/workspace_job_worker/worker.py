@@ -76,6 +76,9 @@ from app.services.workspace_service.models import (
     WorkspaceRuntime,
     WorkspaceSnapshot,
 )
+from app.services.workspace_service.services.workspace_secret_service import (
+    resolve_workspace_runtime_secret_env,
+)
 from app.services.workspace_service.models.enums import (
     FailureStage,
     WorkspaceJobStatus,
@@ -1477,6 +1480,12 @@ def _execute_job_body(
         _cpu_limit = _config_json.get("cpu_limit_cores")
         _mem_limit = _config_json.get("memory_limit_mib")
         _env = _config_json.get("env") or {}
+        _secret_env = resolve_workspace_runtime_secret_env(session, workspace_id=wid)
+        if isinstance(_env, dict):
+            _env = {str(k): str(v) for k, v in _env.items()}
+        else:
+            _env = {}
+        _env.update(_secret_env)
         _features = get_workspace_features(_config_json).model_dump()
 
         result = orchestrator.bring_up_workspace_runtime(
@@ -1485,7 +1494,7 @@ def _execute_job_body(
             requested_config_version=cfg_v,
             cpu_limit_cores=float(_cpu_limit) if _cpu_limit else None,
             memory_limit_mib=int(_mem_limit) if _mem_limit else None,
-            env=_env if isinstance(_env, dict) else {},
+            env=_env,
             features=_features,
             launch_mode="new" if jt == WorkspaceJobType.CREATE.value else "resume",
         )

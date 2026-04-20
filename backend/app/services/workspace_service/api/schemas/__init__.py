@@ -4,6 +4,7 @@ from .workspace_schemas import (
     CreateWorkspaceAcceptedResponse,
     CreateWorkspaceRequest,
     PatchWorkspaceUpdateRequest,
+    WorkspaceAISecretInput,
     WorkspaceAccessResponse,
     WorkspaceAttachRequest,
     WorkspaceAttachResponse,
@@ -11,6 +12,7 @@ from .workspace_schemas import (
     WorkspaceIntentAcceptedResponse,
     WorkspaceListResponse,
     WorkspaceRuntimeSpecSchema,
+    WorkspaceSecretMutationResponse,
     WorkspaceSummaryResponse,
 )
 
@@ -18,6 +20,7 @@ __all__ = [
     "CreateWorkspaceAcceptedResponse",
     "CreateWorkspaceRequest",
     "PatchWorkspaceUpdateRequest",
+    "WorkspaceAISecretInput",
     "WorkspaceAccessResponse",
     "WorkspaceAttachRequest",
     "WorkspaceAttachResponse",
@@ -25,5 +28,6 @@ __all__ = [
     "WorkspaceIntentAcceptedResponse",
     "WorkspaceListResponse",
     "WorkspaceRuntimeSpecSchema",
+    "WorkspaceSecretMutationResponse",
     "WorkspaceSummaryResponse",
 ]

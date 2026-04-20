@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -81,6 +81,11 @@ class WorkspaceRuntimeSpecSchema(BaseModel):
         }
 
 
+class WorkspaceAISecretInput(BaseModel):
+    provider: Literal["openai", "anthropic"]
+    api_key: str = Field(..., min_length=1, max_length=8192)
+
+
 class CreateWorkspaceRequest(BaseModel):
     name: str = Field(..., max_length=255)
     description: str | None = Field(default=None, max_length=8192)
@@ -88,6 +93,10 @@ class CreateWorkspaceRequest(BaseModel):
     runtime: WorkspaceRuntimeSpecSchema = Field(
         default_factory=WorkspaceRuntimeSpecSchema,
         description="Seeds WorkspaceConfig v1 JSON.",
+    )
+    ai_secret: WorkspaceAISecretInput | None = Field(
+        default=None,
+        description="Optional encrypted AI provider key to store separately from runtime config.",
     )
 
     @field_validator("name")
@@ -107,6 +116,11 @@ class CreateWorkspaceAcceptedResponse(BaseModel):
     config_version: int
     job_id: int
     message: str = "Workspace creation accepted."
+
+
+class WorkspaceSecretMutationResponse(BaseModel):
+    workspace_id: int
+    message: str
 
 
 class WorkspaceIntentAcceptedResponse(BaseModel):

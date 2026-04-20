@@ -41,6 +41,9 @@ from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
     record_workspace_event,
 )
+from app.services.workspace_service.services.workspace_secret_service import (
+    upsert_workspace_ai_secret,
+)
 from app.services.workspace_service.services.workspace_session_service import (
     create_workspace_session,
     resolve_workspace_session_for_access,
@@ -994,6 +997,15 @@ def create_workspace(
     cfg = WorkspaceConfig(workspace_id=ws.workspace_id, version=1, config_json=config_json)
     session.add(cfg)
     session.flush()
+
+    if body.ai_secret is not None and ws.workspace_id is not None:
+        upsert_workspace_ai_secret(
+            session,
+            workspace_id=ws.workspace_id,
+            owner_user_id=owner_user_id,
+            provider=body.ai_secret.provider,
+            api_key=body.ai_secret.api_key,
+        )
 
     cid = _effective_correlation_id(correlation_id)
     job = WorkspaceJob(

@@ -104,13 +104,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const aiModel = (body.aiModel || "").trim();
     const runtimeEnv: Record<string, string> = {};
 
-    if (provider === "openai" && aiApiKey) {
+    if (provider === "openai") {
       runtimeEnv.DEVNEST_AI_DEFAULT_PROVIDER = "openai";
-      runtimeEnv.OPENAI_API_KEY = aiApiKey;
       runtimeEnv.OPENAI_MODEL = aiModel || "gpt-4.1-mini";
-    } else if (provider === "anthropic" && aiApiKey) {
+    } else if (provider === "anthropic") {
       runtimeEnv.DEVNEST_AI_DEFAULT_PROVIDER = "anthropic";
-      runtimeEnv.ANTHROPIC_API_KEY = aiApiKey;
       runtimeEnv.ANTHROPIC_MODEL = aiModel || "claude-3-5-sonnet-latest";
     }
 
@@ -132,6 +130,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             ai_tools_enabled: true,
           },
         },
+        ai_secret: provider && aiApiKey ? { provider, api_key: aiApiKey } : undefined,
       },
     });
 

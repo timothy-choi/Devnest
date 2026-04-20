@@ -17,6 +17,7 @@ from .workspace_config import WorkspaceConfig
 from .workspace_event import WorkspaceEvent
 from .workspace_job import WorkspaceJob
 from .workspace_runtime import WorkspaceRuntime
+from .workspace_secret import WorkspaceSecret
 from .workspace_session import WorkspaceSession
 from .workspace_snapshot import WorkspaceSnapshot
 
@@ -32,6 +33,7 @@ __all__ = [
     "WorkspaceJobType",
     "WorkspaceRuntime",
     "WorkspaceRuntimeHealthStatus",
+    "WorkspaceSecret",
     "WorkspaceSession",
     "WorkspaceSessionRole",
     "WorkspaceSessionStatus",

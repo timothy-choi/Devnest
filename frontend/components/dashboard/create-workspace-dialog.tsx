@@ -139,7 +139,7 @@ export function CreateWorkspaceDialog({
                 <p className="text-sm text-rose-600">{form.formState.errors.aiApiKey.message}</p>
               ) : (
                 <p className="text-sm text-slate-500">
-                  Stored with the workspace runtime config so terminal AI commands can use it automatically.
+                  Stored encrypted for this workspace and injected only at runtime so terminal AI commands can use it automatically.
                 </p>
               )}
             </div>
