@@ -18,6 +18,7 @@ type NotificationToastStackProps = {
   notifications: NotificationToast[];
   enabledTypes: Record<string, boolean>;
   inAppEnabled: boolean;
+  pushEnabled: boolean;
 };
 
 const TOAST_TTL_MS = 6000;
@@ -26,6 +27,7 @@ export function NotificationToastStack({
   notifications,
   enabledTypes,
   inAppEnabled,
+  pushEnabled,
 }: NotificationToastStackProps) {
   const initialized = useRef(false);
   const knownIds = useRef<Set<number>>(new Set());
@@ -62,11 +64,22 @@ export function NotificationToastStack({
 
     nextToasts.forEach((item) => {
       knownIds.current.add(item.notificationId);
+      if (
+        pushEnabled &&
+        typeof window !== "undefined" &&
+        typeof Notification !== "undefined" &&
+        Notification.permission === "granted"
+      ) {
+        new Notification(item.title, {
+          body: item.body,
+          tag: `devnest-${item.notificationId}`,
+        });
+      }
       window.setTimeout(() => {
         setToasts((current) => current.filter((toast) => toast.notificationId !== item.notificationId));
       }, TOAST_TTL_MS);
     });
-  }, [enabledTypes, inAppEnabled, notifications]);
+  }, [enabledTypes, inAppEnabled, notifications, pushEnabled]);
 
   if (!toasts.length) {
     return null;

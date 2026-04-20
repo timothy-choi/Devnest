@@ -18,14 +18,14 @@ export function useNotifications() {
   const notificationsQuery = useQuery({
     queryKey: ["notifications", "all"],
     queryFn: () => browserApi.notifications.list("all", 20),
-    refetchInterval: 10000,
+    refetchInterval: 3000,
     retry: false,
   });
 
   const unreadQuery = useQuery({
     queryKey: ["notifications", "unread"],
     queryFn: () => browserApi.notifications.list("unread", 50),
-    refetchInterval: 10000,
+    refetchInterval: 3000,
     retry: false,
   });
 
@@ -36,21 +36,37 @@ export function useNotifications() {
   });
 
   const savePreferencesMutation = useMutation({
-    mutationFn: ({
+    mutationFn: async ({
       enabledTypes,
       channels,
     }: {
       enabledTypes: Record<string, boolean>;
       channels: NotificationChannelSettings;
-    }) =>
-      browserApi.notifications.savePreferences({
+    }) => {
+      if (
+        channels.pushEnabled &&
+        typeof window !== "undefined" &&
+        typeof Notification !== "undefined" &&
+        Notification.permission === "default"
+      ) {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") {
+          channels = {
+            ...channels,
+            pushEnabled: false,
+          };
+        }
+      }
+
+      return browserApi.notifications.savePreferences({
         preferences: MANAGED_WORKSPACE_NOTIFICATION_TYPES.map((item) => ({
           notificationType: item.type,
           inAppEnabled: Boolean(enabledTypes[item.type]) && channels.inAppEnabled,
           emailEnabled: Boolean(enabledTypes[item.type]) && channels.emailEnabled,
           pushEnabled: Boolean(enabledTypes[item.type]) && channels.pushEnabled,
         })),
-      }),
+      });
+    },
     onSuccess: (data) => {
       queryClient.setQueryData(["notifications", "preferences"], data);
     },
