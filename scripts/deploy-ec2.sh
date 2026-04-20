@@ -72,6 +72,29 @@ elif [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
   unset _meta_token _pub_ip || true
 fi
 
+# Workspace secure-context defaults for EC2/integration.
+# code-server features like clipboard, webviews, and some extension flows work better over HTTPS.
+# When not explicitly configured, prefer Traefik's TLS entrypoint for public workspace URLs.
+if [[ -z "${DEVNEST_TLS_ENABLED:-}" ]]; then
+  export DEVNEST_TLS_ENABLED="true"
+  echo "DEVNEST_TLS_ENABLED unset: defaulting to true for secure workspace access."
+fi
+
+if [[ "${DEVNEST_TLS_ENABLED,,}" == "true" || "${DEVNEST_TLS_ENABLED,,}" == "1" || "${DEVNEST_TLS_ENABLED,,}" == "yes" || "${DEVNEST_TLS_ENABLED,,}" == "on" ]]; then
+  if [[ -z "${DEVNEST_GATEWAY_PUBLIC_SCHEME:-}" ]]; then
+    export DEVNEST_GATEWAY_PUBLIC_SCHEME="https"
+    echo "DEVNEST_GATEWAY_PUBLIC_SCHEME unset: using https."
+  fi
+  if [[ -z "${DEVNEST_GATEWAY_PUBLIC_PORT:-}" ]]; then
+    export DEVNEST_GATEWAY_PUBLIC_PORT="${DEVNEST_GATEWAY_TLS_PORT:-9443}"
+    echo "DEVNEST_GATEWAY_PUBLIC_PORT unset: using ${DEVNEST_GATEWAY_PUBLIC_PORT}."
+  fi
+  if [[ -z "${DEVNEST_GATEWAY_TLS_PORT:-}" ]]; then
+    export DEVNEST_GATEWAY_TLS_PORT="9443"
+    echo "DEVNEST_GATEWAY_TLS_PORT unset: using ${DEVNEST_GATEWAY_TLS_PORT}."
+  fi
+fi
+
 if [ "${BRANCH}" = "main" ]; then
   git checkout main
   git reset --hard origin/main
@@ -96,9 +119,9 @@ if [[ -x "${REPO_DIR}/scripts/verify-workspace-image.sh" ]]; then
 fi
 
 echo "--- gateway (browser IDE URL) ---"
-echo "Compose enables DEVNEST_GATEWAY_ENABLED by default with Traefik on host port \${DEVNEST_GATEWAY_PORT:-9081}."
-echo "Attach returns gateway_url like http://ws-<id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/"
-echo "On EC2 with Traefik on 80: export DEVNEST_GATEWAY_PORT=80 DEVNEST_GATEWAY_PUBLIC_PORT=0 before compose up."
+echo "Compose enables DEVNEST_GATEWAY_ENABLED by default with Traefik on host port \${DEVNEST_GATEWAY_PORT:-9081} and TLS port \${DEVNEST_GATEWAY_TLS_PORT:-9443}."
+echo "Attach returns gateway_url like \${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}://ws-<id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/"
+echo "On EC2 with Traefik on 443: export DEVNEST_GATEWAY_TLS_PORT=443 DEVNEST_GATEWAY_PUBLIC_PORT=0 before compose up."
 echo "Browsers must resolve ws-<id>.<DEVNEST_BASE_DOMAIN> to this host's Traefik IP (sslip.io / real DNS / hosts)."
 echo "--- deploy diagnostics ---"
 git status || true
