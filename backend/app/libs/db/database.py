@@ -30,6 +30,7 @@ from ...services.workspace_service.models import (  # noqa: F401 — register me
     WorkspaceEvent,
     WorkspaceJob,
     WorkspaceRuntime,
+    WorkspaceSecret,
     WorkspaceSession,
     WorkspaceSnapshot,
 )

@@ -8,7 +8,7 @@ FROM codercom/code-server:latest
 
 # Bumped when Dockerfile.workspace semantics change so `docker inspect` can prove which revision
 # is on the host (avoids “branch fixed it but EC2 still runs old :latest”).
-ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=5-coder-config-dirs
+ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=6-ai-tooling-defaults
 LABEL devnest.workspace.dockerfile.revision="${DEVNEST_WORKSPACE_DOCKERFILE_REVISION}"
 
 USER root
@@ -58,12 +58,47 @@ RUN mkdir -p /home/coder/.config/code-server /home/coder/.local/share/code-serve
 USER coder
 WORKDIR /home/coder/project
 
-# Preinstall extensions (Open VSX / marketplace as configured in code-server)
-RUN code-server --install-extension ms-python.python \
-    && code-server --install-extension ms-toolsai.jupyter \
-    && code-server --install-extension dbaeumer.vscode-eslint \
-    && code-server --install-extension esbenp.prettier-vscode \
-    && code-server --install-extension github.vscode-github-actions
+# Preinstall extensions.
+# - Core workspace extensions are required and should fail the build if unavailable.
+# - Some AI extensions (notably Copilot) are not always available from the default code-server
+#   extension source, so install them on a best-effort basis without breaking the image build.
+RUN set -eu; \
+    required_extensions="\
+      ms-python.python \
+      ms-toolsai.jupyter \
+      dbaeumer.vscode-eslint \
+      esbenp.prettier-vscode \
+      github.vscode-github-actions"; \
+    optional_extensions="\
+      GitHub.copilot \
+      GitHub.copilot-chat \
+      Continue.continue"; \
+    for ext in $required_extensions; do \
+      code-server --install-extension "$ext"; \
+    done; \
+    for ext in $optional_extensions; do \
+      if code-server --install-extension "$ext"; then \
+        echo "Installed optional extension: $ext"; \
+      else \
+        echo "Skipping optional extension unavailable in this marketplace: $ext"; \
+      fi; \
+    done
+
+USER root
+
+# Preserve a seeded extension bundle outside the bind-mounted code-server data dir.
+# At runtime, the workspace entrypoint copies these into the mounted extensions dir on first boot
+# when a new workspace's ``/home/coder/.local/share/code-server/extensions`` is still empty.
+RUN mkdir -p /opt/devnest/code-server/extensions \
+    && cp -R /home/coder/.local/share/code-server/extensions/. /opt/devnest/code-server/extensions/ \
+    && chown -R coder:coder /opt/devnest
+
+COPY docker/workspace-entrypoint.sh /usr/local/bin/devnest-workspace-entrypoint.sh
+COPY docker/devnest-ai /usr/local/bin/devnest-ai
+RUN chmod 755 /usr/local/bin/devnest-workspace-entrypoint.sh
+RUN chmod 755 /usr/local/bin/devnest-ai
+
+USER coder
 
 EXPOSE 8080
 
@@ -72,5 +107,5 @@ EXPOSE 8080
 # that repeats "code-server" or only replaces CMD therefore appends to those args and produces a
 # malformed argv (duplicate bind-addr, stray ".", duplicate "code-server"). Reset ENTRYPOINT to the
 # script alone, then pass only code-server CLI arguments (not the binary name).
-ENTRYPOINT ["/usr/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/devnest-workspace-entrypoint.sh"]
 CMD ["--bind-addr", "0.0.0.0:8080", "/home/coder/project"]

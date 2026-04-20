@@ -20,12 +20,14 @@ from app.services.workspace_service.api.schemas import (
     CreateWorkspaceAcceptedResponse,
     CreateWorkspaceRequest,
     PatchWorkspaceUpdateRequest,
+    WorkspaceAISecretInput,
     WorkspaceAccessResponse,
     WorkspaceAttachRequest,
     WorkspaceAttachResponse,
     WorkspaceDetailResponse,
     WorkspaceIntentAcceptedResponse,
     WorkspaceListResponse,
+    WorkspaceSecretMutationResponse,
 )
 from app.services.workspace_service.errors import (
     WorkspaceAccessDeniedError,
@@ -35,6 +37,10 @@ from app.services.workspace_service.errors import (
     WorkspaceServiceError,
 )
 from app.services.workspace_service.services import workspace_intent_service
+from app.services.workspace_service.services.workspace_secret_service import (
+    delete_workspace_ai_secret,
+    upsert_workspace_ai_secret,
+)
 from app.services.workspace_service.services.workspace_event_service import (
     EVENT_PAGE_LIMIT,
     SSE_POLL_INTERVAL_SEC,
@@ -135,6 +141,73 @@ def post_workspace(
         status=out.status,
         config_version=out.config_version,
         job_id=out.job_id,
+    )
+
+
+@router.put(
+    "/{workspace_id}/secrets/ai",
+    response_model=WorkspaceSecretMutationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upsert encrypted AI secret for a workspace",
+)
+def put_workspace_ai_secret(
+    workspace_id: int,
+    body: WorkspaceAISecretInput,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> WorkspaceSecretMutationResponse:
+    assert current.user_auth_id is not None
+    try:
+        upsert_workspace_ai_secret(
+            session,
+            workspace_id=workspace_id,
+            owner_user_id=current.user_auth_id,
+            provider=body.provider,
+            api_key=body.api_key,
+        )
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        detail = str(exc)
+        if detail == "workspace_not_found_or_not_owned":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+    return WorkspaceSecretMutationResponse(
+        workspace_id=workspace_id,
+        message="Workspace AI secret saved.",
+    )
+
+
+@router.delete(
+    "/{workspace_id}/secrets/ai/{provider}",
+    response_model=WorkspaceSecretMutationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Delete encrypted AI secret for a workspace",
+)
+def delete_workspace_ai_secret_route(
+    workspace_id: int,
+    provider: str,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> WorkspaceSecretMutationResponse:
+    assert current.user_auth_id is not None
+    try:
+        delete_workspace_ai_secret(
+            session,
+            workspace_id=workspace_id,
+            owner_user_id=current.user_auth_id,
+            provider=provider,
+        )
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        detail = str(exc)
+        if detail == "workspace_not_found_or_not_owned":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+    return WorkspaceSecretMutationResponse(
+        workspace_id=workspace_id,
+        message="Workspace AI secret deleted.",
     )
 
 

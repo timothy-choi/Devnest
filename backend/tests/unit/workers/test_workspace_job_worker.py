@@ -17,7 +17,15 @@ from app.services.orchestrator_service.results import (
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
-from app.services.workspace_service.models import Workspace, WorkspaceEvent, WorkspaceJob, WorkspaceRuntime
+from app.services.workspace_service.models import (
+    Workspace,
+    WorkspaceConfig,
+    WorkspaceEvent,
+    WorkspaceJob,
+    WorkspaceRuntime,
+    WorkspaceSecret,
+)
+from app.services.integration_service.token_crypto import encrypt_token
 from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
 from app.services.workspace_service.models.enums import (
     WorkspaceJobStatus,
@@ -432,6 +440,56 @@ class TestDispatchCreate:
             assert len(evs) == 2
             assert evs[0].event_type == WorkspaceStreamEventType.JOB_RUNNING
             assert evs[1].event_type == WorkspaceStreamEventType.JOB_SUCCEEDED
+
+    def test_create_dispatch_merges_encrypted_workspace_secrets_into_runtime_env(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            session.add(
+                WorkspaceConfig(
+                    workspace_id=wid,
+                    version=REQUESTED_CONFIG_VERSION,
+                    config_json={
+                        "env": {
+                            "DEVNEST_AI_DEFAULT_PROVIDER": "openai",
+                            "OPENAI_MODEL": "gpt-4.1-mini",
+                        }
+                    },
+                )
+            )
+            session.add(
+                WorkspaceSecret(
+                    workspace_id=wid,
+                    secret_name="OPENAI_API_KEY",
+                    encrypted_value=encrypt_token("sk-worker-secret"),
+                )
+            )
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        orch.bring_up_workspace_runtime.assert_called_once()
+        bup_kwargs = orch.bring_up_workspace_runtime.call_args.kwargs
+        assert bup_kwargs["env"]["DEVNEST_AI_DEFAULT_PROVIDER"] == "openai"
+        assert bup_kwargs["env"]["OPENAI_MODEL"] == "gpt-4.1-mini"
+        assert bup_kwargs["env"]["OPENAI_API_KEY"] == "sk-worker-secret"
 
 
 class TestDispatchStart:

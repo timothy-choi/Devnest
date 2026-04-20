@@ -22,8 +22,10 @@ from app.services.workspace_service.models import (
     WorkspaceJob,
     WorkspaceJobStatus,
     WorkspaceJobType,
+    WorkspaceSecret,
     WorkspaceStatus,
 )
+from app.services.workspace_service.services.workspace_secret_service import resolve_workspace_runtime_secret_env
 from app.services.workspace_service.services import workspace_intent_service
 from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
 
@@ -129,6 +131,49 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
         assert ev.status == WorkspaceStatus.CREATING.value
         assert ev.payload_json["job_id"] == out.job_id
         assert ev.payload_json["job_type"] == WorkspaceJobType.CREATE.value
+
+
+def test_create_workspace_stores_ai_key_encrypted_outside_runtime_env(
+    workspace_unit_engine: Engine,
+    owner_user_id: int,
+) -> None:
+    body = CreateWorkspaceRequest(
+        name="Secure AI Workspace",
+        runtime=WorkspaceRuntimeSpecSchema(
+            env={
+                "DEVNEST_AI_DEFAULT_PROVIDER": "openai",
+                "OPENAI_MODEL": "gpt-4.1-mini",
+            }
+        ),
+        ai_secret={"provider": "openai", "api_key": "sk-test-secret"},
+    )
+
+    with Session(workspace_unit_engine) as session:
+        out = workspace_intent_service.create_workspace(
+            session,
+            owner_user_id=owner_user_id,
+            body=body,
+        )
+
+    with Session(workspace_unit_engine) as session:
+        cfg = session.exec(
+            select(WorkspaceConfig).where(WorkspaceConfig.workspace_id == out.workspace_id),
+        ).first()
+        secret = session.exec(
+            select(WorkspaceSecret).where(WorkspaceSecret.workspace_id == out.workspace_id),
+        ).first()
+
+        assert cfg is not None
+        assert cfg.config_json["env"]["DEVNEST_AI_DEFAULT_PROVIDER"] == "openai"
+        assert cfg.config_json["env"]["OPENAI_MODEL"] == "gpt-4.1-mini"
+        assert "OPENAI_API_KEY" not in cfg.config_json["env"]
+
+        assert secret is not None
+        assert secret.secret_name == "OPENAI_API_KEY"
+        assert secret.encrypted_value != "sk-test-secret"
+        assert resolve_workspace_runtime_secret_env(session, workspace_id=out.workspace_id) == {
+            "OPENAI_API_KEY": "sk-test-secret"
+        }
 
 
 def test_create_workspace_assigns_distinct_project_storage_keys_and_public_hosts_when_gateway_enabled(

@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 
 type CreateWorkspaceDialogProps = {
   open: boolean;
@@ -37,9 +36,9 @@ export function CreateWorkspaceDialog({
     defaultValues: {
       name: "",
       repositoryUrl: "",
-      enableCiCd: true,
-      enableAiTools: true,
-      enableTerminal: true,
+      aiProvider: "",
+      aiApiKey: "",
+      aiModel: "",
     },
   });
 
@@ -51,92 +50,120 @@ export function CreateWorkspaceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
-        <DialogHeader>
+      <DialogContent className="top-4 flex max-h-[calc(100vh-2rem)] flex-col translate-y-0 gap-0 overflow-hidden p-0 sm:top-1/2 sm:max-h-[82vh] sm:max-w-lg sm:-translate-y-1/2">
+        <DialogHeader className="border-b border-slate-200/80 px-6 py-5">
           <DialogTitle>Create a new workspace</DialogTitle>
           <DialogDescription>
-            Start from mock data now, then swap this modal over to the real provisioning API in the next phase.
+            Every workspace includes a terminal plus a default AI-ready toolset. Optional repository and AI terminal
+            setup can be configured here.
           </DialogDescription>
         </DialogHeader>
 
-        <form className="space-y-6" onSubmit={form.handleSubmit(onSubmit)}>
-          <div className="space-y-2">
-            <Label htmlFor="workspace-name">Workspace Name</Label>
-            <Input id="workspace-name" placeholder="Platform migration spike" {...form.register("name")} />
-            {form.formState.errors.name ? (
-              <p className="text-sm text-rose-600">{form.formState.errors.name.message}</p>
-            ) : null}
+        <form className="flex min-h-0 flex-1 flex-col overflow-hidden" onSubmit={form.handleSubmit(onSubmit)}>
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+            <div className="space-y-5">
+              <div className="space-y-2">
+                <Label htmlFor="workspace-name">Workspace Name</Label>
+                <Input id="workspace-name" placeholder="Platform migration spike" {...form.register("name")} />
+                {form.formState.errors.name ? (
+                  <p className="text-sm text-rose-600">{form.formState.errors.name.message}</p>
+                ) : null}
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="repository-url">Repository URL</Label>
+                <Input
+                  id="repository-url"
+                  placeholder="https://github.com/org/repo"
+                  {...form.register("repositoryUrl")}
+                />
+                {form.formState.errors.repositoryUrl ? (
+                  <p className="text-sm text-rose-600">{form.formState.errors.repositoryUrl.message}</p>
+                ) : (
+                  <p className="text-sm text-slate-500">Optional. This is captured for the next repository integration step.</p>
+                )}
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 bg-white px-4 py-4 text-sm text-slate-600">
+                <p className="font-medium text-slate-900">Included in every workspace</p>
+                <p className="mt-2 leading-6">
+                  Integrated terminal access plus preinstalled AI coding tools for GitHub Copilot, Copilot Chat, and
+                  Continue. Users can still add more extensions inside code-server if they want.
+                </p>
+              </div>
+
+              <div className="space-y-4 rounded-3xl border border-slate-200 bg-white px-4 py-4">
+                <div className="space-y-1">
+                  <p className="font-medium text-slate-900">Workspace AI terminal configuration</p>
+                  <p className="text-sm leading-6 text-slate-600">
+                    Optional. If you add a provider and API key, the built-in <code>devnest-ai</code> terminal helper
+                    will be ready to use inside this workspace without manually exporting environment variables.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="ai-provider">AI Provider</Label>
+                  <select
+                    id="ai-provider"
+                    className="flex h-11 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+                    {...form.register("aiProvider")}
+                  >
+                    <option value="">No default provider</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                  </select>
+                  {form.formState.errors.aiProvider ? (
+                    <p className="text-sm text-rose-600">{form.formState.errors.aiProvider.message}</p>
+                  ) : null}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="ai-api-key">AI API Key</Label>
+                  <Input
+                    id="ai-api-key"
+                    type="password"
+                    placeholder="sk-... or sk-ant-..."
+                    autoComplete="off"
+                    {...form.register("aiApiKey")}
+                  />
+                  {form.formState.errors.aiApiKey ? (
+                    <p className="text-sm text-rose-600">{form.formState.errors.aiApiKey.message}</p>
+                  ) : (
+                    <p className="text-sm text-slate-500">
+                      Stored encrypted for this workspace and injected only at runtime so terminal AI commands can use it automatically.
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="ai-model">AI Model</Label>
+                  <Input
+                    id="ai-model"
+                    placeholder={form.watch("aiProvider") === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1-mini"}
+                    {...form.register("aiModel")}
+                  />
+                  <p className="text-sm text-slate-500">
+                    Optional. Leave blank to use the default model for the selected provider.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="repository-url">Repository URL</Label>
-            <Input
-              id="repository-url"
-              placeholder="https://github.com/org/repo"
-              {...form.register("repositoryUrl")}
-            />
-            {form.formState.errors.repositoryUrl ? (
-              <p className="text-sm text-rose-600">{form.formState.errors.repositoryUrl.message}</p>
-            ) : (
-              <p className="text-sm text-slate-500">Optional. This is captured for the next repository integration step.</p>
-            )}
+          <div className="sticky bottom-0 border-t border-slate-200/80 bg-white px-6 py-4">
+            {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
+
+            <DialogFooter className="mt-3 sm:justify-between">
+              <Button type="button" variant="secondary" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? "Creating..." : "Create Workspace"}
+              </Button>
+            </DialogFooter>
           </div>
-
-          <div className="space-y-4 rounded-3xl bg-slate-50 p-4">
-            <ToggleRow
-              checked={form.watch("enableCiCd")}
-              label="Enable CI/CD"
-              description="Preconfigure workflow controls in the workspace shell."
-              onCheckedChange={(checked) => form.setValue("enableCiCd", checked)}
-            />
-            <ToggleRow
-              checked={form.watch("enableAiTools")}
-              label="Enable AI Tools"
-              description="Reserve UI space for AI-assisted developer tooling."
-              onCheckedChange={(checked) => form.setValue("enableAiTools", checked)}
-            />
-            <ToggleRow
-              checked={form.watch("enableTerminal")}
-              label="Enable Terminal"
-              description="Keep the future terminal integration visible in the workspace shape."
-              onCheckedChange={(checked) => form.setValue("enableTerminal", checked)}
-            />
-          </div>
-
-          {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
-
-          <DialogFooter className="sm:justify-between">
-            <Button type="button" variant="secondary" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={isSubmitting}>
-              {isSubmitting ? "Creating..." : "Create Workspace"}
-            </Button>
-          </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function ToggleRow({
-  checked,
-  label,
-  description,
-  onCheckedChange,
-}: {
-  checked: boolean;
-  label: string;
-  description: string;
-  onCheckedChange: (checked: boolean) => void;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="space-y-1">
-        <p className="font-medium text-slate-900">{label}</p>
-        <p className="text-sm leading-6 text-slate-600">{description}</p>
-      </div>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} />
-    </div>
   );
 }

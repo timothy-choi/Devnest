@@ -76,9 +76,9 @@ export type SignupInput = {
 export type CreateWorkspaceInput = {
   name: string;
   repositoryUrl?: string;
-  enableCiCd: boolean;
-  enableAiTools: boolean;
-  enableTerminal: boolean;
+  aiProvider?: "openai" | "anthropic" | "";
+  aiApiKey?: string;
+  aiModel?: string;
 };
 
 export type SignupSuccess = {
