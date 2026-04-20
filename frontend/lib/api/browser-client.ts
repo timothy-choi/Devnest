@@ -62,6 +62,29 @@ export type WorkspaceAttachResponse = {
   detail?: string;
 };
 
+export type NotificationRecord = {
+  notificationId: number;
+  notificationRecipientId: number;
+  type: string;
+  title: string;
+  body: string;
+  priority: string;
+  recipientStatus: string;
+  readAt: string | null;
+  dismissedAt: string | null;
+  createdAt: string;
+};
+
+export type NotificationPreferenceRecord = {
+  preferenceId: number;
+  notificationType: string;
+  inAppEnabled: boolean;
+  emailEnabled: boolean;
+  pushEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type LoginInput = {
   username: string;
   password: string;
@@ -79,6 +102,15 @@ export type CreateWorkspaceInput = {
   aiProvider?: "openai" | "anthropic" | "";
   aiApiKey?: string;
   aiModel?: string;
+};
+
+export type SaveNotificationPreferencesInput = {
+  preferences: Array<{
+    notificationType: string;
+    inAppEnabled: boolean;
+    emailEnabled: boolean;
+    pushEnabled: boolean;
+  }>;
 };
 
 export type SignupSuccess = {
@@ -144,6 +176,33 @@ export const browserApi = {
     async remove(id: number) {
       return request<{ message: string }>(`/api/workspaces/${id}`, {
         method: "DELETE",
+      });
+    },
+  },
+  notifications: {
+    async list(filterMode: "all" | "unread" | "read" = "all", limit = 20) {
+      return request<{ items: NotificationRecord[]; total: number }>(
+        `/api/notifications?filterMode=${filterMode}&limit=${limit}`,
+        {
+          method: "GET",
+        },
+      );
+    },
+    async getPreferences() {
+      return request<{ preferences: NotificationPreferenceRecord[] }>("/api/notifications/preferences", {
+        method: "GET",
+      });
+    },
+    async savePreferences(payload: SaveNotificationPreferencesInput) {
+      return request<{ preferences: NotificationPreferenceRecord[] }>("/api/notifications/preferences", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+    },
+    async markReadBulk(notificationIds: number[]) {
+      return request<{ items: NotificationRecord[] }>("/api/notifications/read-bulk", {
+        method: "PUT",
+        body: JSON.stringify({ notificationIds }),
       });
     },
   },
