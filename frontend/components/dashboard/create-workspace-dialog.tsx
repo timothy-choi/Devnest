@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 
 type CreateWorkspaceDialogProps = {
   open: boolean;
@@ -38,7 +37,6 @@ export function CreateWorkspaceDialog({
       name: "",
       repositoryUrl: "",
       enableCiCd: true,
-      enableAiTools: true,
     },
   });
 
@@ -54,7 +52,8 @@ export function CreateWorkspaceDialog({
         <DialogHeader>
           <DialogTitle>Create a new workspace</DialogTitle>
           <DialogDescription>
-            Start from mock data now, then swap this modal over to the real provisioning API in the next phase.
+            Every workspace includes a terminal plus a default AI-ready toolset. Optional repository and CI/CD setup
+            can be configured here.
           </DialogDescription>
         </DialogHeader>
 
@@ -88,12 +87,14 @@ export function CreateWorkspaceDialog({
               description="Preconfigure workflow controls in the workspace shell."
               onCheckedChange={(checked) => form.setValue("enableCiCd", checked)}
             />
-            <ToggleRow
-              checked={form.watch("enableAiTools")}
-              label="Enable AI Tools"
-              description="Reserve UI space for AI-assisted developer tooling."
-              onCheckedChange={(checked) => form.setValue("enableAiTools", checked)}
-            />
+          </div>
+
+          <div className="rounded-3xl border border-slate-200 bg-white px-4 py-4 text-sm text-slate-600">
+            <p className="font-medium text-slate-900">Included in every workspace</p>
+            <p className="mt-2 leading-6">
+              Integrated terminal access plus preinstalled AI coding tools for GitHub Copilot, Copilot Chat, and
+              Continue. Users can still add more extensions inside code-server if they want.
+            </p>
           </div>
 
           {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
@@ -129,7 +130,21 @@ function ToggleRow({
         <p className="font-medium text-slate-900">{label}</p>
         <p className="text-sm leading-6 text-slate-600">{description}</p>
       </div>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} />
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onCheckedChange(!checked)}
+        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition ${
+          checked ? "bg-slate-950" : "bg-slate-300"
+        }`}
+      >
+        <span
+          className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+            checked ? "translate-x-5" : "translate-x-0.5"
+          } mt-0.5`}
+        />
+      </button>
     </div>
   );
 }

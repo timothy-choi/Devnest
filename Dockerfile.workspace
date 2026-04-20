@@ -8,7 +8,7 @@ FROM codercom/code-server:latest
 
 # Bumped when Dockerfile.workspace semantics change so `docker inspect` can prove which revision
 # is on the host (avoids “branch fixed it but EC2 still runs old :latest”).
-ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=5-coder-config-dirs
+ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=6-ai-tooling-defaults
 LABEL devnest.workspace.dockerfile.revision="${DEVNEST_WORKSPACE_DOCKERFILE_REVISION}"
 
 USER root
@@ -63,7 +63,10 @@ RUN code-server --install-extension ms-python.python \
     && code-server --install-extension ms-toolsai.jupyter \
     && code-server --install-extension dbaeumer.vscode-eslint \
     && code-server --install-extension esbenp.prettier-vscode \
-    && code-server --install-extension github.vscode-github-actions
+    && code-server --install-extension github.vscode-github-actions \
+    && code-server --install-extension GitHub.copilot \
+    && code-server --install-extension GitHub.copilot-chat \
+    && code-server --install-extension Continue.continue
 
 EXPOSE 8080
 
