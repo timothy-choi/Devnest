@@ -50,7 +50,7 @@ export function CreateWorkspaceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[78vh] overflow-hidden p-0 sm:max-w-lg">
+      <DialogContent className="top-4 max-h-[calc(100vh-2rem)] translate-y-0 gap-0 overflow-hidden p-0 sm:top-1/2 sm:max-h-[82vh] sm:max-w-lg sm:-translate-y-1/2">
         <DialogHeader className="border-b border-slate-200/80 px-6 py-5">
           <DialogTitle>Create a new workspace</DialogTitle>
           <DialogDescription>
@@ -59,8 +59,8 @@ export function CreateWorkspaceDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form className="flex max-h-[calc(78vh-96px)] flex-col" onSubmit={form.handleSubmit(onSubmit)}>
-          <div className="space-y-5 overflow-y-auto px-6 py-5">
+        <form className="flex min-h-0 flex-1 flex-col" onSubmit={form.handleSubmit(onSubmit)}>
+          <div className="min-h-0 space-y-5 overflow-y-auto px-6 py-5">
           <div className="space-y-2">
             <Label htmlFor="workspace-name">Workspace Name</Label>
             <Input id="workspace-name" placeholder="Platform migration spike" {...form.register("name")} />
@@ -148,7 +148,7 @@ export function CreateWorkspaceDialog({
           </div>
           </div>
 
-          <div className="border-t border-slate-200/80 bg-white px-6 py-4">
+          <div className="sticky bottom-0 border-t border-slate-200/80 bg-white px-6 py-4">
             {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
 
             <DialogFooter className="mt-3 sm:justify-between">
