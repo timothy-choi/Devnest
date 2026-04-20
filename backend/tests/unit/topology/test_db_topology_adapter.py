@@ -56,7 +56,6 @@ class _RecordingLinuxRunner:
         self._veth_ctr: str | None = None
         self._master: tuple[str, str] | None = None
         self._ctr_addrs: dict[str, str] = {}
-        self._default_gw: str | None = None
 
     def run(self, cmd: list[str]) -> str:
         argv = list(cmd)
@@ -97,22 +96,6 @@ class _RecordingLinuxRunner:
             ifn = argv[di + 1]
             self._ctr_addrs[ifn] = spec
             return ""
-
-        # ``ensure_default_route_in_netns``: nsenter … -- ip route replace default via GW
-        if argv and argv[0] == "nsenter" and "route" in argv and "replace" in argv and "via" in argv:
-            vi = argv.index("via")
-            if vi + 1 < len(argv):
-                self._default_gw = argv[vi + 1]
-            return ""
-
-        # ``topology_attach_plumbing_failures``: default route check
-        if (
-            argv
-            and argv[0] == "nsenter"
-            and argv[-5:] == ["ip", "-brief", "route", "show", "default"]
-            and self._default_gw
-        ):
-            return f"default via {self._default_gw} dev vc0 proto kernel\n"
 
         # nsenter … ip link show dev <ctr_if> (workspace netns)
         if (

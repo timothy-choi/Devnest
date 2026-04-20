@@ -646,8 +646,6 @@ class DbTopologyAdapter(TopologyAdapter):
             _step("move_container_if_to_netns")
             ao.assign_ip_in_netns(netns_ref, container_if, workspace_ip, cidr, runner=r)
             _step("assign_ip_in_netns")
-            ao.ensure_default_route_in_netns(netns_ref, gateway_ip, runner=r)
-            _step("ensure_default_route_in_netns")
             out_master = ""
             try:
                 out_master = r.run(["ip", "link", "show", "master", bridge_name])

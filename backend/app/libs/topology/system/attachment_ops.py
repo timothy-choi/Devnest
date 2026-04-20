@@ -462,10 +462,6 @@ def topology_attach_plumbing_failures(
             f"workspace IP {workspace_ip!r} not assigned on {c!r} inside workspace netns "
             f"(CIDR {cidr!r})",
         )
-    if not check_default_ipv4_route_via_gateway_in_netns(nr, gateway_ip, runner=r):
-        reasons.append(
-            f"default route via topology gateway {gateway_ip!r} missing in workspace netns",
-        )
     return reasons
 
 
