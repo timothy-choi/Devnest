@@ -432,6 +432,12 @@ jobs:
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
             export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
             export GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}"
+            export SMTP_HOST="${{ secrets.SMTP_HOST }}"
+            export SMTP_PORT="${{ secrets.SMTP_PORT }}"
+            export SMTP_USER="${{ secrets.SMTP_USER }}"
+            export SMTP_PASSWORD="${{ secrets.SMTP_PASSWORD }}"
+            export SMTP_FROM_ADDRESS="${{ secrets.SMTP_FROM_ADDRESS }}"
+            export SMTP_USE_TLS="${{ secrets.SMTP_USE_TLS }}"
             docker compose -f "${COMPOSE}" --project-directory "${REPO_DIR}" down || true
             docker compose -f "${COMPOSE}" --project-directory "${REPO_DIR}" up -d --build
             echo "Deployment complete."

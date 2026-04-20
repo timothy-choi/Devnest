@@ -44,25 +44,26 @@ export function NotificationToastStack({
       return;
     }
 
-    const nextToasts = notifications.filter(
+    const nextNotifications = notifications.filter(
       (item) =>
-        inAppEnabled &&
         !item.readAt &&
         Boolean(enabledTypes[item.type]) &&
         !knownIds.current.has(item.notificationId),
     );
 
-    if (!nextToasts.length) {
+    if (!nextNotifications.length) {
       return;
     }
 
-    setToasts((current) => {
-      const existingIds = new Set(current.map((item) => item.notificationId));
-      const additions = nextToasts.filter((item) => !existingIds.has(item.notificationId));
-      return [...current, ...additions].slice(-4);
-    });
+    if (inAppEnabled) {
+      setToasts((current) => {
+        const existingIds = new Set(current.map((item) => item.notificationId));
+        const additions = nextNotifications.filter((item) => !existingIds.has(item.notificationId));
+        return [...current, ...additions].slice(-4);
+      });
+    }
 
-    nextToasts.forEach((item) => {
+    nextNotifications.forEach((item) => {
       knownIds.current.add(item.notificationId);
       if (
         pushEnabled &&
@@ -75,9 +76,13 @@ export function NotificationToastStack({
           tag: `devnest-${item.notificationId}`,
         });
       }
-      window.setTimeout(() => {
-        setToasts((current) => current.filter((toast) => toast.notificationId !== item.notificationId));
-      }, TOAST_TTL_MS);
+      if (inAppEnabled) {
+        window.setTimeout(() => {
+          setToasts((current) =>
+            current.filter((toast) => toast.notificationId !== item.notificationId),
+          );
+        }, TOAST_TTL_MS);
+      }
     });
   }, [enabledTypes, inAppEnabled, notifications, pushEnabled]);
 
