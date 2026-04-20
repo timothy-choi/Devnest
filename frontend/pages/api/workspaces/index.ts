@@ -94,7 +94,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       name: string;
       repositoryUrl?: string;
       enableCiCd: boolean;
+      aiProvider?: "openai" | "anthropic" | "";
+      aiApiKey?: string;
+      aiModel?: string;
     };
+
+    const provider = (body.aiProvider || "").trim();
+    const aiApiKey = (body.aiApiKey || "").trim();
+    const aiModel = (body.aiModel || "").trim();
+    const runtimeEnv: Record<string, string> = {};
+
+    if (provider === "openai" && aiApiKey) {
+      runtimeEnv.DEVNEST_AI_DEFAULT_PROVIDER = "openai";
+      runtimeEnv.OPENAI_API_KEY = aiApiKey;
+      runtimeEnv.OPENAI_MODEL = aiModel || "gpt-4.1-mini";
+    } else if (provider === "anthropic" && aiApiKey) {
+      runtimeEnv.DEVNEST_AI_DEFAULT_PROVIDER = "anthropic";
+      runtimeEnv.ANTHROPIC_API_KEY = aiApiKey;
+      runtimeEnv.ANTHROPIC_MODEL = aiModel || "claude-3-5-sonnet-latest";
+    }
 
     const createResponse = await backendRequest({
       req,
@@ -107,6 +125,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           ? `Repository seed requested: ${body.repositoryUrl}`
           : undefined,
         runtime: {
+          env: runtimeEnv,
           features: {
             terminal_enabled: true,
             ci_enabled: body.enableCiCd,

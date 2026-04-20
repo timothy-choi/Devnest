@@ -37,6 +37,9 @@ export function CreateWorkspaceDialog({
       name: "",
       repositoryUrl: "",
       enableCiCd: true,
+      aiProvider: "",
+      aiApiKey: "",
+      aiModel: "",
     },
   });
 
@@ -95,6 +98,62 @@ export function CreateWorkspaceDialog({
               Integrated terminal access plus preinstalled AI coding tools for GitHub Copilot, Copilot Chat, and
               Continue. Users can still add more extensions inside code-server if they want.
             </p>
+          </div>
+
+          <div className="space-y-4 rounded-3xl border border-slate-200 bg-white px-4 py-4">
+            <div className="space-y-1">
+              <p className="font-medium text-slate-900">Workspace AI terminal configuration</p>
+              <p className="text-sm leading-6 text-slate-600">
+                Optional. If you add a provider and API key, the built-in <code>devnest-ai</code> terminal helper
+                will be ready to use inside this workspace without manually exporting environment variables.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="ai-provider">AI Provider</Label>
+              <select
+                id="ai-provider"
+                className="flex h-11 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+                {...form.register("aiProvider")}
+              >
+                <option value="">No default provider</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+              </select>
+              {form.formState.errors.aiProvider ? (
+                <p className="text-sm text-rose-600">{form.formState.errors.aiProvider.message}</p>
+              ) : null}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="ai-api-key">AI API Key</Label>
+              <Input
+                id="ai-api-key"
+                type="password"
+                placeholder="sk-... or sk-ant-..."
+                autoComplete="off"
+                {...form.register("aiApiKey")}
+              />
+              {form.formState.errors.aiApiKey ? (
+                <p className="text-sm text-rose-600">{form.formState.errors.aiApiKey.message}</p>
+              ) : (
+                <p className="text-sm text-slate-500">
+                  Stored with the workspace runtime config so terminal AI commands can use it automatically.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="ai-model">AI Model</Label>
+              <Input
+                id="ai-model"
+                placeholder={form.watch("aiProvider") === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1-mini"}
+                {...form.register("aiModel")}
+              />
+              <p className="text-sm text-slate-500">
+                Optional. Leave blank to use the default model for the selected provider.
+              </p>
+            </div>
           </div>
 
           {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}

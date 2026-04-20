@@ -94,7 +94,9 @@ RUN mkdir -p /opt/devnest/code-server/extensions \
     && chown -R coder:coder /opt/devnest
 
 COPY docker/workspace-entrypoint.sh /usr/local/bin/devnest-workspace-entrypoint.sh
+COPY docker/devnest-ai /usr/local/bin/devnest-ai
 RUN chmod 755 /usr/local/bin/devnest-workspace-entrypoint.sh
+RUN chmod 755 /usr/local/bin/devnest-ai
 
 USER coder
 
