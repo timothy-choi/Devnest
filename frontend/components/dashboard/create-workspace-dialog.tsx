@@ -36,7 +36,6 @@ export function CreateWorkspaceDialog({
     defaultValues: {
       name: "",
       repositoryUrl: "",
-      enableCiCd: true,
       aiProvider: "",
       aiApiKey: "",
       aiModel: "",
@@ -51,17 +50,17 @@ export function CreateWorkspaceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-hidden p-0 sm:max-w-lg">
+      <DialogContent className="max-h-[78vh] overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader className="border-b border-slate-200/80 px-6 py-5">
           <DialogTitle>Create a new workspace</DialogTitle>
           <DialogDescription>
-            Every workspace includes a terminal plus a default AI-ready toolset. Optional repository and CI/CD setup
-            can be configured here.
+            Every workspace includes a terminal plus a default AI-ready toolset. Optional repository and AI terminal
+            setup can be configured here.
           </DialogDescription>
         </DialogHeader>
 
-        <form className="flex max-h-[calc(85vh-96px)] flex-col" onSubmit={form.handleSubmit(onSubmit)}>
-          <div className="space-y-6 overflow-y-auto px-6 py-5">
+        <form className="flex max-h-[calc(78vh-96px)] flex-col" onSubmit={form.handleSubmit(onSubmit)}>
+          <div className="space-y-5 overflow-y-auto px-6 py-5">
           <div className="space-y-2">
             <Label htmlFor="workspace-name">Workspace Name</Label>
             <Input id="workspace-name" placeholder="Platform migration spike" {...form.register("name")} />
@@ -82,15 +81,6 @@ export function CreateWorkspaceDialog({
             ) : (
               <p className="text-sm text-slate-500">Optional. This is captured for the next repository integration step.</p>
             )}
-          </div>
-
-          <div className="space-y-4 rounded-3xl bg-slate-50 p-4">
-            <ToggleRow
-              checked={form.watch("enableCiCd")}
-              label="Enable CI/CD"
-              description="Preconfigure workflow controls in the workspace shell."
-              onCheckedChange={(checked) => form.setValue("enableCiCd", checked)}
-            />
           </div>
 
           <div className="rounded-3xl border border-slate-200 bg-white px-4 py-4 text-sm text-slate-600">
@@ -158,10 +148,10 @@ export function CreateWorkspaceDialog({
           </div>
           </div>
 
-          <div className="border-t border-slate-200/80 px-6 py-5">
+          <div className="border-t border-slate-200/80 bg-white px-6 py-4">
             {submitError ? <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{submitError}</p> : null}
 
-            <DialogFooter className="mt-4 sm:justify-between">
+            <DialogFooter className="mt-3 sm:justify-between">
               <Button type="button" variant="secondary" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
                 Cancel
               </Button>
@@ -173,41 +163,5 @@ export function CreateWorkspaceDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function ToggleRow({
-  checked,
-  label,
-  description,
-  onCheckedChange,
-}: {
-  checked: boolean;
-  label: string;
-  description: string;
-  onCheckedChange: (checked: boolean) => void;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="space-y-1">
-        <p className="font-medium text-slate-900">{label}</p>
-        <p className="text-sm leading-6 text-slate-600">{description}</p>
-      </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onCheckedChange(!checked)}
-        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition ${
-          checked ? "bg-slate-950" : "bg-slate-300"
-        }`}
-      >
-        <span
-          className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
-            checked ? "translate-x-5" : "translate-x-0.5"
-          } mt-0.5`}
-        />
-      </button>
-    </div>
   );
 }

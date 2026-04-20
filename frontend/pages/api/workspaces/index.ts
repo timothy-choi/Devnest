@@ -93,7 +93,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const body = req.body as {
       name: string;
       repositoryUrl?: string;
-      enableCiCd: boolean;
       aiProvider?: "openai" | "anthropic" | "";
       aiApiKey?: string;
       aiModel?: string;
@@ -126,7 +125,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           env: runtimeEnv,
           features: {
             terminal_enabled: true,
-            ci_enabled: body.enableCiCd,
+            ci_enabled: false,
             ai_tools_enabled: true,
           },
         },
