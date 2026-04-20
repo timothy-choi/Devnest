@@ -58,15 +58,31 @@ RUN mkdir -p /home/coder/.config/code-server /home/coder/.local/share/code-serve
 USER coder
 WORKDIR /home/coder/project
 
-# Preinstall extensions (Open VSX / marketplace as configured in code-server)
-RUN code-server --install-extension ms-python.python \
-    && code-server --install-extension ms-toolsai.jupyter \
-    && code-server --install-extension dbaeumer.vscode-eslint \
-    && code-server --install-extension esbenp.prettier-vscode \
-    && code-server --install-extension github.vscode-github-actions \
-    && code-server --install-extension GitHub.copilot \
-    && code-server --install-extension GitHub.copilot-chat \
-    && code-server --install-extension Continue.continue
+# Preinstall extensions.
+# - Core workspace extensions are required and should fail the build if unavailable.
+# - Some AI extensions (notably Copilot) are not always available from the default code-server
+#   extension source, so install them on a best-effort basis without breaking the image build.
+RUN set -eu; \
+    required_extensions="\
+      ms-python.python \
+      ms-toolsai.jupyter \
+      dbaeumer.vscode-eslint \
+      esbenp.prettier-vscode \
+      github.vscode-github-actions"; \
+    optional_extensions="\
+      GitHub.copilot \
+      GitHub.copilot-chat \
+      Continue.continue"; \
+    for ext in $required_extensions; do \
+      code-server --install-extension "$ext"; \
+    done; \
+    for ext in $optional_extensions; do \
+      if code-server --install-extension "$ext"; then \
+        echo "Installed optional extension: $ext"; \
+      else \
+        echo "Skipping optional extension unavailable in this marketplace: $ext"; \
+      fi; \
+    done
 
 EXPOSE 8080
 
