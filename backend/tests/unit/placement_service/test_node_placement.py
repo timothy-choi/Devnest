@@ -40,6 +40,8 @@ def _add_node(
     status: str = ExecutionNodeStatus.READY.value,
     alloc_cpu: float = 4.0,
     alloc_mem: int = 8192,
+    alloc_disk: int = 102_400,
+    max_workspaces: int = 32,
 ) -> ExecutionNode:
     total_cpu = max(4.0, float(alloc_cpu))
     total_memory_mb = max(8192, int(alloc_mem))
@@ -53,6 +55,8 @@ def _add_node(
         total_memory_mb=total_memory_mb,
         allocatable_cpu=alloc_cpu,
         allocatable_memory_mb=alloc_mem,
+        allocatable_disk_mb=alloc_disk,
+        max_workspaces=max_workspaces,
     )
     session.add(n)
     session.commit()
@@ -101,6 +105,7 @@ def test_select_node_rejects_non_positive_request(placement_engine: Engine) -> N
                 workspace_id=1,
                 requested_cpu=0.0,
                 requested_memory_mb=512,
+                requested_disk_mb=4096,
             )
         with pytest.raises(InvalidPlacementParametersError):
             select_node_for_workspace(
@@ -108,6 +113,15 @@ def test_select_node_rejects_non_positive_request(placement_engine: Engine) -> N
                 workspace_id=1,
                 requested_cpu=1.0,
                 requested_memory_mb=0,
+                requested_disk_mb=4096,
+            )
+        with pytest.raises(InvalidPlacementParametersError):
+            select_node_for_workspace(
+                session,
+                workspace_id=1,
+                requested_cpu=1.0,
+                requested_memory_mb=512,
+                requested_disk_mb=0,
             )
 
 
@@ -120,6 +134,7 @@ def test_select_node_insufficient_capacity(placement_engine: Engine) -> None:
                 workspace_id=1,
                 requested_cpu=1.0,
                 requested_memory_mb=512,
+                requested_disk_mb=4096,
             )
 
 
@@ -167,6 +182,7 @@ def test_select_skips_node_when_effective_capacity_exhausted(placement_engine: E
                 node_id="only",
                 reserved_cpu=1.5,
                 reserved_memory_mb=1536,
+                reserved_disk_mb=8192,
             ),
         )
         session.commit()
@@ -176,12 +192,14 @@ def test_select_skips_node_when_effective_capacity_exhausted(placement_engine: E
                 workspace_id=99,
                 requested_cpu=1.0,
                 requested_memory_mb=1024,
+                requested_disk_mb=4096,
             )
         picked = select_node_for_workspace(
             session,
             workspace_id=100,
             requested_cpu=0.25,
             requested_memory_mb=256,
+            requested_disk_mb=1024,
         )
         assert picked.node_key == "only"
 
@@ -208,6 +226,7 @@ def test_select_allows_placement_when_only_error_workloads_have_ledger(placement
                 node_id="solo",
                 reserved_cpu=1.9,
                 reserved_memory_mb=2000,
+                reserved_disk_mb=16_384,
             ),
         )
         session.commit()
@@ -216,5 +235,129 @@ def test_select_allows_placement_when_only_error_workloads_have_ledger(placement
             workspace_id=501,
             requested_cpu=1.0,
             requested_memory_mb=512,
+            requested_disk_mb=1024,
         )
         assert picked.node_key == "solo"
+
+
+def test_select_node_rejects_when_max_workspaces_reached(placement_engine: Engine) -> None:
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    with Session(placement_engine) as session:
+        _add_node(session, key="slot-full", max_workspaces=1)
+        u = UserAuth(username="slot1", password_hash="x", email="slot1@e.com")
+        session.add(u)
+        session.commit()
+        session.refresh(u)
+        ws = Workspace(name="slot-ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=ws.workspace_id,
+                node_id="slot-full",
+                reserved_cpu=0.5,
+                reserved_memory_mb=256,
+                reserved_disk_mb=1024,
+            ),
+        )
+        session.commit()
+
+        with pytest.raises(NoSchedulableNodeError, match="active_workspaces < max_workspaces"):
+            select_node_for_workspace(
+                session,
+                workspace_id=999,
+                requested_cpu=0.5,
+                requested_memory_mb=256,
+                requested_disk_mb=1024,
+            )
+
+
+def test_select_node_rejects_when_free_disk_insufficient(placement_engine: Engine) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="disk-tight", alloc_disk=2048)
+        with pytest.raises(NoSchedulableNodeError, match="effective_free_disk_mb"):
+            select_node_for_workspace(
+                session,
+                workspace_id=1,
+                requested_cpu=0.5,
+                requested_memory_mb=256,
+                requested_disk_mb=4096,
+            )
+
+
+def test_select_node_chooses_other_node_when_first_is_full(placement_engine: Engine) -> None:
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    with Session(placement_engine) as session:
+        _add_node(session, key="full", max_workspaces=1, alloc_disk=8192)
+        _add_node(session, key="roomy", max_workspaces=4, alloc_disk=8192)
+        u = UserAuth(username="other1", password_hash="x", email="other1@e.com")
+        session.add(u)
+        session.commit()
+        session.refresh(u)
+        ws = Workspace(name="full-ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=ws.workspace_id,
+                node_id="full",
+                reserved_cpu=0.5,
+                reserved_memory_mb=256,
+                reserved_disk_mb=1024,
+            ),
+        )
+        session.commit()
+
+        picked = select_node_for_workspace(
+            session,
+            workspace_id=123,
+            requested_cpu=0.5,
+            requested_memory_mb=256,
+            requested_disk_mb=1024,
+        )
+        assert picked.node_key == "roomy"
+
+
+def test_select_node_reports_no_capacity_when_all_nodes_ineligible(placement_engine: Engine) -> None:
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    with Session(placement_engine) as session:
+        _add_node(session, key="slot-full", max_workspaces=1, alloc_disk=8192)
+        _add_node(session, key="disk-tight", max_workspaces=4, alloc_disk=1024)
+        u = UserAuth(username="none1", password_hash="x", email="none1@e.com")
+        session.add(u)
+        session.commit()
+        session.refresh(u)
+        ws = Workspace(name="slot-ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=ws.workspace_id,
+                node_id="slot-full",
+                reserved_cpu=0.5,
+                reserved_memory_mb=256,
+                reserved_disk_mb=1024,
+            ),
+        )
+        session.commit()
+
+        with pytest.raises(NoSchedulableNodeError, match="effective_free_disk_mb"):
+            select_node_for_workspace(
+                session,
+                workspace_id=777,
+                requested_cpu=0.5,
+                requested_memory_mb=256,
+                requested_disk_mb=2048,
+            )

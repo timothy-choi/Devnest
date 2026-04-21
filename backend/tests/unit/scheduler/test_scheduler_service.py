@@ -22,6 +22,8 @@ def _chosen() -> ExecutionNode:
         total_memory_mb=8192,
         allocatable_cpu=4.0,
         allocatable_memory_mb=8192,
+        allocatable_disk_mb=102_400,
+        max_workspaces=32,
         default_topology_id=7,
     )
 
@@ -40,6 +42,7 @@ def test_schedule_workspace_success(mock_reserve: MagicMock) -> None:
         workspace_id=42,
         requested_cpu=pytest.approx(1.0),
         requested_memory_mb=512,
+        requested_disk_mb=4096,
     )
 
 

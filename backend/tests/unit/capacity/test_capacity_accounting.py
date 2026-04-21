@@ -7,7 +7,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.services.auth_service.models.user_auth import UserAuth
-from app.services.placement_service.capacity import total_reserved_on_node_key
+from app.services.placement_service.capacity import total_reserved_disk_mb_on_node_key, total_reserved_on_node_key
 from app.services.workspace_service.models import Workspace, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceStatus
 
@@ -46,12 +46,15 @@ def test_total_reserved_sums_running_workloads(cap_engine) -> None:
                 node_id="n1",
                 reserved_cpu=1.0,
                 reserved_memory_mb=512,
+                reserved_disk_mb=4096,
             )
         )
         session.commit()
         c, m = total_reserved_on_node_key(session, "n1")
+        d = total_reserved_disk_mb_on_node_key(session, "n1")
         assert c == pytest.approx(1.0)
         assert m == 512
+        assert d == 4096
 
 
 def test_stopped_workspace_excluded_from_sum(cap_engine) -> None:

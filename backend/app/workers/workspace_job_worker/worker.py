@@ -56,6 +56,7 @@ from app.services.cleanup_service import (
 )
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
 from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
@@ -139,10 +140,15 @@ def _clear_runtime_capacity_reservation(session: Session, workspace_id: int) -> 
     ).first()
     if rt is None:
         return
-    if float(rt.reserved_cpu or 0) <= 0 and int(rt.reserved_memory_mb or 0) <= 0:
+    if (
+        float(rt.reserved_cpu or 0) <= 0
+        and int(rt.reserved_memory_mb or 0) <= 0
+        and int(rt.reserved_disk_mb or 0) <= 0
+    ):
         return
     rt.reserved_cpu = 0.0
     rt.reserved_memory_mb = 0
+    rt.reserved_disk_mb = 0
     rt.updated_at = _now()
     session.add(rt)
 
@@ -366,6 +372,7 @@ def _apply_runtime_bringup_like(
     probe_healthy: bool | None,
     reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
     reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    reserved_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
 ) -> None:
     """Persist placement + health snapshot after a successful bring-up / restart / update (running)."""
     rt = _get_or_create_runtime(session, workspace_id)
@@ -380,9 +387,11 @@ def _apply_runtime_bringup_like(
     if nk:
         rt.reserved_cpu = float(reserved_cpu)
         rt.reserved_memory_mb = int(reserved_memory_mb)
+        rt.reserved_disk_mb = int(reserved_disk_mb)
     else:
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
+        rt.reserved_disk_mb = 0
     rt.health_status = _health_from_probe(probe_healthy)
     if probe_healthy is True:
         rt.last_heartbeat_at = ts
@@ -408,6 +417,7 @@ def _sync_runtime_after_failed_bringup(session: Session, workspace_id: int, resu
         rt.internal_endpoint = result.internal_endpoint
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
+        rt.reserved_disk_mb = 0
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     else:
         rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
@@ -439,6 +449,7 @@ def _sync_runtime_after_bringup_exception(session: Session, workspace_id: int, e
         rt.internal_endpoint = None
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
+        rt.reserved_disk_mb = 0
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     else:
         rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
@@ -462,6 +473,7 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
         rt.container_state = result.container_state
     rt.reserved_cpu = 0.0
     rt.reserved_memory_mb = 0
+    rt.reserved_disk_mb = 0
     rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     rt.updated_at = ts
     session.add(rt)
@@ -480,6 +492,7 @@ def _clear_runtime_after_delete(session: Session, workspace_id: int) -> None:
     row.internal_endpoint = None
     row.reserved_cpu = 0.0
     row.reserved_memory_mb = 0
+    row.reserved_disk_mb = 0
     row.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     row.last_heartbeat_at = None
     row.updated_at = ts
@@ -675,6 +688,7 @@ def _finalize_runtime_running_success(
     probe_healthy: bool | None,
     reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
     reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    reserved_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
 ) -> None:
     """
     Shared success path for CREATE/START, RESTART, and UPDATE (restart path): persist runtime,
@@ -694,6 +708,7 @@ def _finalize_runtime_running_success(
         probe_healthy=probe_healthy,
         reserved_cpu=reserved_cpu,
         reserved_memory_mb=reserved_memory_mb,
+        reserved_disk_mb=reserved_disk_mb,
     )
     _mark_job_succeeded(session, job)
     ws.status = WorkspaceStatus.RUNNING.value
@@ -956,6 +971,7 @@ def _finalize_update_result(
         rt.config_version = cfg_v
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
+        rt.reserved_disk_mb = 0
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
         rt.last_heartbeat_at = None
         rt.updated_at = ts

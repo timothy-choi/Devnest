@@ -11,6 +11,10 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 from app.libs.topology.models import Topology
 
+from .constants import (
+    DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
+    DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+)
 from .models import (
     ExecutionNode,
     ExecutionNodeExecutionMode,
@@ -93,8 +97,17 @@ def ensure_default_local_execution_node(session: Session) -> ExecutionNode:
 
     existing = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
     if existing is not None:
+        changed = False
         if dev and existing.default_topology_id is None:
             existing.default_topology_id = _dev_default_topology_id()
+            changed = True
+        if int(existing.max_workspaces or 0) <= 0:
+            existing.max_workspaces = DEFAULT_EXECUTION_NODE_MAX_WORKSPACES
+            changed = True
+        if int(existing.allocatable_disk_mb or 0) <= 0:
+            existing.allocatable_disk_mb = DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB
+            changed = True
+        if changed:
             session.add(existing)
             session.flush()
         if dev and existing.default_topology_id is not None:
@@ -117,6 +130,8 @@ def ensure_default_local_execution_node(session: Session) -> ExecutionNode:
         total_memory_mb=8192,
         allocatable_cpu=4.0,
         allocatable_memory_mb=8192,
+        max_workspaces=DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+        allocatable_disk_mb=DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
         metadata_json={"bootstrap": "local_v1", "db_host_hint": host_hint or None},
         default_topology_id=topo_id,
     )

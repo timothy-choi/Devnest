@@ -81,6 +81,20 @@ def reserved_memory_sum_subquery():
     ).scalar_subquery()
 
 
+def reserved_disk_sum_subquery():
+    """Correlated scalar: sum of ``reserved_disk_mb`` for the same cohort."""
+    return (
+        select(func.coalesce(func.sum(WorkspaceRuntime.reserved_disk_mb), 0))
+        .select_from(WorkspaceRuntime)
+        .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
+        .where(
+            _runtime_pin_predicates_for_subquery(),
+            Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
+        )
+        .correlate(ExecutionNode)
+    ).scalar_subquery()
+
+
 def effective_free_cpu_expr():
     """SQL expression: allocatable_cpu minus reserved sum for this node_key."""
     return ExecutionNode.allocatable_cpu - reserved_cpu_sum_subquery()
@@ -89,6 +103,11 @@ def effective_free_cpu_expr():
 def effective_free_memory_mb_expr():
     """SQL expression: allocatable_memory_mb minus reserved memory sum."""
     return ExecutionNode.allocatable_memory_mb - reserved_memory_sum_subquery()
+
+
+def effective_free_disk_mb_expr():
+    """SQL expression: allocatable_disk_mb minus reserved disk sum."""
+    return ExecutionNode.allocatable_disk_mb - reserved_disk_sum_subquery()
 
 
 def total_reserved_on_node_key(session: Session, node_key: str) -> tuple[float, int]:
@@ -120,6 +139,28 @@ def total_reserved_on_node_key(session: Session, node_key: str) -> tuple[float, 
     except (TypeError, ValueError):
         mem = 0
     return (max(0.0, cpu), max(0, mem))
+
+
+def total_reserved_disk_mb_on_node_key(session: Session, node_key: str) -> int:
+    """Sum ``reserved_disk_mb`` for workloads counting against ``node_key``."""
+    key = (node_key or "").strip()
+    if not key:
+        return 0
+    stmt = (
+        select(func.coalesce(func.sum(WorkspaceRuntime.reserved_disk_mb), 0))
+        .select_from(WorkspaceRuntime)
+        .join(Workspace, Workspace.workspace_id == WorkspaceRuntime.workspace_id)
+        .where(
+            _runtime_pin_predicates_for_node_key(key),
+            Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
+        )
+    )
+    raw = session.exec(stmt).one()
+    try:
+        disk = int(raw[0] if isinstance(raw, tuple) else raw)
+    except (TypeError, ValueError):
+        disk = 0
+    return max(0, disk)
 
 
 def max_effective_free_resources_across_schedulable(

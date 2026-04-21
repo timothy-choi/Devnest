@@ -24,6 +24,7 @@ from app.services.reconcile_service.reconcile_lock import (
 )
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
@@ -149,15 +150,26 @@ def _repair_runtime_capacity_ledger(session: Session, ws: Workspace) -> None:
         return
     changed = False
     if ws.status in (WorkspaceStatus.STOPPED.value, WorkspaceStatus.ERROR.value):
-        if float(rt.reserved_cpu or 0) > 0 or int(rt.reserved_memory_mb or 0) > 0:
+        if (
+            float(rt.reserved_cpu or 0) > 0
+            or int(rt.reserved_memory_mb or 0) > 0
+            or int(rt.reserved_disk_mb or 0) > 0
+        ):
             rt.reserved_cpu = 0.0
             rt.reserved_memory_mb = 0
+            rt.reserved_disk_mb = 0
             changed = True
     elif ws.status == WorkspaceStatus.RUNNING.value:
         nk = (rt.node_id or "").strip()
-        if nk and float(rt.reserved_cpu or 0) <= 0 and int(rt.reserved_memory_mb or 0) <= 0:
+        if (
+            nk
+            and float(rt.reserved_cpu or 0) <= 0
+            and int(rt.reserved_memory_mb or 0) <= 0
+            and int(rt.reserved_disk_mb or 0) <= 0
+        ):
             rt.reserved_cpu = float(DEFAULT_WORKSPACE_REQUEST_CPU)
             rt.reserved_memory_mb = int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
+            rt.reserved_disk_mb = int(DEFAULT_WORKSPACE_REQUEST_DISK_MB)
             changed = True
     if changed:
         rt.updated_at = wmod._now()

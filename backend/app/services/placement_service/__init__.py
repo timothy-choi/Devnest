@@ -1,7 +1,11 @@
 """Execution node registry and V1 placement selection."""
 
 from .bootstrap import ensure_default_local_execution_node
-from .capacity import count_active_workloads_on_node_key, total_reserved_on_node_key
+from .capacity import (
+    count_active_workloads_on_node_key,
+    total_reserved_disk_mb_on_node_key,
+    total_reserved_on_node_key,
+)
 from .errors import (
     AuthoritativePlacementError,
     ExecutionNodeNotFoundError,
@@ -43,6 +47,7 @@ __all__ = [
     "resolve_orchestrator_placement",
     "schedulable_placement_predicates",
     "select_node_for_workspace",
+    "total_reserved_disk_mb_on_node_key",
     "total_reserved_on_node_key",
     "touch_node_heartbeat",
 ]
