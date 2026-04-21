@@ -1,7 +1,7 @@
 """execution node disk and slot capacity
 
-Revision ID: 0010_execution_node_disk_and_slot_capacity
-Revises: 0009_workspace_secret_store
+Revision ID: 0010_exec_node_capacity
+Revises: 0009
 Create Date: 2026-04-20
 """
 
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0010_execution_node_disk_and_slot_capacity"
+revision = "0010_exec_node_capacity"
 down_revision = "0009"
 branch_labels = None
 depends_on = None
