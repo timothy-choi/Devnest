@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class TestDatabaseConfig:
-    def test_development_defaults_db_auto_create_on(self, monkeypatch) -> None:
+    def test_db_auto_create_defaults_on(self, monkeypatch) -> None:
         from app.libs.common.config import Settings  # noqa: PLC0415
 
         monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -13,7 +13,7 @@ class TestDatabaseConfig:
         s = Settings(database_url="postgresql+psycopg://u:p@db.example.com:5432/devnest")
         assert s.devnest_db_auto_create is True
 
-    def test_non_development_keeps_db_auto_create_off_by_default(self, monkeypatch) -> None:
+    def test_non_development_also_defaults_db_auto_create_on(self, monkeypatch) -> None:
         from app.libs.common.config import Settings  # noqa: PLC0415
 
         monkeypatch.delenv("DATABASE_URL", raising=False)
@@ -27,7 +27,7 @@ class TestDatabaseConfig:
             devnest_require_ide_http_probe=True,
             devnest_workspace_http_probe_enabled=True,
         )
-        assert s.devnest_db_auto_create is False
+        assert s.devnest_db_auto_create is True
 
     def test_explicit_database_url_wins(self, monkeypatch) -> None:
         from app.libs.common.config import Settings  # noqa: PLC0415

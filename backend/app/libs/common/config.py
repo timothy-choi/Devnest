@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     postgres_password: str = ""
     postgres_sslmode: str = ""
     postgres_sslrootcert: str = ""
-    devnest_db_auto_create: bool = False
+    devnest_db_auto_create: bool = True
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     # Active runtime environment. Accepted values: "development", "staging", "production".
@@ -310,13 +310,6 @@ class Settings(BaseSettings):
             f"{quote_plus(user)}:{quote_plus(str(self.postgres_password or ''))}"
             f"@{host}:{int(self.postgres_port)}/{db}{suffix}"
         )
-        return self
-
-    @model_validator(mode="after")
-    def _default_db_auto_create_for_development(self) -> Self:
-        if "devnest_db_auto_create" not in self.model_fields_set:
-            if str(self.devnest_env or "").strip().lower() == "development":
-                self.devnest_db_auto_create = True
         return self
 
     @field_validator("devnest_gateway_public_port", mode="before")
