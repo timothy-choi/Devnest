@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 from sqlalchemy import JSON, CheckConstraint, Column, DateTime, Float, Integer
 from sqlmodel import Field, SQLModel
 
+from ..constants import (
+    DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
+    DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+)
 from .enums import ExecutionNodeExecutionMode, ExecutionNodeProviderType, ExecutionNodeStatus
 
 
@@ -60,6 +64,8 @@ class ExecutionNode(SQLModel, table=True):
             "allocatable_memory_mb <= total_memory_mb",
             name="ck_exec_node_mem_alloc_lte_total",
         ),
+        CheckConstraint("max_workspaces >= 0", name="ck_exec_node_max_workspaces_nonneg"),
+        CheckConstraint("allocatable_disk_mb >= 0", name="ck_exec_node_alloc_disk_nonneg"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -112,6 +118,8 @@ class ExecutionNode(SQLModel, table=True):
     total_memory_mb: int = Field(default=8192)
     allocatable_cpu: float = Field(default=4.0, sa_column=Column(Float, nullable=False))
     allocatable_memory_mb: int = Field(default=8192)
+    max_workspaces: int = Field(default=DEFAULT_EXECUTION_NODE_MAX_WORKSPACES)
+    allocatable_disk_mb: int = Field(default=DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB)
 
     metadata_json: dict = Field(
         default_factory=dict,

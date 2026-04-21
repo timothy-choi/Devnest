@@ -21,6 +21,7 @@ def test_placement_raises_when_effective_capacity_blocked_by_runtime_reservation
     key = node.node_key
     node.allocatable_cpu = 2.0
     node.allocatable_memory_mb = 2048
+    node.allocatable_disk_mb = 10_240
     db_session.add(node)
     db_session.commit()
 
@@ -40,6 +41,7 @@ def test_placement_raises_when_effective_capacity_blocked_by_runtime_reservation
             node_id=key,
             reserved_cpu=1.5,
             reserved_memory_mb=1536,
+            reserved_disk_mb=8192,
         ),
     )
     db_session.commit()
@@ -50,6 +52,7 @@ def test_placement_raises_when_effective_capacity_blocked_by_runtime_reservation
             workspace_id=42,
             requested_cpu=1.0,
             requested_memory_mb=1024,
+            requested_disk_mb=3072,
         )
 
     picked = select_node_for_workspace(
@@ -57,6 +60,7 @@ def test_placement_raises_when_effective_capacity_blocked_by_runtime_reservation
         workspace_id=43,
         requested_cpu=0.25,
         requested_memory_mb=256,
+        requested_disk_mb=1024,
     )
     assert picked.node_key == key
 
@@ -84,6 +88,7 @@ def test_stop_clears_reservation_so_capacity_frees(db_session: Session) -> None:
         node_id=key,
         reserved_cpu=1.0,
         reserved_memory_mb=512,
+        reserved_disk_mb=4096,
     )
     db_session.add(rt)
     db_session.commit()
@@ -102,3 +107,4 @@ def test_stop_clears_reservation_so_capacity_frees(db_session: Session) -> None:
     db_session.refresh(rt)
     assert rt.reserved_cpu == 0.0
     assert rt.reserved_memory_mb == 0
+    assert rt.reserved_disk_mb == 0

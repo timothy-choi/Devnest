@@ -33,6 +33,8 @@ def _node(
     key: str,
     alloc_cpu: float,
     alloc_mem: int,
+    alloc_disk: int = 102_400,
+    max_workspaces: int = 32,
 ) -> ExecutionNode:
     return ExecutionNode(
         node_key=key,
@@ -44,18 +46,22 @@ def _node(
         total_memory_mb=max(alloc_mem, 256),
         allocatable_cpu=alloc_cpu,
         allocatable_memory_mb=alloc_mem,
+        allocatable_disk_mb=alloc_disk,
+        max_workspaces=max_workspaces,
     )
 
 
-def test_can_fit_workspace_requires_cpu_and_memory() -> None:
-    req = WorkspaceComputeRequest(requested_cpu=1.0, requested_memory_mb=512)
+def test_can_fit_workspace_requires_cpu_memory_disk_and_slots() -> None:
+    req = WorkspaceComputeRequest(requested_cpu=1.0, requested_memory_mb=512, requested_disk_mb=4096)
     assert can_fit_workspace(_node(key="a", alloc_cpu=2.0, alloc_mem=1024), req) is True
     assert can_fit_workspace(_node(key="b", alloc_cpu=0.5, alloc_mem=1024), req) is False
     assert can_fit_workspace(_node(key="c", alloc_cpu=2.0, alloc_mem=256), req) is False
+    assert can_fit_workspace(_node(key="d", alloc_cpu=2.0, alloc_mem=1024, alloc_disk=1024), req) is False
+    assert can_fit_workspace(_node(key="e", alloc_cpu=2.0, alloc_mem=1024, max_workspaces=0), req) is False
 
 
 def test_rank_candidate_nodes_excludes_not_ready_or_not_schedulable(policy_session: Session) -> None:
-    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256, requested_disk_mb=1024)
     bad_status = _node(key="bad-status", alloc_cpu=8.0, alloc_mem=8192)
     bad_status.status = ExecutionNodeStatus.DRAINING.value
     bad_sched = _node(key="bad-sched", alloc_cpu=8.0, alloc_mem=8192)
@@ -66,7 +72,7 @@ def test_rank_candidate_nodes_excludes_not_ready_or_not_schedulable(policy_sessi
 
 
 def test_rank_candidate_nodes_best_fit_then_lexicographic(policy_session: Session) -> None:
-    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256, requested_disk_mb=1024)
     n_big = _node(key="z", alloc_cpu=4.0, alloc_mem=8192)
     n_small = _node(key="a", alloc_cpu=4.0, alloc_mem=4096)
     n_tiny_cpu = _node(key="m", alloc_cpu=8.0, alloc_mem=512)
@@ -79,7 +85,7 @@ def test_rank_candidate_nodes_best_fit_then_lexicographic(policy_session: Sessio
 def test_scheduling_sort_key_matches_rank_order(policy_session: Session) -> None:
     from app.services.placement_service.capacity import total_reserved_on_node_key
 
-    req = WorkspaceComputeRequest(requested_cpu=0.1, requested_memory_mb=128)
+    req = WorkspaceComputeRequest(requested_cpu=0.1, requested_memory_mb=128, requested_disk_mb=512)
     nodes = [_node(key="b", alloc_cpu=2.0, alloc_mem=1000), _node(key="a", alloc_cpu=2.0, alloc_mem=1000)]
     ranked = rank_candidate_nodes(policy_session, nodes, req)
 
@@ -123,15 +129,16 @@ def test_rank_excludes_node_when_reservations_consume_capacity(policy_session: S
         node_id="hot",
         reserved_cpu=1.5,
         reserved_memory_mb=1536,
+        reserved_disk_mb=8192,
     )
     policy_session.add(rt)
     policy_session.commit()
 
-    req = WorkspaceComputeRequest(requested_cpu=1.0, requested_memory_mb=1024)
+    req = WorkspaceComputeRequest(requested_cpu=1.0, requested_memory_mb=1024, requested_disk_mb=4096)
     out = rank_candidate_nodes(policy_session, [n], req)
     assert out == []
 
-    req2 = WorkspaceComputeRequest(requested_cpu=0.25, requested_memory_mb=256)
+    req2 = WorkspaceComputeRequest(requested_cpu=0.25, requested_memory_mb=256, requested_disk_mb=1024)
     out2 = rank_candidate_nodes(policy_session, [n], req2)
     assert len(out2) == 1 and out2[0].node_key == "hot"
 
@@ -146,6 +153,7 @@ def _seed_active_workload(
     node_key: str,
     cpu: float = 0.1,
     mem: int = 64,
+    disk: int = 1024,
 ) -> None:
     """Seed a RUNNING workspace pinned to node_key (counts toward active workload count)."""
     from datetime import datetime, timezone
@@ -179,6 +187,7 @@ def _seed_active_workload(
         node_id=node_key,
         reserved_cpu=cpu,
         reserved_memory_mb=mem,
+        reserved_disk_mb=disk,
     )
     session.add(rt)
     session.commit()
@@ -217,6 +226,7 @@ def _seed_stopped_workload(session: Session, *, node_key: str) -> None:
         node_id=node_key,
         reserved_cpu=0.0,
         reserved_memory_mb=0,
+        reserved_disk_mb=0,
     )
     session.add(rt)
     session.commit()
@@ -234,7 +244,7 @@ def test_equal_capacity_fewer_workloads_wins(policy_session: Session) -> None:
     _seed_active_workload(policy_session, node_key="busy", cpu=0.1, mem=64)
     _seed_active_workload(policy_session, node_key="busy", cpu=0.1, mem=64)
 
-    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256, requested_disk_mb=1024)
     ranked = rank_candidate_nodes(policy_session, [n_busy, n_idle], req)
 
     assert len(ranked) == 2
@@ -254,7 +264,7 @@ def test_capacity_primary_over_workload_spread(policy_session: Session) -> None:
     for _ in range(3):
         _seed_active_workload(policy_session, node_key="large", cpu=0.5, mem=512)
 
-    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256, requested_disk_mb=1024)
     ranked = rank_candidate_nodes(policy_session, [n_large, n_small], req)
 
     assert len(ranked) == 2
@@ -274,7 +284,7 @@ def test_stopped_workloads_not_counted_for_spread(policy_session: Session) -> No
     for _ in range(5):
         _seed_stopped_workload(policy_session, node_key="n1")
 
-    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256)
+    req = WorkspaceComputeRequest(requested_cpu=0.5, requested_memory_mb=256, requested_disk_mb=1024)
     ranked = rank_candidate_nodes(policy_session, [n1, n2], req)
 
     assert len(ranked) == 2

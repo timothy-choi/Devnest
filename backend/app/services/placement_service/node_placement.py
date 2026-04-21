@@ -12,10 +12,15 @@ from app.libs.common.config import get_settings
 from .capacity import (
     active_workload_count_subquery,
     effective_free_cpu_expr,
+    effective_free_disk_mb_expr,
     effective_free_memory_mb_expr,
     max_effective_free_resources_across_schedulable,
 )
-from .constants import DEFAULT_WORKSPACE_REQUEST_CPU, DEFAULT_WORKSPACE_REQUEST_MEMORY_MB
+from .constants import (
+    DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+)
 from .errors import ExecutionNodeNotFoundError, InvalidPlacementParametersError, NoSchedulableNodeError
 from .models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 
@@ -98,6 +103,7 @@ def select_node_for_workspace(
     workspace_id: int,
     requested_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
     requested_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    requested_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
     for_update: bool = False,
 ) -> ExecutionNode:
     """
@@ -133,19 +139,23 @@ def select_node_for_workspace(
     _ = workspace_id  # reserved for affinity (V2+)
     req_cpu = float(requested_cpu)
     req_mem = int(requested_memory_mb)
-    if req_cpu <= 0 or req_mem <= 0:
+    req_disk = int(requested_disk_mb)
+    if req_cpu <= 0 or req_mem <= 0 or req_disk <= 0:
         raise InvalidPlacementParametersError(
-            "placement requires positive requested_cpu and requested_memory_mb "
-            f"(got cpu={requested_cpu!r}, memory_mb={requested_memory_mb!r})",
+            "placement requires positive requested_cpu, requested_memory_mb, and requested_disk_mb "
+            f"(got cpu={requested_cpu!r}, memory_mb={requested_memory_mb!r}, disk_mb={requested_disk_mb!r})",
         )
 
     free_cpu_e = effective_free_cpu_expr()
     free_mem_e = effective_free_memory_mb_expr()
+    free_disk_e = effective_free_disk_mb_expr()
     active_wl_e = active_workload_count_subquery()
     preds = [
         *_schedulable_base_predicates(),
         free_cpu_e >= req_cpu,
         free_mem_e >= req_mem,
+        free_disk_e >= req_disk,
+        active_wl_e < ExecutionNode.max_workspaces,
     ]
     stmt = (
         select(ExecutionNode)
@@ -177,7 +187,8 @@ def select_node_for_workspace(
         raise NoSchedulableNodeError(
             "no execution node matches placement policy "
             f"(need status=READY, schedulable=true, effective_free_cpu>={req_cpu}, "
-            f"effective_free_memory_mb>={req_mem} after workspace reservations; "
+            f"effective_free_memory_mb>={req_mem}, effective_free_disk_mb>={req_disk}, "
+            "and active_workspaces < max_workspaces after workspace reservations; "
             f"{n_gate} node(s) are READY+schedulable (after provider filter) but none have enough "
             f"effective capacity — check execution_node, workspace_runtime reservations, and bootstrap; "
             f"diagnostic max_effective_free_cpu≈{max_cpu:.4f}, "
@@ -193,6 +204,7 @@ def reserve_node_for_workspace(
     workspace_id: int,
     requested_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
     requested_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    requested_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
 ) -> ExecutionNode:
     """
     Same as :func:`select_node_for_workspace` but locks the chosen row (``FOR UPDATE``).
@@ -205,6 +217,7 @@ def reserve_node_for_workspace(
         workspace_id=workspace_id,
         requested_cpu=requested_cpu,
         requested_memory_mb=requested_memory_mb,
+        requested_disk_mb=requested_disk_mb,
         for_update=True,
     )
 

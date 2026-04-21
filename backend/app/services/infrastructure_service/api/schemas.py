@@ -19,6 +19,8 @@ class ExecutionNodeSummaryResponse(BaseModel):
     execution_mode: str
     status: str
     schedulable: bool
+    max_workspaces: int
+    allocatable_disk_mb: int
     instance_type: str | None = None
     private_ip: str | None = None
     public_ip: str | None = None
@@ -37,6 +39,8 @@ class ExecutionNodeSummaryResponse(BaseModel):
             execution_mode=row.execution_mode,
             status=row.status,
             schedulable=row.schedulable,
+            max_workspaces=int(row.max_workspaces or 0),
+            allocatable_disk_mb=int(row.allocatable_disk_mb or 0),
             instance_type=row.instance_type,
             private_ip=row.private_ip,
             public_ip=row.public_ip,

@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from app.services.workspace_service.models import Workspace, WorkspaceJob
+from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
 from app.services.workspace_service.models.enums import (
     WorkspaceJobStatus,
     WorkspaceJobType,
@@ -125,6 +125,15 @@ class TestReclaimStuckJobs:
                 attempt=2, max_attempts=2,  # attempt == max_attempts → exhausted
                 job_type=WorkspaceJobType.START.value,
             )
+            session.add(
+                WorkspaceRuntime(
+                    workspace_id=ws.workspace_id,
+                    node_id="node-stuck",
+                    reserved_cpu=1.0,
+                    reserved_memory_mb=512,
+                    reserved_disk_mb=4096,
+                )
+            )
             session.commit()
             job_id = job.workspace_job_id
             ws_id = ws.workspace_id
@@ -142,6 +151,11 @@ class TestReclaimStuckJobs:
             assert w is not None
             # Lifecycle job exhausted → workspace moves to ERROR.
             assert w.status == WorkspaceStatus.ERROR.value
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == ws_id)).first()
+            assert rt is not None
+            assert rt.reserved_cpu == 0.0
+            assert rt.reserved_memory_mb == 0
+            assert rt.reserved_disk_mb == 0
 
     def test_stuck_reconcile_job_retry_exhausted_does_not_error_workspace(
         self, workspace_job_worker_engine: Engine, owner_user_id: int

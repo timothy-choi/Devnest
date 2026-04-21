@@ -22,6 +22,10 @@ from botocore.exceptions import ClientError
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.services.placement_service.constants import (
+    DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
+    DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+)
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeExecutionMode,
@@ -367,6 +371,8 @@ def register_ec2_instance(
             total_memory_mb=mem_mb,
             allocatable_cpu=vcpu,
             allocatable_memory_mb=mem_mb,
+            max_workspaces=DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+            allocatable_disk_mb=DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
             metadata_json=meta_patch,
             iam_instance_profile_name=desc.iam_instance_profile_name,
             last_synced_at=now,
@@ -403,6 +409,10 @@ def register_ec2_instance(
         row.total_memory_mb = mem_mb
         row.allocatable_cpu = vcpu
         row.allocatable_memory_mb = mem_mb
+        if int(row.max_workspaces or 0) <= 0:
+            row.max_workspaces = DEFAULT_EXECUTION_NODE_MAX_WORKSPACES
+        if int(row.allocatable_disk_mb or 0) <= 0:
+            row.allocatable_disk_mb = DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB
         row.iam_instance_profile_name = desc.iam_instance_profile_name
         row.last_synced_at = now
         merged = dict(row.metadata_json or {})

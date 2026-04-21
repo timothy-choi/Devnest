@@ -84,6 +84,9 @@ def _seed_running_workspace(session: Session, owner_id: int) -> int:
             internal_endpoint="http://stale",
             config_version=CFG_V,
             health_status=WorkspaceRuntimeHealthStatus.UNKNOWN.value,
+            reserved_cpu=1.0,
+            reserved_memory_mb=512,
+            reserved_disk_mb=4096,
         )
     )
     session.commit()
@@ -160,6 +163,9 @@ def test_reconcile_running_syncs_runtime_and_succeeds(
     assert rt is not None
     assert rt.container_id == CONTAINER_ID
     assert rt.internal_endpoint == INTERNAL_EP
+    assert rt.reserved_cpu > 0
+    assert rt.reserved_memory_mb > 0
+    assert rt.reserved_disk_mb > 0
 
     ws = db_session.get(Workspace, wid)
     assert ws is not None
@@ -435,6 +441,15 @@ def test_reconcile_error_workspace_runs_engine_cleanup(
     job2 = db_session.get(WorkspaceJob, jid)
     assert job2 is not None
     assert job2.status == WorkspaceJobStatus.SUCCEEDED.value
+
+    rt = db_session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    assert rt is not None
+    assert rt.container_state == "exited"
+    assert rt.internal_endpoint is None
+    assert rt.topology_id is None
+    assert rt.reserved_cpu == 0.0
+    assert rt.reserved_memory_mb == 0
+    assert rt.reserved_disk_mb == 0
 
     evs = db_session.exec(select(WorkspaceEvent).where(WorkspaceEvent.workspace_id == wid)).all()
     assert any(e.event_type == WorkspaceStreamEventType.RECONCILE_FIXED_RUNTIME for e in evs)

@@ -14,6 +14,7 @@ class WorkspaceRuntime(SQLModel, table=True):
         UniqueConstraint("workspace_id", name="uq_workspace_runtime_workspace"),
         CheckConstraint("reserved_cpu >= 0", name="ck_workspace_runtime_reserved_cpu_nonneg"),
         CheckConstraint("reserved_memory_mb >= 0", name="ck_workspace_runtime_reserved_mem_nonneg"),
+        CheckConstraint("reserved_disk_mb >= 0", name="ck_workspace_runtime_reserved_disk_nonneg"),
     )
 
     workspace_runtime_id: int | None = Field(default=None, primary_key=True)
@@ -34,6 +35,7 @@ class WorkspaceRuntime(SQLModel, table=True):
     # workspace_runtime rows pinned to that node_key with workspace not STOPPED/DELETED/ERROR.
     reserved_cpu: float = Field(default=0.0, sa_column=Column(Float, nullable=False))
     reserved_memory_mb: int = Field(default=0, ge=0)
+    reserved_disk_mb: int = Field(default=0, ge=0)
     last_heartbeat_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),

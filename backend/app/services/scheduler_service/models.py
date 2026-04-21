@@ -13,6 +13,7 @@ class WorkspaceComputeRequest:
 
     requested_cpu: float
     requested_memory_mb: int
+    requested_disk_mb: int
 
 
 @dataclass(frozen=True)
