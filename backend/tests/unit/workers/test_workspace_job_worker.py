@@ -123,6 +123,9 @@ def _seed_runtime(
     *,
     node_id: str = "old-node",
     container_id: str = "old-ctr",
+    reserved_cpu: float = 1.0,
+    reserved_memory_mb: int = 512,
+    reserved_disk_mb: int = 4096,
 ) -> WorkspaceRuntime:
     rt = WorkspaceRuntime(
         workspace_id=workspace_id,
@@ -133,6 +136,9 @@ def _seed_runtime(
         internal_endpoint="http://old",
         config_version=1,
         health_status=WorkspaceRuntimeHealthStatus.UNKNOWN.value,
+        reserved_cpu=reserved_cpu,
+        reserved_memory_mb=reserved_memory_mb,
+        reserved_disk_mb=reserved_disk_mb,
     )
     session.add(rt)
     session.flush()
@@ -430,6 +436,9 @@ class TestDispatchCreate:
             assert rt.config_version == REQUESTED_CONFIG_VERSION
             assert rt.health_status == WorkspaceRuntimeHealthStatus.HEALTHY.value
             assert rt.last_heartbeat_at is not None
+            assert rt.reserved_cpu > 0
+            assert rt.reserved_memory_mb > 0
+            assert rt.reserved_disk_mb > 0
 
             evs = list(
                 session.exec(
@@ -590,7 +599,13 @@ class TestDispatchStop:
             assert ws.last_stopped is not None
             assert rt is not None
             assert rt.container_state == "stopped"
+            assert rt.topology_id is None
+            assert rt.internal_endpoint is None
             assert rt.health_status == WorkspaceRuntimeHealthStatus.UNKNOWN.value
+            assert rt.last_heartbeat_at is None
+            assert rt.reserved_cpu == 0.0
+            assert rt.reserved_memory_mb == 0
+            assert rt.reserved_disk_mb == 0
 
 
 class TestDispatchRestart:
@@ -678,9 +693,14 @@ class TestDispatchDelete:
             assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
             assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
             assert rt is not None
+            assert rt.node_id is None
+            assert rt.topology_id is None
             assert rt.container_id is None
             assert rt.container_state == "deleted"
             assert rt.internal_endpoint is None
+            assert rt.reserved_cpu == 0.0
+            assert rt.reserved_memory_mb == 0
+            assert rt.reserved_disk_mb == 0
 
 
 class TestDispatchUpdate:
@@ -945,6 +965,9 @@ class TestUnsuccessfulOrchestratorResult:
             assert rt is not None
             assert rt.node_id == "keep-me"
             assert rt.container_id == "keep-ctr"
+            assert rt.reserved_cpu == 0.0
+            assert rt.reserved_memory_mb == 0
+            assert rt.reserved_disk_mb == 0
 
     def test_stop_false_success_leaves_runtime_unchanged(
         self,
@@ -977,6 +1000,9 @@ class TestUnsuccessfulOrchestratorResult:
             assert rt is not None
             assert rt.container_id == "c1"
             assert rt.container_state == "running"
+            assert rt.reserved_cpu == 0.0
+            assert rt.reserved_memory_mb == 0
+            assert rt.reserved_disk_mb == 0
 
     def test_delete_false_success_keeps_workspace_non_deleted(
         self,
@@ -1012,6 +1038,9 @@ class TestUnsuccessfulOrchestratorResult:
             assert job is not None and job.status == WorkspaceJobStatus.FAILED.value
             assert ws is not None and ws.status == WorkspaceStatus.ERROR.value
             assert rt is not None and rt.container_state == "running"
+            assert rt.reserved_cpu == 0.0
+            assert rt.reserved_memory_mb == 0
+            assert rt.reserved_disk_mb == 0
 
 
 class TestRunQueuedJobById:

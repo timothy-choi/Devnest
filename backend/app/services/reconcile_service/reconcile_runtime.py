@@ -140,7 +140,7 @@ def _repair_runtime_capacity_ledger(session: Session, ws: Workspace) -> None:
     """
     Best-effort alignment of ``WorkspaceRuntime.reserved_*`` with workspace status (drift control).
 
-    - ``STOPPED`` / ``ERROR``: reservations should be zero (capacity released for placement).
+    - ``STOPPED`` / ``ERROR`` / ``DELETED``: reservations should be zero (capacity released for placement).
     - ``RUNNING`` with ``node_id`` but missing ledger: backfill defaults (legacy rows).
     """
     wid = ws.workspace_id
@@ -149,7 +149,11 @@ def _repair_runtime_capacity_ledger(session: Session, ws: Workspace) -> None:
     if rt is None:
         return
     changed = False
-    if ws.status in (WorkspaceStatus.STOPPED.value, WorkspaceStatus.ERROR.value):
+    if ws.status in (
+        WorkspaceStatus.STOPPED.value,
+        WorkspaceStatus.ERROR.value,
+        WorkspaceStatus.DELETED.value,
+    ):
         if (
             float(rt.reserved_cpu or 0) > 0
             or int(rt.reserved_memory_mb or 0) > 0
@@ -396,6 +400,7 @@ def _reconcile_error_cleanup(
         return
 
     if stop_res.success:
+        wmod._apply_runtime_stop(session, wid, stop_res)
         record_workspace_event(
             session,
             workspace_id=wid,

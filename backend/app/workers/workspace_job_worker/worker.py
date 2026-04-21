@@ -471,10 +471,14 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
         rt.container_id = result.container_id
     if result.container_state is not None:
         rt.container_state = result.container_state
+    if result.topology_detached is not False:
+        rt.topology_id = None
+    rt.internal_endpoint = None
     rt.reserved_cpu = 0.0
     rt.reserved_memory_mb = 0
     rt.reserved_disk_mb = 0
     rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
+    rt.last_heartbeat_at = None
     rt.updated_at = ts
     session.add(rt)
 
@@ -487,6 +491,8 @@ def _clear_runtime_after_delete(session: Session, workspace_id: int) -> None:
     if row is None:
         return
     ts = _now()
+    row.node_id = None
+    row.topology_id = None
     row.container_id = None
     row.container_state = "deleted"
     row.internal_endpoint = None
@@ -2052,6 +2058,7 @@ def reclaim_stuck_running_jobs(engine: "Engine") -> int:
                     ws.status = WorkspaceStatus.ERROR.value
                     _workspace_set_error(ws, "STUCK_RUNNING_TERMINAL", message)
                     _touch_workspace(session, ws)
+                    _clear_runtime_capacity_reservation(session, wid)
                 log_event(
                     logger,
                     LogEvent.WORKER_STUCK_JOB_TERMINAL,
