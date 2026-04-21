@@ -94,6 +94,7 @@ def workspace_control_plane_postgres_engine() -> Generator[Engine, None, None]:
     from app.libs.common.config import get_settings
     from app.libs.db.database import get_engine, init_db, reset_engine
 
+    os.environ["DEVNEST_DB_AUTO_CREATE"] = "true"
     get_settings.cache_clear()
     reset_engine()
     engine = get_engine()

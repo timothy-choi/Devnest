@@ -104,6 +104,7 @@ def test_engine(worker_database_url: str) -> Engine:
     """
     from app.libs.db.database import get_engine
 
+    os.environ["DEVNEST_DB_AUTO_CREATE"] = "true"
     get_settings.cache_clear()
     reset_engine()
 
