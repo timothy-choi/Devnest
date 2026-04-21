@@ -1,4 +1,5 @@
 import os
+import shlex
 from functools import lru_cache
 from pathlib import Path
 from typing import Self
@@ -149,6 +150,43 @@ class Settings(BaseSettings):
                 break
         return values
 
+    @staticmethod
+    def _coerce_libpq_database_url(raw: str) -> str:
+        value = (raw or "").strip()
+        if not value or "://" in value or "=" not in value:
+            return value
+        try:
+            parts = shlex.split(value)
+        except ValueError:
+            return value
+
+        parsed: dict[str, str] = {}
+        for part in parts:
+            if "=" not in part:
+                return value
+            key, part_value = part.split("=", 1)
+            parsed[key.strip().lower()] = part_value.strip()
+
+        host = parsed.get("host", "")
+        db = parsed.get("dbname", "") or parsed.get("database", "")
+        user = parsed.get("user", "")
+        if not (host and db and user):
+            return value
+
+        password = parsed.get("password", "")
+        port = parsed.get("port", "5432").strip() or "5432"
+        userinfo = quote_plus(user)
+        if password:
+            userinfo = f"{userinfo}:{quote_plus(password)}"
+
+        query_params = {
+            "sslmode": parsed.get("sslmode", "").strip(),
+            "sslrootcert": parsed.get("sslrootcert", "").strip(),
+        }
+        query = urlencode({k: v for k, v in query_params.items() if v})
+        url = f"postgresql+psycopg://{userinfo}@{host}:{port}/{db}"
+        return f"{url}?{query}" if query else url
+
     @field_validator(
         "github_oauth_public_base_url",
         "gcloud_oauth_public_base_url",
@@ -203,15 +241,15 @@ class Settings(BaseSettings):
     @classmethod
     def _database_url_aliases(cls, v):  # noqa: ANN001
         if isinstance(v, str) and v.strip():
-            return v.strip()
+            return cls._coerce_libpq_database_url(v.strip())
         for env_name in ("DATABASE_URL", "DEVNEST_DATABASE_URL"):
             raw = os.getenv(env_name, "")
             if raw.strip():
-                return raw.strip()
+                return cls._coerce_libpq_database_url(raw.strip())
         for env_name in ("DATABASE_URL", "DEVNEST_DATABASE_URL"):
             raw = cls._repo_env_fallbacks().get(env_name, "")
             if raw.strip():
-                return raw.strip()
+                return cls._coerce_libpq_database_url(raw.strip())
         return v
 
     @field_validator("postgres_port", mode="before")

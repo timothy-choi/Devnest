@@ -15,6 +15,40 @@ class TestDatabaseConfig:
         )
         assert s.database_url == "postgresql+psycopg://u:p@db.example.com:5432/devnest?sslmode=require"
 
+    def test_libpq_style_database_url_is_supported(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        s = Settings(
+            database_url=(
+                "host=devnest-db.cjwsmsiaycvs.us-east-1.rds.amazonaws.com "
+                "port=5432 dbname=devnest_db user=devnest_user"
+            ),
+        )
+        assert s.database_url == (
+            "postgresql+psycopg://devnest_user@"
+            "devnest-db.cjwsmsiaycvs.us-east-1.rds.amazonaws.com:5432/devnest_db"
+        )
+
+    def test_libpq_style_database_url_preserves_password_and_ssl(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        s = Settings(
+            database_url=(
+                "host=db.example.com port=5432 dbname=devnest user=devnest_user "
+                "password='p@ss word' sslmode=require sslrootcert=/etc/ssl/certs/rds-ca.pem"
+            ),
+        )
+        assert s.database_url == (
+            "postgresql+psycopg://devnest_user:p%40ss+word@db.example.com:5432/devnest"
+            "?sslmode=require&sslrootcert=%2Fetc%2Fssl%2Fcerts%2Frds-ca.pem"
+        )
+
     def test_component_fields_build_postgres_url(self, monkeypatch) -> None:
         from app.libs.common.config import Settings  # noqa: PLC0415
 
