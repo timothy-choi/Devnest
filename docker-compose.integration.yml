@@ -96,10 +96,12 @@ services:
       dockerfile: Dockerfile
     user: "0:0"
     env_file:
-      - ./backend/.env
+      - path: ./backend/.env
+        required: false
     ports:
       - "8000:8000"
     environment:
+      DEVNEST_DATABASE_URL: ${DEVNEST_DATABASE_URL:-}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}
       DEVNEST_ENV: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
@@ -169,8 +171,10 @@ services:
       dockerfile: Dockerfile
     user: "0:0"
     env_file:
-      - ./backend/.env
+      - path: ./backend/.env
+        required: false
     environment:
+      DEVNEST_DATABASE_URL: ${DEVNEST_DATABASE_URL:-}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}
       DEVNEST_ENV: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}

@@ -33,8 +33,10 @@ x-backend-common: &backend-common
     dockerfile: Dockerfile
   env_file:
     - .env
-    - ./backend/.env
+    - path: ./backend/.env
+      required: false
   environment:
+    DEVNEST_DATABASE_URL: ${DEVNEST_DATABASE_URL:-}
     DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:${POSTGRES_PASSWORD}@postgres:5432/devnest}
     DEVNEST_REQUIRE_SECRETS: "true"
   restart: unless-stopped
