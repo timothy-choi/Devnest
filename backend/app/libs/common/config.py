@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Self
 from urllib.parse import quote_plus, urlencode
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +16,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str = ""
+    database_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("DEVNEST_DATABASE_URL", "database_url", "DATABASE_URL"),
+    )
     postgres_host: str = ""
     postgres_port: int = 5432
     postgres_db: str = ""
@@ -242,11 +245,11 @@ class Settings(BaseSettings):
     def _database_url_aliases(cls, v):  # noqa: ANN001
         if isinstance(v, str) and v.strip():
             return cls._coerce_libpq_database_url(v.strip())
-        for env_name in ("DEVNEST_DATABASE_URL", "DATABASE_URL"):
+        for env_name in ("DEVNEST_DATABASE_URL", "database_url", "DATABASE_URL"):
             raw = os.getenv(env_name, "")
             if raw.strip():
                 return cls._coerce_libpq_database_url(raw.strip())
-        for env_name in ("DEVNEST_DATABASE_URL", "DATABASE_URL"):
+        for env_name in ("DEVNEST_DATABASE_URL", "database_url", "DATABASE_URL"):
             raw = cls._repo_env_fallbacks().get(env_name, "")
             if raw.strip():
                 return cls._coerce_libpq_database_url(raw.strip())
