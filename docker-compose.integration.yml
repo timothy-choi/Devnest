@@ -95,6 +95,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     user: "0:0"
+    env_file:
+      - ./backend/.env
     ports:
       - "8000:8000"
     environment:
@@ -166,6 +168,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     user: "0:0"
+    env_file:
+      - ./backend/.env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}
       DEVNEST_ENV: development
