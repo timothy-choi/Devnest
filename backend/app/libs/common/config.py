@@ -312,6 +312,13 @@ class Settings(BaseSettings):
         )
         return self
 
+    @model_validator(mode="after")
+    def _default_db_auto_create_for_development(self) -> Self:
+        if "devnest_db_auto_create" not in self.model_fields_set:
+            if str(self.devnest_env or "").strip().lower() == "development":
+                self.devnest_db_auto_create = True
+        return self
+
     @field_validator("devnest_gateway_public_port", mode="before")
     @classmethod
     def _coerce_gateway_public_port(cls, v):  # noqa: ANN001
