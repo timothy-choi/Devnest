@@ -242,11 +242,11 @@ class Settings(BaseSettings):
     def _database_url_aliases(cls, v):  # noqa: ANN001
         if isinstance(v, str) and v.strip():
             return cls._coerce_libpq_database_url(v.strip())
-        for env_name in ("DATABASE_URL", "DEVNEST_DATABASE_URL"):
+        for env_name in ("DEVNEST_DATABASE_URL", "DATABASE_URL"):
             raw = os.getenv(env_name, "")
             if raw.strip():
                 return cls._coerce_libpq_database_url(raw.strip())
-        for env_name in ("DATABASE_URL", "DEVNEST_DATABASE_URL"):
+        for env_name in ("DEVNEST_DATABASE_URL", "DATABASE_URL"):
             raw = cls._repo_env_fallbacks().get(env_name, "")
             if raw.strip():
                 return cls._coerce_libpq_database_url(raw.strip())
@@ -310,6 +310,22 @@ class Settings(BaseSettings):
             f"{quote_plus(user)}:{quote_plus(str(self.postgres_password or ''))}"
             f"@{host}:{int(self.postgres_port)}/{db}{suffix}"
         )
+        return self
+
+    @model_validator(mode="after")
+    def _prefer_devnest_database_url_alias(self) -> Self:
+        raw = os.getenv("DEVNEST_DATABASE_URL", "")
+        if raw.strip():
+            self.database_url = self._coerce_libpq_database_url(raw.strip())
+            return self
+
+        raw = self._repo_env_fallbacks().get("DEVNEST_DATABASE_URL", "")
+        if raw.strip():
+            self.database_url = self._coerce_libpq_database_url(raw.strip())
+            return self
+
+        self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())
+
         return self
 
     @field_validator("devnest_gateway_public_port", mode="before")

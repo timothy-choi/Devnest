@@ -40,6 +40,18 @@ class TestDatabaseConfig:
         )
         assert s.database_url == "postgresql+psycopg://u:p@db.example.com:5432/devnest?sslmode=require"
 
+    def test_devnest_database_url_alias_overrides_database_url(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://local:local@localhost:5432/local_db")
+        monkeypatch.setenv(
+            "DEVNEST_DATABASE_URL",
+            "postgresql+psycopg://devnest:secret@db.example.com:5432/devnest_db",
+        )
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        s = Settings()
+        assert s.database_url == "postgresql+psycopg://devnest:secret@db.example.com:5432/devnest_db"
+
     def test_libpq_style_database_url_is_supported(self, monkeypatch) -> None:
         from app.libs.common.config import Settings  # noqa: PLC0415
 
