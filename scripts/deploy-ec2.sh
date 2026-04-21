@@ -2,6 +2,7 @@
 # Idempotent EC2 deploy: sync repo to a remote branch and rebuild docker-compose.integration.yml stack.
 # Intended to run ON the instance (via CI SSH). Optional env:
 #   NEXT_PUBLIC_API_BASE_URL — e.g. http://<public-ip>:8000 for the browser UI build
+#   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it instead of local compose Postgres
 #   DEVNEST_DEPLOY_DIR — repo path (default: ~/Devnest)
 #   DEVNEST_DEPLOY_REPO_URL — git remote (default: upstream Devnest URL)
 
@@ -13,6 +14,9 @@ REPO_URL="${DEVNEST_DEPLOY_REPO_URL:-https://github.com/timothy-choi/Devnest.git
 COMPOSE="${COMPOSE_FILE:-docker-compose.integration.yml}"
 
 echo "Deploying DevNest from branch: ${BRANCH}"
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  echo "External DATABASE_URL detected; control-plane services will target managed Postgres/RDS."
+fi
 
 mkdir -p "$(dirname "${REPO_DIR}")"
 if [ ! -d "${REPO_DIR}/.git" ]; then
@@ -85,7 +89,15 @@ docker compose -f "${COMPOSE}" down || true
 # on this host (Compose may otherwise reuse a stale :latest if cache is not invalidated).
 docker compose -f "${COMPOSE}" build workspace-image
 # --force-recreate ensures services pick up compose changes (e.g. pid: host for Linux topology attach).
-docker compose -f "${COMPOSE}" up -d --build --force-recreate
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  echo "Skipping local postgres service because DATABASE_URL points to an external database."
+  docker compose -f "${COMPOSE}" up -d route-admin traefik
+  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps backend
+  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps workspace-worker
+  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps frontend
+else
+  docker compose -f "${COMPOSE}" up -d --build --force-recreate
+fi
 docker compose -f "${COMPOSE}" ps
 
 echo "--- workspace image (expected: Entrypoint = [\"/usr/bin/entrypoint.sh\"] only; Cmd without code-server) ---"

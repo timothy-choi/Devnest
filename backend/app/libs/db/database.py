@@ -1,4 +1,4 @@
-"""SQLAlchemy engine and session factory. Connection string from DATABASE_URL only."""
+"""SQLAlchemy engine and session factory shared by API, worker, and reconcile processes."""
 
 from collections.abc import Generator
 
@@ -95,10 +95,11 @@ def get_db() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     engine = get_engine()
-    SQLModel.metadata.create_all(engine)
     from app.services.placement_service.bootstrap import ensure_default_local_execution_node
 
     settings = get_settings()
+    if settings.devnest_db_auto_create:
+        SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
         ensure_default_local_execution_node(session)
         if settings.devnest_workspace_projects_prune_orphans_on_startup:

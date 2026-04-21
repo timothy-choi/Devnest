@@ -2,6 +2,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Self
+from urllib.parse import quote_plus, urlencode
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,7 +15,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str
+    database_url: str = ""
+    postgres_host: str = ""
+    postgres_port: int = 5432
+    postgres_db: str = ""
+    postgres_user: str = ""
+    postgres_password: str = ""
+    postgres_sslmode: str = ""
+    postgres_sslrootcert: str = ""
+    devnest_db_auto_create: bool = False
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     # Active runtime environment. Accepted values: "development", "staging", "production".
@@ -190,10 +199,35 @@ class Settings(BaseSettings):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _database_url_aliases(cls, v):  # noqa: ANN001
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        for env_name in ("DATABASE_URL", "DEVNEST_DATABASE_URL"):
+            raw = os.getenv(env_name, "")
+            if raw.strip():
+                return raw.strip()
+        for env_name in ("DATABASE_URL", "DEVNEST_DATABASE_URL"):
+            raw = cls._repo_env_fallbacks().get(env_name, "")
+            if raw.strip():
+                return raw.strip()
+        return v
+
+    @field_validator("postgres_port", mode="before")
+    @classmethod
+    def _coerce_postgres_port(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 5432
+        return max(1, min(n, 65535))
+
     @field_validator(
         "devnest_gateway_enabled",
         "devnest_gateway_auth_enabled",
         "devnest_workspace_projects_prune_orphans_on_startup",
+        "devnest_db_auto_create",
         "devnest_reconcile_enabled",
         "devnest_topology_janitor_enabled",
         "devnest_rate_limit_enabled",
@@ -212,6 +246,33 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
+
+    @model_validator(mode="after")
+    def _derive_database_url(self) -> Self:
+        if (self.database_url or "").strip():
+            self.database_url = self.database_url.strip()
+            return self
+
+        host = str(self.postgres_host or "").strip()
+        db = str(self.postgres_db or "").strip()
+        user = str(self.postgres_user or "").strip()
+        if not (host and db and user):
+            return self
+
+        query: dict[str, str] = {}
+        sslmode = str(self.postgres_sslmode or "").strip()
+        sslrootcert = str(self.postgres_sslrootcert or "").strip()
+        if sslmode:
+            query["sslmode"] = sslmode
+        if sslrootcert:
+            query["sslrootcert"] = sslrootcert
+        suffix = f"?{urlencode(query)}" if query else ""
+        self.database_url = (
+            "postgresql+psycopg://"
+            f"{quote_plus(user)}:{quote_plus(str(self.postgres_password or ''))}"
+            f"@{host}:{int(self.postgres_port)}/{db}{suffix}"
+        )
+        return self
 
     @field_validator("devnest_gateway_public_port", mode="before")
     @classmethod
