@@ -14,6 +14,11 @@ REPO_URL="${DEVNEST_DEPLOY_REPO_URL:-https://github.com/timothy-choi/Devnest.git
 COMPOSE="${COMPOSE_FILE:-docker-compose.integration.yml}"
 
 echo "Deploying DevNest from branch: ${BRANCH}"
+# Allow DEVNEST_DATABASE_URL to act as a friendlier alias for managed Postgres/RDS in CI/deploy
+# environments, while Compose/runtime continue to consume DATABASE_URL consistently.
+if [[ -z "${DATABASE_URL:-}" ]] && [[ -n "${DEVNEST_DATABASE_URL:-}" ]]; then
+  export DATABASE_URL="${DEVNEST_DATABASE_URL}"
+fi
 if [[ -n "${DATABASE_URL:-}" ]]; then
   echo "External DATABASE_URL detected; control-plane services will target managed Postgres/RDS."
 fi
