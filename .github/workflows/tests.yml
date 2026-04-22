@@ -29,8 +29,10 @@ concurrency:
 #
 # Triggers: all branch pushes + all PRs + workflow_dispatch (no `on.push.paths` filter).
 #
-# EC2: after linux-full-stack-integration succeeds, deploy-staging (non-main push/dispatch) or
-# deploy-production (main) runs appleboy/ssh-action + scripts/deploy-ec2.sh. Pull requests never deploy.
+# EC2: after prior tests, deploy-staging (non-main push/dispatch) or deploy-production (main) runs
+# appleboy/ssh-action + scripts/deploy-ec2.sh when EC2 secrets are set. ``linux-full-stack-integration``
+# may be skipped (path filters); deploy still runs if that job is skipped, but not if it failed.
+# Pull requests never deploy.
 #
 # --- Nightly tier ---
 # See nightly.yml: full suite including heavy markers + topology_linux + workspace_image,
@@ -617,7 +619,7 @@ jobs:
       github.event_name != 'pull_request' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref != 'refs/heads/main' &&
-      needs.linux-full-stack-integration.result == 'success' &&
+      (needs.linux-full-stack-integration.result == 'success' || needs.linux-full-stack-integration.result == 'skipped') &&
       needs.detect.result == 'success' &&
       needs.unit-tests.result != 'failure' && needs.unit-tests.result != 'cancelled' &&
       needs.integration-tests.result != 'failure' && needs.integration-tests.result != 'cancelled' &&
@@ -667,6 +669,7 @@ jobs:
             export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
             export DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
+            export DEVNEST_COMPOSE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_REQUIRE_EXTERNAL_DB="1"
             export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
@@ -716,7 +719,7 @@ jobs:
       github.event_name != 'pull_request' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == 'refs/heads/main' &&
-      needs.linux-full-stack-integration.result == 'success' &&
+      (needs.linux-full-stack-integration.result == 'success' || needs.linux-full-stack-integration.result == 'skipped') &&
       needs.detect.result == 'success' &&
       needs.unit-tests.result != 'failure' && needs.unit-tests.result != 'cancelled' &&
       needs.integration-tests.result != 'failure' && needs.integration-tests.result != 'cancelled' &&
@@ -766,6 +769,7 @@ jobs:
             export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
             export DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
+            export DEVNEST_COMPOSE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_REQUIRE_EXTERNAL_DB="1"
             export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"

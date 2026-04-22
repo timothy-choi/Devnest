@@ -22,21 +22,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     password: string;
   };
 
-  const registerResponse = await backendRequest({
-    req,
-    res,
-    path: "/auth/register",
-    method: "POST",
-    body: {
-      username,
-      email,
-      password,
-    },
-    authenticated: false,
-    retryOnUnauthorized: false,
-  });
-
-  const registerData = await readBackendJson<RegisterOk | { detail: string }>(registerResponse);
+  let registerResponse: Awaited<ReturnType<typeof backendRequest>>;
+  let registerData: RegisterOk | { detail: string } | null;
+  try {
+    registerResponse = await backendRequest({
+      req,
+      res,
+      path: "/auth/register",
+      method: "POST",
+      body: {
+        username,
+        email,
+        password,
+      },
+      authenticated: false,
+      retryOnUnauthorized: false,
+    });
+    registerData = await readBackendJson<RegisterOk | { detail: string }>(registerResponse);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown error";
+    res.status(503).json({
+      detail: `Could not reach the API (${message}). In Docker Compose, set INTERNAL_API_BASE_URL (e.g. http://backend:8000) on the frontend service.`,
+    });
+    return;
+  }
 
   if (!registerResponse.ok) {
     forwardJson(res, registerResponse.status, registerData);

@@ -22,7 +22,14 @@
 #
 # EC2 / remote host — set public URLs via repo-root `.env` (see `.env.integration.example`), then:
 #   docker compose -f docker-compose.integration.yml up -d --build
-# You need `DEVNEST_FRONTEND_PUBLIC_BASE_URL` (browser :3000) and `NEXT_PUBLIC_API_BASE_URL` (:8000) for OAuth + API.
+# OAuth + email/password auth (sanity checklist):
+#   - ``DEVNEST_FRONTEND_PUBLIC_BASE_URL`` → backend ``GITHUB_OAUTH_PUBLIC_BASE_URL`` / ``GCLOUD_OAUTH_PUBLIC_BASE_URL``
+#     (redirect URI ``{that origin}/auth/oauth/{provider}/callback``). Must match GitHub/Google app settings (use sslip
+#     or DNS hostname, not raw public IP for Google).
+#   - ``NEXT_PUBLIC_API_BASE_URL`` (+ frontend build args) → browser calls to the API (:8000 from the client).
+#   - Postgres reachable → backend migrations + ``/health`` pass → frontend ``depends_on`` backend healthy.
+#   - Frontend service: ``INTERNAL_API_BASE_URL`` (default ``http://backend:8000``) so Next API routes can reach FastAPI.
+#   - Do not set ``AUTH_COOKIE_SECURE=true`` unless the UI is served over HTTPS (plain HTTP ignores Secure cookies).
 #
 # Workspace browser URL (Traefik + route-admin are included in this compose):
 #   Pattern: ``{DEVNEST_GATEWAY_PUBLIC_SCHEME}://ws-<workspace_id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/``
@@ -34,6 +41,14 @@
 #   a wildcard DNS zone you control (``*.yourzone`` → server IP), or use ``<dotted-ip-with-hyphens>.sslip.io`` so
 #   ``ws-<id>.<dashed-ip>.sslip.io`` resolves to that IP. ``scripts/deploy-ec2.sh`` sets the sslip form automatically
 #   when EC2 metadata is available. ``app.devnest.local`` is only for hosts-file / lab DNS (never public DNS).
+#
+# Database URL for backend / workspace-worker (Compose substitution only), in order:
+#   1. ``DEVNEST_COMPOSE_DATABASE_URL`` — explicit (``scripts/deploy-ec2.sh`` / CI set this from secrets).
+#   2. ``DATABASE_URL`` — typical EC2 repo-root ``.env`` with RDS; used when (1) is unset.
+#   3. Default — bundled ``postgres`` service (``postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev``).
+#   Local full-stack with bundled Postgres: omit ``DATABASE_URL`` from repo-root ``.env`` (keep RDS only in
+#   ``backend/.env`` for host-side ``uvicorn``), or set ``DEVNEST_COMPOSE_DATABASE_URL`` to the compose DSN
+#   so a stray shell ``DATABASE_URL`` does not override.
 #
 # Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
@@ -102,8 +117,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}
-      DEVNEST_DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}
+      DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
+      DEVNEST_DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
       DEVNEST_ENV: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
@@ -175,8 +190,8 @@ services:
       - path: ./backend/.env
         required: false
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}
-      DEVNEST_DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}
+      DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
+      DEVNEST_DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
       DEVNEST_ENV: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}

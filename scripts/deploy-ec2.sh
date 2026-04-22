@@ -2,9 +2,12 @@
 # Idempotent EC2 deploy: sync repo to a remote branch and rebuild docker-compose.integration.yml stack.
 # Intended to run ON the instance (via CI SSH). Optional env:
 #   NEXT_PUBLIC_API_BASE_URL — e.g. http://<public-ip>:8000 for the browser UI build
-#   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it instead of local compose Postgres
+#   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it (via DEVNEST_COMPOSE_DATABASE_URL)
+#     instead of local compose Postgres
 #   DEVNEST_DEPLOY_DIR — repo path (default: ~/Devnest)
 #   DEVNEST_DEPLOY_REPO_URL — git remote (default: upstream Devnest URL)
+#   DEVNEST_DEPLOY_GIT_REF — when set (e.g. CI ``github.sha``), check out this commit/tag after fetch instead of
+#     resetting to ``origin/<branch>`` (first positional argument is then only used for logging).
 
 set -euo pipefail
 
@@ -13,11 +16,20 @@ REPO_DIR="${DEVNEST_DEPLOY_DIR:-${HOME}/Devnest}"
 REPO_URL="${DEVNEST_DEPLOY_REPO_URL:-https://github.com/timothy-choi/Devnest.git}"
 COMPOSE="${COMPOSE_FILE:-docker-compose.integration.yml}"
 
-echo "Deploying DevNest from branch: ${BRANCH}"
+if [[ -n "${DEVNEST_DEPLOY_GIT_REF:-}" ]]; then
+  echo "Deploying DevNest at ref: ${DEVNEST_DEPLOY_GIT_REF} (branch arg: ${BRANCH})"
+else
+  echo "Deploying DevNest from branch: ${BRANCH}"
+fi
 # Allow DEVNEST_DATABASE_URL to act as a friendlier alias for managed Postgres/RDS in CI/deploy
 # environments, while Compose/runtime continue to consume DATABASE_URL consistently.
 if [[ -z "${DATABASE_URL:-}" ]] && [[ -n "${DEVNEST_DATABASE_URL:-}" ]]; then
   export DATABASE_URL="${DEVNEST_DATABASE_URL}"
+fi
+# docker-compose.integration.yml reads DEVNEST_COMPOSE_DATABASE_URL for substitution so host DATABASE_URL
+# from unrelated shells does not override bundled postgres; map external DB intent explicitly.
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  export DEVNEST_COMPOSE_DATABASE_URL="${DATABASE_URL}"
 fi
 if [[ -n "${DATABASE_URL:-}" ]]; then
   echo "External DATABASE_URL detected; control-plane services will target managed Postgres/RDS."
@@ -98,7 +110,11 @@ if [[ -z "${NEXT_PUBLIC_API_BASE_URL:-}" ]] && [[ -n "${DEVNEST_FRONTEND_PUBLIC_
   unset _fe || true
 fi
 
-if [ "${BRANCH}" = "main" ]; then
+if [[ -n "${DEVNEST_DEPLOY_GIT_REF:-}" ]]; then
+  git fetch origin "${DEVNEST_DEPLOY_GIT_REF}" 2>/dev/null || true
+  git fetch origin --prune
+  git checkout -f "${DEVNEST_DEPLOY_GIT_REF}"
+elif [ "${BRANCH}" = "main" ]; then
   git checkout main
   git reset --hard origin/main
 else
