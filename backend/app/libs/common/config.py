@@ -9,6 +9,47 @@ from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def format_database_url_for_log(dsn: str) -> str:
+    """Return driver/host/port/database for logs — never username or password."""
+    raw = (dsn or "").strip()
+    if not raw:
+        return "database=<empty>"
+    try:
+        from sqlalchemy.engine.url import make_url
+
+        u = make_url(raw)
+        return (
+            f"driver={u.drivername or 'unknown'} "
+            f"host={u.host or '<none>'} "
+            f"port={u.port or ''} "
+            f"database={u.database or '<none>'}"
+        )
+    except Exception:
+        return "database=<unparseable>"
+
+
+def database_host_and_name_for_log(dsn: str) -> tuple[str, str]:
+    """Safe (host, database name) tuple for diagnostics — no credentials."""
+    raw = (dsn or "").strip()
+    if not raw:
+        return ("<empty>", "<empty>")
+    try:
+        from sqlalchemy.engine.url import make_url
+
+        u = make_url(raw)
+        return (u.host or "<none>", u.database or "<none>")
+    except Exception:
+        return ("<unparseable>", "<unparseable>")
+
+
+# Database URL resolution (application + Alembic via get_settings().database_url):
+#   1. os.environ["DEVNEST_DATABASE_URL"] — highest precedence (explicit DevNest name).
+#   2. os.environ["DATABASE_URL"] — standard; must win over repo ``backend/.env`` file fallbacks.
+#   3. ``backend/.env`` / cwd ``.env`` file: DEVNEST_DATABASE_URL, then DATABASE_URL (see _repo_env_fallbacks).
+#   4. Pydantic field / component env (postgres_* construction in _derive_database_url).
+# Alembic ``env.py`` uses only ``get_settings().database_url`` so migrations and the API always agree.
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=os.getenv("ENV_FILE", ".env"),
@@ -49,6 +90,11 @@ class Settings(BaseSettings):
     password_reset_token_expire_minutes: int = 60
     # If true, PUT /auth/forgot-password includes reset_token in JSON (local/testing only; use email in production).
     password_reset_return_token: bool = False
+    # When true, exposes GET /internal/devnest-auth-diagnostics (JSON only; no secrets). Disable in prod.
+    devnest_auth_diagnostics_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DEVNEST_AUTH_DIAGNOSTICS", "devnest_auth_diagnostics_enabled"),
+    )
 
     # OAuth redirect bases (no trailing slash). Env may be host:port only; code prepends http:// if needed.
     github_oauth_public_base_url: str = ""
@@ -320,14 +366,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _prefer_devnest_database_url_alias(self) -> Self:
-        raw = os.getenv("DEVNEST_DATABASE_URL", "")
-        if raw.strip():
-            self.database_url = self._coerce_libpq_database_url(raw.strip())
+        """Single authoritative merge: OS env beats repo ``.env`` files; DEVNEST_DATABASE_URL beats DATABASE_URL."""
+        raw = os.getenv("DEVNEST_DATABASE_URL", "").strip()
+        if raw:
+            self.database_url = self._coerce_libpq_database_url(raw)
             return self
-
-        raw = self._repo_env_fallbacks().get("DEVNEST_DATABASE_URL", "")
-        if raw.strip():
-            self.database_url = self._coerce_libpq_database_url(raw.strip())
+        raw = os.getenv("DATABASE_URL", "").strip()
+        if raw:
+            self.database_url = self._coerce_libpq_database_url(raw)
+            return self
+        raw = (self._repo_env_fallbacks().get("DEVNEST_DATABASE_URL") or "").strip()
+        if raw:
+            self.database_url = self._coerce_libpq_database_url(raw)
+            return self
+        raw = (self._repo_env_fallbacks().get("DATABASE_URL") or "").strip()
+        if raw:
+            self.database_url = self._coerce_libpq_database_url(raw)
             return self
 
         self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())

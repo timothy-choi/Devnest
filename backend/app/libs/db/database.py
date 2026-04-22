@@ -1,12 +1,13 @@
 """SQLAlchemy engine and session factory shared by API, worker, and reconcile processes."""
 
+import logging
 from collections.abc import Generator
 
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session, SQLModel, create_engine
 from sqlalchemy import select
 
-from ..common.config import get_settings
+from ..common.config import format_database_url_for_log, get_settings
 from ..topology.models import (  # noqa: F401 — register metadata
     IpAllocation,
     Topology,
@@ -49,6 +50,8 @@ from ...services.node_execution_service.workspace_project_dir import prune_orpha
 _engine = None
 _session_factory = None
 
+_logger = logging.getLogger(__name__)
+
 
 def reset_engine() -> None:
     """Dispose engine and clear factories (for tests when DATABASE_URL changes)."""
@@ -62,8 +65,13 @@ def reset_engine() -> None:
 def get_engine():
     global _engine
     if _engine is None:
+        settings = get_settings()
+        _logger.info(
+            "SQLAlchemy engine target: %s",
+            format_database_url_for_log(settings.database_url),
+        )
         _engine = create_engine(
-            get_settings().database_url,
+            settings.database_url,
             echo=False,
             pool_pre_ping=True,
         )

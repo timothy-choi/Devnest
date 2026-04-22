@@ -1,11 +1,13 @@
 """Application entrypoint. Run: ``uvicorn app.main:app`` from the ``backend`` directory."""
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.libs.common.config import database_host_and_name_for_log, get_settings
 from app.libs.db.database import init_db
 from app.libs.events.workspace_event_bus import get_event_bus
 from app.libs.observability.middleware import CorrelationIdMiddleware
@@ -39,9 +41,18 @@ from app.services.integration_service.api.routers import (
     workspace_terminal_router,
 )
 
+_lifespan_logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    settings = get_settings()
+    db_host, db_name = database_host_and_name_for_log(settings.database_url)
+    _lifespan_logger.info(
+        "[DevNest diagnostics] API startup database_host=%s database_name=%s",
+        db_host,
+        db_name,
+    )
     init_db()
     # Attach the event loop to the in-process SSE event bus so worker threads can
     # signal SSE generators via call_soon_threadsafe.

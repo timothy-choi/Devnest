@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { getServerBackendBaseUrl } from "@/lib/server/internal-api-base";
+import { getServerBackendBaseUrl, getServerBackendResolution } from "@/lib/server/internal-api-base";
 import {
   clearAuthCookies,
   getAccessTokenCookieName,
@@ -20,6 +20,19 @@ type BackendOptions = {
   refreshTokenOverride?: string;
 };
 
+let _serverBackendResolutionLogged = false;
+
+function logServerBackendResolutionOnce(): void {
+  if (_serverBackendResolutionLogged) {
+    return;
+  }
+  _serverBackendResolutionLogged = true;
+  const r = getServerBackendResolution();
+  console.info(
+    `[DevNest] Server→FastAPI baseUrl=${r.baseUrl} source=${r.source} inDocker=${String(r.inDocker)}`,
+  );
+}
+
 export async function backendRequest({
   req,
   res,
@@ -31,6 +44,8 @@ export async function backendRequest({
   accessTokenOverride,
   refreshTokenOverride,
 }: BackendOptions) {
+  logServerBackendResolutionOnce();
+
   const accessToken = accessTokenOverride || req.cookies[getAccessTokenCookieName()];
   const refreshToken = refreshTokenOverride || req.cookies[getRefreshTokenCookieName()];
 
@@ -92,6 +107,47 @@ function isTransientNetworkError(err: unknown): boolean {
   );
 }
 
+/**
+ * Human-readable classification for API-route JSON / redirects (no secrets).
+ */
+export function describeBackendFetchFailure(err: unknown): string {
+  const text = collectNetworkErrorText(err);
+  if (/EAI_AGAIN|ENOTFOUND|getaddrinfo/i.test(text)) {
+    return `DNS / name resolution failed — ${text.slice(0, 180)}`;
+  }
+  if (/ECONNREFUSED|ConnectionRefused/i.test(text)) {
+    return `Connection refused (host up but nothing listening on that port) — ${text.slice(0, 180)}`;
+  }
+  if (/ETIMEDOUT|ConnectTimeout|UND_ERR_CONNECT_TIMEOUT|timeout/i.test(text)) {
+    return `Connection timed out — ${text.slice(0, 180)}`;
+  }
+  if (/ECONNRESET|socket hang up|UND_ERR_SOCKET/i.test(text)) {
+    return `Connection reset / dropped — ${text.slice(0, 180)}`;
+  }
+  if (/fetch failed/i.test(text)) {
+    return `Fetch failed (see cause in server logs) — ${text.slice(0, 220)}`;
+  }
+  return text.slice(0, 220);
+}
+
+function createBackendFetchError(classified: string, baseUrl: string, cause: unknown): Error {
+  const err = new Error(`${classified} [baseUrl=${baseUrl}]`);
+  (err as Error & { cause?: unknown }).cause = cause;
+  return err;
+}
+
+/**
+ * One string for JSON bodies / redirect query params: classified network error + resolved URL + mode hint.
+ */
+export function backendReachabilityUserDetail(err: unknown): string {
+  const { baseUrl, inDocker } = getServerBackendResolution();
+  const classified = describeBackendFetchFailure(err);
+  const hint = inDocker
+    ? "In Compose, INTERNAL_API_BASE_URL must match the API service (default http://backend:8000); confirm the backend container is healthy."
+    : "On the host with next dev, NEXT_PUBLIC_API_BASE_URL must point at a running FastAPI (e.g. http://127.0.0.1:8000). docker-compose.dev.yml only runs Postgres — it does not start the API or a backend hostname.";
+  return `${classified} Resolved baseUrl=${baseUrl}. ${hint}`;
+}
+
 type ServerFetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 const serverFetch: ServerFetchFn =
@@ -109,9 +165,14 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
     } catch (e) {
       last = e;
       if (!isTransientNetworkError(e) || attempt === maxAttempts - 1) {
-        throw e;
+        const r = getServerBackendResolution();
+        console.warn(
+          `[DevNest] Backend fetch failed (attempt ${attempt + 1}/${maxAttempts}) baseUrl=${r.baseUrl} source=${r.source}`,
+        );
+        const classified = describeBackendFetchFailure(e);
+        throw createBackendFetchError(classified, r.baseUrl, e);
       }
-      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
     }
   }
   throw last;

@@ -1,7 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { readBackendJson } from "@/lib/server/backend-client";
-import { backendRequest } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { setAuthCookies } from "@/lib/server/auth-cookies";
 import { forwardJson, sendMethodNotAllowed } from "@/lib/server/http";
 
@@ -42,9 +41,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
     loginData = await readBackendJson<BackendLoginResponse | { detail: string }>(loginResponse);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
     res.status(503).json({
-      detail: `Could not reach the API (${message}). In Docker Compose, set INTERNAL_API_BASE_URL (e.g. http://backend:8000) on the frontend service.`,
+      detail: `Could not reach the API: ${backendReachabilityUserDetail(err)}`,
     });
     return;
   }
@@ -79,9 +77,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     auth = await readBackendJson<AuthProfile>(authResponse);
     profile = profileResponse.ok ? await readBackendJson<MyProfile>(profileResponse) : null;
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
     res.status(503).json({
-      detail: `Login succeeded but profile could not be loaded (${message}). Check INTERNAL_API_BASE_URL / backend health.`,
+      detail: `Login succeeded but profile could not be loaded: ${backendReachabilityUserDetail(err)}`,
     });
     return;
   }

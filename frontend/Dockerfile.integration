@@ -28,6 +28,7 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 # Defaults for ``next start`` in Compose (override via compose ``environment:`` as needed).
+# Next API routes resolve FastAPI via INTERNAL_API_BASE_URL / DOCKER_CONTAINER (see lib/server/internal-api-base.ts).
 ENV INTERNAL_API_BASE_URL=http://backend:8000
 ENV DOCKER_CONTAINER=true
 COPY --from=builder /app/public ./public

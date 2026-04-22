@@ -1,3 +1,5 @@
+# Postgres only. Run FastAPI on the host (e.g. 127.0.0.1:8000) and set frontend ``NEXT_PUBLIC_API_BASE_URL``
+# to that URL for ``next dev``; there is no ``backend`` service hostname in this compose file.
 services:
   postgres:
     image: postgres:15

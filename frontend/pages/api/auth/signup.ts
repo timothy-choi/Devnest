@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { readBackendJson, backendRequest } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { forwardJson, sendMethodNotAllowed } from "@/lib/server/http";
 
 type RegisterOk = {
@@ -40,9 +40,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
     registerData = await readBackendJson<RegisterOk | { detail: string }>(registerResponse);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
     res.status(503).json({
-      detail: `Could not reach the API (${message}). In Docker Compose, set INTERNAL_API_BASE_URL (e.g. http://backend:8000) on the frontend service.`,
+      detail: `Could not reach the API: ${backendReachabilityUserDetail(err)}`,
     });
     return;
   }

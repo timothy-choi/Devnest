@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { serialize } from "cookie";
 
-import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { clearAuthCookies, setAuthCookies } from "@/lib/server/auth-cookies";
 import { sendMethodNotAllowed } from "@/lib/server/http";
 import { getSetCookieHeaderValues } from "@/lib/server/response-cookies";
@@ -74,12 +74,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
     data = await readBackendJson<OAuthCallbackPayload | { detail?: string }>(response);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
-    redirectToAuthWithError(
-      req,
-      res,
-      `Sign-in service could not be reached (${message}). If the app runs in Docker Compose, the frontend needs INTERNAL_API_BASE_URL (e.g. http://backend:8000).`,
-    );
+    const detail = backendReachabilityUserDetail(err);
+    const capped = detail.length > 480 ? `${detail.slice(0, 477)}...` : detail;
+    redirectToAuthWithError(req, res, `Sign-in service could not be reached: ${capped}`);
     return;
   }
 

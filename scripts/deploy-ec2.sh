@@ -26,8 +26,8 @@ fi
 if [[ -z "${DATABASE_URL:-}" ]] && [[ -n "${DEVNEST_DATABASE_URL:-}" ]]; then
   export DATABASE_URL="${DEVNEST_DATABASE_URL}"
 fi
-# docker-compose.integration.yml reads DEVNEST_COMPOSE_DATABASE_URL for substitution so host DATABASE_URL
-# from unrelated shells does not override bundled postgres; map external DB intent explicitly.
+# Compose maps ``DEVNEST_COMPOSE_DATABASE_URL`` into both ``DATABASE_URL`` and ``DEVNEST_DATABASE_URL`` in
+# the backend container so the API and Alembic agree (see ``backend/app/libs/common/config.py``).
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DEVNEST_COMPOSE_DATABASE_URL="${DATABASE_URL}"
 fi

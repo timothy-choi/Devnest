@@ -14,6 +14,11 @@ def test_health_ok(client: TestClient) -> None:
     assert r.json() == {"status": "ok"}
 
 
+def test_auth_diagnostics_hidden_by_default(client: TestClient) -> None:
+    r = client.get("/internal/devnest-auth-diagnostics")
+    assert r.status_code == 404
+
+
 def test_ready_ok(client: TestClient) -> None:
     r = client.get("/ready")
     assert r.status_code == 200

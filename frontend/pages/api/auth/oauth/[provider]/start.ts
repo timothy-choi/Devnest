@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { serialize } from "cookie";
 
-import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { sendMethodNotAllowed } from "@/lib/server/http";
 
 type OAuthStartPayload = {
@@ -58,12 +58,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
     data = await readBackendJson<OAuthStartPayload | { detail?: string }>(response);
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
-    redirectToAuthWithError(
-      res,
-      authRoute,
-      `Sign-in service could not be reached (${message}). If the app runs in Docker Compose, set INTERNAL_API_BASE_URL (e.g. http://backend:8000) on the frontend service.`,
-    );
+    const detail = backendReachabilityUserDetail(err);
+    const capped = detail.length > 480 ? `${detail.slice(0, 477)}...` : detail;
+    redirectToAuthWithError(res, authRoute, `Sign-in service could not be reached: ${capped}`);
     return;
   }
 

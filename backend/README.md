@@ -35,10 +35,17 @@ The API will be available at `http://localhost:8000`. Interactive docs at `/docs
 
 ## Environment Variables
 
+**PostgreSQL URL precedence** (same order for **uvicorn** and **`alembic upgrade`** — both use `get_settings().database_url`):
+
+1. `DEVNEST_DATABASE_URL` (OS environment)
+2. `DATABASE_URL` (OS environment)
+3. `DEVNEST_DATABASE_URL` then `DATABASE_URL` from repo `backend/.env` / cwd `.env` (see `ENV_FILE`)
+4. Component-style `POSTGRES_*` fields if no URL is set
+
 | Variable | Default | Description |
 |---|---|---|
 | `DATABASE_URL` | *(preferred)* | Full PostgreSQL connection string. Example: `postgresql+psycopg://user:pass@host:5432/db?sslmode=require` |
-| `DEVNEST_DATABASE_URL` | *(empty)* | Alias for `DATABASE_URL`; useful when you want a DevNest-scoped env name. |
+| `DEVNEST_DATABASE_URL` | *(empty)* | Optional; when set in the **process environment**, it **overrides** `DATABASE_URL` for the same process. |
 | `POSTGRES_HOST` | *(empty)* | Optional component-style DB config used when `DATABASE_URL` is unset. |
 | `POSTGRES_PORT` | `5432` | Optional component-style DB config. |
 | `POSTGRES_DB` | *(empty)* | Optional component-style DB config. |
