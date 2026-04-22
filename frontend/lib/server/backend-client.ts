@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import fetch from "node-fetch";
 
-import { getServerBackendBaseUrl } from "@/lib/env";
+import { getServerBackendBaseUrl } from "@/lib/server/internal-api-base";
 import {
   clearAuthCookies,
   getAccessTokenCookieName,

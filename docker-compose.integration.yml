@@ -20,8 +20,9 @@
 #   (below) so orchestrator mkdir/chown apply to the real bind sources the daemon uses.
 #   Per-workspace layout on that base: ``{id}/`` (project) and ``{id}/code-server/{config,data}/``.
 #
-# EC2 / remote host (set public API URL for browser clients):
-#   NEXT_PUBLIC_API_BASE_URL=http://YOUR_PUBLIC_IP:8000 docker compose -f docker-compose.integration.yml up -d --build
+# EC2 / remote host — set public URLs via repo-root `.env` (see `.env.integration.example`), then:
+#   docker compose -f docker-compose.integration.yml up -d --build
+# You need `DEVNEST_FRONTEND_PUBLIC_BASE_URL` (browser :3000) and `NEXT_PUBLIC_API_BASE_URL` (:8000) for OAuth + API.
 #
 # Workspace browser URL (Traefik + route-admin are included in this compose):
 #   Pattern: ``{DEVNEST_GATEWAY_PUBLIC_SCHEME}://ws-<workspace_id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/``
@@ -280,9 +281,10 @@ services:
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
-      # Next.js API routes run inside this container; localhost:8000 is not the API. Browser still uses
-      # NEXT_PUBLIC_API_BASE_URL from the image build for same-origin fetches; server-side proxy uses this.
-      INTERNAL_API_BASE_URL: http://backend:8000
+      # Server-side fetches to FastAPI: see frontend/lib/server/internal-api-base.ts (uses http://backend:8000 in Docker).
+      DOCKER_CONTAINER: "true"
+      # Optional override; default in-container URL is already http://backend:8000.
+      INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://backend:8000}
     depends_on:
       backend:
         condition: service_healthy
