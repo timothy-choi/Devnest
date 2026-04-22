@@ -1,3 +1,4 @@
+import contextvars
 import os
 import shlex
 from functools import lru_cache
@@ -48,6 +49,14 @@ def database_host_and_name_for_log(dsn: str) -> tuple[str, str]:
 #   3. ``backend/.env`` / cwd ``.env`` file: DEVNEST_DATABASE_URL, then DATABASE_URL (see _repo_env_fallbacks).
 #   4. Pydantic field / component env (postgres_* construction in _derive_database_url).
 # Alembic ``env.py`` uses only ``get_settings().database_url`` so migrations and the API always agree.
+
+# When true, ``Settings(database_url=...)`` was called with that keyword — do not replace it from
+# ``os.environ`` / repo ``.env`` inside ``_prefer_devnest_database_url_alias`` (matches pydantic-settings:
+# init kwargs override environment for tests and one-off tools).
+_explicit_database_url_from_init_kwarg: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_explicit_database_url_from_init_kwarg",
+    default=False,
+)
 
 
 class Settings(BaseSettings):
@@ -337,6 +346,15 @@ class Settings(BaseSettings):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _mark_explicit_database_url_kwarg(cls, data: object) -> object:
+        if isinstance(data, dict):
+            _explicit_database_url_from_init_kwarg.set("database_url" in data)
+        else:
+            _explicit_database_url_from_init_kwarg.set(False)
+        return data
+
     @model_validator(mode="after")
     def _derive_database_url(self) -> Self:
         if (self.database_url or "").strip():
@@ -367,26 +385,33 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _prefer_devnest_database_url_alias(self) -> Self:
         """Single authoritative merge: OS env beats repo ``.env`` files; DEVNEST_DATABASE_URL beats DATABASE_URL."""
-        raw = os.getenv("DEVNEST_DATABASE_URL", "").strip()
-        if raw:
-            self.database_url = self._coerce_libpq_database_url(raw)
-            return self
-        raw = os.getenv("DATABASE_URL", "").strip()
-        if raw:
-            self.database_url = self._coerce_libpq_database_url(raw)
-            return self
-        raw = (self._repo_env_fallbacks().get("DEVNEST_DATABASE_URL") or "").strip()
-        if raw:
-            self.database_url = self._coerce_libpq_database_url(raw)
-            return self
-        raw = (self._repo_env_fallbacks().get("DATABASE_URL") or "").strip()
-        if raw:
-            self.database_url = self._coerce_libpq_database_url(raw)
-            return self
+        try:
+            if _explicit_database_url_from_init_kwarg.get():
+                self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())
+                return self
 
-        self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())
+            raw = os.getenv("DEVNEST_DATABASE_URL", "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
+            raw = os.getenv("DATABASE_URL", "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
+            raw = (self._repo_env_fallbacks().get("DEVNEST_DATABASE_URL") or "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
+            raw = (self._repo_env_fallbacks().get("DATABASE_URL") or "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
 
-        return self
+            self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())
+
+            return self
+        finally:
+            _explicit_database_url_from_init_kwarg.set(False)
 
     @staticmethod
     def _hostname_is_loopback(host: str) -> bool:
