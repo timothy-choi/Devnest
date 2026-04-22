@@ -650,7 +650,9 @@ jobs:
             fi
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
             export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
+            export DEVNEST_REQUIRE_EXTERNAL_DB="1"
             export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
             export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
@@ -747,7 +749,9 @@ jobs:
             fi
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
             export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
+            export DEVNEST_REQUIRE_EXTERNAL_DB="1"
             export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
             export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"

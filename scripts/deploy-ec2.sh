@@ -21,6 +21,9 @@ if [[ -z "${DATABASE_URL:-}" ]] && [[ -n "${DEVNEST_DATABASE_URL:-}" ]]; then
 fi
 if [[ -n "${DATABASE_URL:-}" ]]; then
   echo "External DATABASE_URL detected; control-plane services will target managed Postgres/RDS."
+elif [[ -n "${DEVNEST_REQUIRE_EXTERNAL_DB:-}" ]]; then
+  echo "DEVNEST_REQUIRE_EXTERNAL_DB is set, but DATABASE_URL / DEVNEST_DATABASE_URL is empty." >&2
+  exit 1
 fi
 
 mkdir -p "$(dirname "${REPO_DIR}")"
