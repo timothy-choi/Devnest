@@ -84,6 +84,20 @@ elif [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
   unset _meta_token _pub_ip || true
 fi
 
+# Browser bundle and client-side ``fetch`` use ``NEXT_PUBLIC_API_BASE_URL``. If unset, derive the
+# public API origin from ``DEVNEST_FRONTEND_PUBLIC_BASE_URL`` (e.g. sslip :3000 → :8000) so remote
+# users are not stuck calling ``localhost:8000`` from their laptops.
+if [[ -z "${NEXT_PUBLIC_API_BASE_URL:-}" ]] && [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
+  _fe="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+  if [[ "${_fe}" =~ :[0-9]+(/|$) ]]; then
+    export NEXT_PUBLIC_API_BASE_URL="$(echo "${_fe}" | sed -E 's#:[0-9]+(/|$)#:8000\1#')"
+  else
+    export NEXT_PUBLIC_API_BASE_URL="${_fe}:8000"
+  fi
+  echo "NEXT_PUBLIC_API_BASE_URL unset: derived ${NEXT_PUBLIC_API_BASE_URL} from DEVNEST_FRONTEND_PUBLIC_BASE_URL."
+  unset _fe || true
+fi
+
 if [ "${BRANCH}" = "main" ]; then
   git checkout main
   git reset --hard origin/main

@@ -4,6 +4,7 @@ import { serialize } from "cookie";
 import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
 import { clearAuthCookies, setAuthCookies } from "@/lib/server/auth-cookies";
 import { sendMethodNotAllowed } from "@/lib/server/http";
+import { getSetCookieHeaderValues } from "@/lib/server/response-cookies";
 
 type OAuthCallbackPayload = {
   access_token: string;
@@ -92,7 +93,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const accessToken = (data as OAuthCallbackPayload).access_token?.trim();
-  const refreshToken = extractCookieValue(response.headers.raw()["set-cookie"], "refresh_token");
+  let refreshToken: string | null = null;
+  try {
+    refreshToken = extractCookieValue(getSetCookieHeaderValues(response.headers), "refresh_token");
+  } catch {
+    redirectToAuthWithError(req, res, "OAuth sign-in completed, but the refresh cookie could not be read.");
+    return;
+  }
 
   if (!accessToken || !refreshToken) {
     redirectToAuthWithError(req, res, "OAuth sign-in completed, but the session could not be established.");

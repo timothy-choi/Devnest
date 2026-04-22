@@ -1,5 +1,4 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import fetch from "node-fetch";
 
 import { getServerBackendBaseUrl } from "@/lib/server/internal-api-base";
 import {
@@ -66,6 +65,35 @@ export async function backendRequest({
   });
 }
 
+function isTransientNetworkError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up/i.test(msg);
+}
+
+type ServerFetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+const serverFetch: ServerFetchFn =
+  typeof globalThis.fetch === "function"
+    ? (globalThis.fetch.bind(globalThis) as ServerFetchFn)
+    : // eslint-disable-next-line @typescript-eslint/no-require-imports -- Node < 18 fallback for local dev
+      ((require("node-fetch") as typeof import("node-fetch")).default as unknown as ServerFetchFn);
+
+async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+  let last: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await serverFetch(url, init);
+    } catch (e) {
+      last = e;
+      if (!isTransientNetworkError(e) || attempt === 2) {
+        throw e;
+      }
+      await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+    }
+  }
+  throw last;
+}
+
 async function sendBackendRequest({
   path,
   method,
@@ -89,7 +117,7 @@ async function sendBackendRequest({
     headers.Authorization = `Bearer ${accessToken}`;
   }
 
-  return fetch(`${getServerBackendBaseUrl()}${path}`, {
+  return fetchWithRetry(`${getServerBackendBaseUrl()}${path}`, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -97,7 +125,7 @@ async function sendBackendRequest({
 }
 
 async function refreshAccessToken(refreshToken: string) {
-  const response = await fetch(`${getServerBackendBaseUrl()}/auth/refresh_token`, {
+  const response = await fetchWithRetry(`${getServerBackendBaseUrl()}/auth/refresh_token`, {
     method: "GET",
     headers: {
       Accept: "application/json",
@@ -115,5 +143,12 @@ async function refreshAccessToken(refreshToken: string) {
 
 export async function readBackendJson<T>(response: Awaited<ReturnType<typeof backendRequest>>) {
   const text = await response.text();
-  return text ? (JSON.parse(text) as T) : (null as T);
+  if (!text) {
+    return null as T;
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`Backend returned non-JSON (HTTP ${response.status}): ${text.slice(0, 200)}`);
+  }
 }
