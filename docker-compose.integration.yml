@@ -280,6 +280,9 @@ services:
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      # Next.js API routes run inside this container; localhost:8000 is not the API. Browser still uses
+      # NEXT_PUBLIC_API_BASE_URL from the image build for same-origin fetches; server-side proxy uses this.
+      INTERNAL_API_BASE_URL: http://backend:8000
     depends_on:
       backend:
         condition: service_healthy

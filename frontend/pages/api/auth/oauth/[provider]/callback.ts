@@ -60,15 +60,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const query = new URLSearchParams({ code, state }).toString();
-  const response = await backendRequest({
-    req,
-    res,
-    path: `/auth/oauth/${encodeURIComponent(provider)}/callback?${query}`,
-    method: "GET",
-    authenticated: false,
-    retryOnUnauthorized: false,
-  });
-  const data = await readBackendJson<OAuthCallbackPayload | { detail?: string }>(response);
+  let response: Awaited<ReturnType<typeof backendRequest>>;
+  let data: OAuthCallbackPayload | { detail?: string } | null;
+  try {
+    response = await backendRequest({
+      req,
+      res,
+      path: `/auth/oauth/${encodeURIComponent(provider)}/callback?${query}`,
+      method: "GET",
+      authenticated: false,
+      retryOnUnauthorized: false,
+    });
+    data = await readBackendJson<OAuthCallbackPayload | { detail?: string }>(response);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown error";
+    redirectToAuthWithError(
+      req,
+      res,
+      `Sign-in service could not be reached (${message}). If the app runs in Docker Compose, the frontend needs INTERNAL_API_BASE_URL (e.g. http://backend:8000).`,
+    );
+    return;
+  }
 
   if (!response.ok) {
     const detail =

@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import fetch from "node-fetch";
 
-import { getApiBaseUrl } from "@/lib/env";
+import { getServerBackendBaseUrl } from "@/lib/env";
 import {
   clearAuthCookies,
   getAccessTokenCookieName,
@@ -89,7 +89,7 @@ async function sendBackendRequest({
     headers.Authorization = `Bearer ${accessToken}`;
   }
 
-  return fetch(`${getApiBaseUrl()}${path}`, {
+  return fetch(`${getServerBackendBaseUrl()}${path}`, {
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -97,7 +97,7 @@ async function sendBackendRequest({
 }
 
 async function refreshAccessToken(refreshToken: string) {
-  const response = await fetch(`${getApiBaseUrl()}/auth/refresh_token`, {
+  const response = await fetch(`${getServerBackendBaseUrl()}/auth/refresh_token`, {
     method: "GET",
     headers: {
       Accept: "application/json",
