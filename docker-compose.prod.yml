@@ -36,7 +36,7 @@ x-backend-common: &backend-common
     - path: ./backend/.env
       required: false
   environment:
-    DATABASE_URL: ${DEVNEST_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:${POSTGRES_PASSWORD}@postgres:5432/devnest}}
+    DATABASE_URL: ${DATABASE_URL:-}
     DEVNEST_REQUIRE_SECRETS: "true"
   restart: unless-stopped
 
@@ -64,7 +64,7 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
-      DATABASE_URL: ${DEVNEST_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:${POSTGRES_PASSWORD}@postgres:5432/devnest}}
+      DATABASE_URL: ${DATABASE_URL:-}
       DEVNEST_REQUIRE_SECRETS: "true"
       # Built-in background job worker — runs inside the API process.
       DEVNEST_WORKER_ENABLED: "${DEVNEST_WORKER_ENABLED:-true}"

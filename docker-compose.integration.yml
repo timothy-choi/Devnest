@@ -101,7 +101,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: ${DEVNEST_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
+      DATABASE_URL: ${DATABASE_URL:-}
       DEVNEST_ENV: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
@@ -173,7 +173,7 @@ services:
       - path: ./backend/.env
         required: false
     environment:
-      DATABASE_URL: ${DEVNEST_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
+      DATABASE_URL: ${DATABASE_URL:-}
       DEVNEST_ENV: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
