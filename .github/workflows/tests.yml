@@ -44,6 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
       gateway: ${{ steps.filter.outputs.gateway }}
       tests_workflow: ${{ steps.filter.outputs.tests_workflow }}
     steps:
@@ -216,8 +217,7 @@ jobs:
     needs: detect
     if: |
       needs.detect.outputs.backend == 'true' ||
-      needs.detect.outputs.tests_workflow == 'true' ||
-      needs.detect.outputs.frontend == 'true'
+      needs.detect.outputs.tests_workflow == 'true'
     runs-on: ubuntu-latest
     # Advisory only: lint/format/types/coverage do not block downstream test jobs.
     defaults:
@@ -273,6 +273,9 @@ jobs:
   unit-tests:
     name: Unit Tests
     needs: [detect, quality-checks]
+    if: |
+      needs.detect.outputs.backend == 'true' ||
+      needs.detect.outputs.tests_workflow == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     defaults:
@@ -323,6 +326,9 @@ jobs:
   integration-tests:
     name: Integration Tests
     needs: [detect, quality-checks]
+    if: |
+      needs.detect.outputs.backend == 'true' ||
+      needs.detect.outputs.tests_workflow == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     defaults:
@@ -418,6 +424,9 @@ jobs:
   system-tests:
     name: System Tests
     needs: [detect, quality-checks]
+    if: |
+      needs.detect.outputs.backend == 'true' ||
+      needs.detect.outputs.tests_workflow == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     defaults:
@@ -518,7 +527,11 @@ jobs:
       - integration-tests
       - system-tests
     if: >-
-      always() &&
+      (
+        needs.detect.outputs.backend == 'true' ||
+        needs.detect.outputs.gateway == 'true' ||
+        needs.detect.outputs.tests_workflow == 'true'
+      ) &&
       needs.detect.result == 'success' &&
       needs.unit-tests.result != 'failure' && needs.unit-tests.result != 'cancelled' &&
       needs.integration-tests.result != 'failure' && needs.integration-tests.result != 'cancelled' &&
@@ -551,7 +564,8 @@ jobs:
             sleep 5
           done
           echo "Backend failed to start."
-          docker compose -f docker-compose.integration.yml logs
+          docker compose -f docker-compose.integration.yml ps
+          docker compose -f docker-compose.integration.yml logs --no-color backend workspace-worker frontend postgres route-admin traefik
           exit 1
 
       - name: Wait for frontend readiness
@@ -565,7 +579,8 @@ jobs:
             sleep 5
           done
           echo "Frontend failed to start."
-          docker compose -f docker-compose.integration.yml logs
+          docker compose -f docker-compose.integration.yml ps
+          docker compose -f docker-compose.integration.yml logs --no-color backend workspace-worker frontend postgres route-admin traefik
           exit 1
 
       - name: Print runner-local stack URLs
