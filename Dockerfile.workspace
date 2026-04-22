@@ -59,11 +59,24 @@ USER coder
 WORKDIR /home/coder/project
 
 # Preinstall extensions.
-# - Core workspace extensions are required and should fail the build if unavailable.
-# - Some AI extensions (notably Copilot) are not always available from the default code-server
-#   extension source, so install them on a best-effort basis without breaking the image build.
+# Extension marketplace availability is inconsistent across CI/remote hosts, so install with retries
+# and degrade gracefully instead of failing the whole workspace image build.
 RUN set -eu; \
-    required_extensions="\
+    install_extension() { \
+      ext="$1"; \
+      label="$2"; \
+      for attempt in 1 2 3; do \
+        if code-server --install-extension "$ext"; then \
+          echo "Installed ${label} extension: $ext"; \
+          return 0; \
+        fi; \
+        echo "Failed to install ${label} extension $ext (attempt ${attempt}/3), retrying in 5s..."; \
+        sleep 5; \
+      done; \
+      echo "Skipping ${label} extension after repeated install failures: $ext"; \
+      return 0; \
+    }; \
+    default_extensions="\
       ms-python.python \
       ms-toolsai.jupyter \
       dbaeumer.vscode-eslint \
@@ -73,15 +86,11 @@ RUN set -eu; \
       GitHub.copilot \
       GitHub.copilot-chat \
       Continue.continue"; \
-    for ext in $required_extensions; do \
-      code-server --install-extension "$ext"; \
+    for ext in $default_extensions; do \
+      install_extension "$ext" "default"; \
     done; \
     for ext in $optional_extensions; do \
-      if code-server --install-extension "$ext"; then \
-        echo "Installed optional extension: $ext"; \
-      else \
-        echo "Skipping optional extension unavailable in this marketplace: $ext"; \
-      fi; \
+      install_extension "$ext" "optional"; \
     done
 
 USER root
