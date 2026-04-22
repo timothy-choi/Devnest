@@ -3,7 +3,7 @@ import shlex
 from functools import lru_cache
 from pathlib import Path
 from typing import Self
-from urllib.parse import quote_plus, urlencode
+from urllib.parse import quote_plus, urlencode, urlparse
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     oauth_github_client_secret: str = ""
     oauth_google_client_id: str = ""
     oauth_google_client_secret: str = ""
+    # Browser-visible UI origin (``docker-compose.integration.yml`` / EC2). Used to fix OAuth redirect
+    # bases when ``backend/.env`` still pins ``GITHUB_OAUTH_PUBLIC_BASE_URL`` to localhost.
+    devnest_frontend_public_base_url: str = ""
 
     # --- Internal platform auth (sensitive; header X-Internal-API-Key) ---
     # Legacy single key: used for any internal surface whose scope-specific key is unset.
@@ -329,6 +332,42 @@ class Settings(BaseSettings):
 
         self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())
 
+        return self
+
+    @staticmethod
+    def _hostname_is_loopback(host: str) -> bool:
+        h = (host or "").strip().lower()
+        return h in ("localhost", "127.0.0.1", "::1", "")
+
+    @model_validator(mode="after")
+    def _sync_oauth_public_bases_from_devnest_frontend(self) -> Self:
+        """Prefer ``DEVNEST_FRONTEND_PUBLIC_BASE_URL`` when OAuth bases are loopback (common ``backend/.env``)."""
+        front = (self.devnest_frontend_public_base_url or "").strip().rstrip("/")
+        if not front:
+            raw = os.getenv("DEVNEST_FRONTEND_PUBLIC_BASE_URL", "").strip().rstrip("/")
+            front = raw
+        if not front:
+            return self
+        try:
+            parsed = urlparse(front if "://" in front else f"http://{front}")
+            fh = (parsed.hostname or "").lower()
+        except ValueError:
+            return self
+        if self._hostname_is_loopback(fh):
+            return self
+
+        for attr in ("github_oauth_public_base_url", "gcloud_oauth_public_base_url"):
+            current = (getattr(self, attr) or "").strip()
+            if not current:
+                setattr(self, attr, front)
+                continue
+            try:
+                cur_p = urlparse(current if "://" in current else f"http://{current}")
+                ch = (cur_p.hostname or "").lower()
+            except ValueError:
+                continue
+            if self._hostname_is_loopback(ch):
+                setattr(self, attr, front)
         return self
 
     @field_validator("devnest_gateway_public_port", mode="before")

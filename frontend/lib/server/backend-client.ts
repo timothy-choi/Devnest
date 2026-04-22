@@ -65,9 +65,31 @@ export async function backendRequest({
   });
 }
 
+function collectNetworkErrorText(err: unknown): string {
+  if (!(err instanceof Error)) {
+    return String(err);
+  }
+  const parts: string[] = [err.message];
+  const c = err.cause;
+  if (c instanceof Error) {
+    parts.push(c.message);
+  } else if (c !== undefined && c !== null) {
+    parts.push(String(c));
+  }
+  const agg = err as Error & { errors?: unknown[] };
+  if (Array.isArray(agg.errors)) {
+    for (const sub of agg.errors) {
+      parts.push(sub instanceof Error ? sub.message : String(sub));
+    }
+  }
+  return parts.join(" ");
+}
+
 function isTransientNetworkError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up/i.test(msg);
+  const msg = collectNetworkErrorText(err);
+  return /EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|fetch failed|UND_ERR_CONNECT|ConnectionRefused|ConnectTimeoutError/i.test(
+    msg,
+  );
 }
 
 type ServerFetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -80,15 +102,16 @@ const serverFetch: ServerFetchFn =
 
 async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
   let last: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const maxAttempts = 5;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       return await serverFetch(url, init);
     } catch (e) {
       last = e;
-      if (!isTransientNetworkError(e) || attempt === 2) {
+      if (!isTransientNetworkError(e) || attempt === maxAttempts - 1) {
         throw e;
       }
-      await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
     }
   }
   throw last;
