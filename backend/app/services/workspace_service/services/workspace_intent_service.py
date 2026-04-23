@@ -177,8 +177,24 @@ def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int
     return ws
 
 
-def _compute_workspace_reopen_issues(ws: Workspace) -> list[str]:
-    """Detect stale gateway hosts or missing/legacy project dirs vs current Settings (best-effort, local FS)."""
+def _runtime_has_container_placement(ws: Workspace, rt: WorkspaceRuntime | None) -> bool:
+    """True when control-plane says RUNNING and a runtime row shows an actual container placement."""
+    if ws.status != WorkspaceStatus.RUNNING.value or rt is None:
+        return False
+    return bool((rt.container_id or "").strip())
+
+
+def _compute_workspace_reopen_issues(
+    ws: Workspace,
+    *,
+    rt: WorkspaceRuntime | None = None,
+) -> list[str]:
+    """Detect stale gateway hosts or missing/legacy project dirs vs current Settings (best-effort, local FS).
+
+    When the workspace is RUNNING with a placed container, **local** ``WORKSPACE_PROJECTS_BASE`` existence
+    is not authoritative (API may run off the Docker host or without the bind mount), so we skip FS-only
+    reopen blockers and rely on runtime/orchestrator placement instead.
+    """
     issues: list[str] = []
     if ws.status == WorkspaceStatus.DELETED.value:
         return issues
@@ -199,6 +215,9 @@ def _compute_workspace_reopen_issues(ws: Workspace) -> list[str]:
                 "Stored gateway hostname does not match the current DEVNEST_BASE_DOMAIN pattern; "
                 "routing may target the wrong edge host until a reconcile updates public_host.",
             )
+
+    if _runtime_has_container_placement(ws, rt):
+        return issues
 
     base = (settings.workspace_projects_base or "").strip()
     if not base:
@@ -235,8 +254,8 @@ def _compute_workspace_reopen_issues(ws: Workspace) -> list[str]:
     return issues
 
 
-def _ensure_workspace_reopen_allowed(ws: Workspace) -> None:
-    blockers = _compute_workspace_reopen_issues(ws)
+def _ensure_workspace_reopen_allowed(ws: Workspace, rt: WorkspaceRuntime | None) -> None:
+    blockers = _compute_workspace_reopen_issues(ws, rt=rt)
     if blockers:
         raise WorkspaceInvalidStateError("; ".join(blockers))
 
@@ -529,7 +548,7 @@ def get_workspace_access(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
-    _ensure_workspace_reopen_allowed(ws)
+    _ensure_workspace_reopen_allowed(ws, rt)
     _ensure_gateway_route_ready_for_open(
         session,
         ws=ws,
@@ -597,7 +616,7 @@ def request_attach_workspace(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
-    _ensure_workspace_reopen_allowed(ws)
+    _ensure_workspace_reopen_allowed(ws, rt)
     _ensure_gateway_route_ready_for_open(
         session,
         ws=ws,
@@ -1380,7 +1399,12 @@ def get_workspace(
         return None
     if ws.status == WorkspaceStatus.DELETED.value:
         return None
+    rt = (
+        _get_workspace_runtime(session, workspace_id)
+        if ws.status == WorkspaceStatus.RUNNING.value
+        else None
+    )
     latest = _latest_config_version(session, workspace_id)
     base = WorkspaceDetailResponse.model_validate(ws)
-    reopen = _compute_workspace_reopen_issues(ws)
+    reopen = _compute_workspace_reopen_issues(ws, rt=rt)
     return base.model_copy(update={"latest_config_version": latest, "reopen_issues": reopen})
