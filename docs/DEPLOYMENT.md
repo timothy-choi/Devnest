@@ -94,12 +94,17 @@ DEVNEST_TOKEN_ENCRYPTION_KEY=<fernet-key>
 # GitHub OAuth (sign-in + repo connect)
 GITHUB_CLIENT_ID=<your-github-client-id>
 GITHUB_CLIENT_SECRET=<your-github-client-secret>
-GITHUB_OAUTH_PUBLIC_BASE_URL=https://api.yourdomain.com   # base for /auth/oauth/github/callback
+GITHUB_OAUTH_PUBLIC_BASE_URL=https://app.yourdomain.com   # browser-visible base for /auth/oauth/github/callback
 
 # Google OAuth (sign-in only in V1)
 GOOGLE_CLIENT_ID=<your-google-client-id>
 GOOGLE_CLIENT_SECRET=<your-google-client-secret>
-GCLOUD_OAUTH_PUBLIC_BASE_URL=https://api.yourdomain.com   # base for /auth/oauth/google/callback
+GCLOUD_OAUTH_PUBLIC_BASE_URL=https://app.yourdomain.com   # browser-visible base for /auth/oauth/google/callback
+
+# Browser-visible UI origin for integration / EC2. When this is public and the explicit OAuth callback
+# bases are unset or still point at localhost, backend startup rewrites the effective GitHub/Google
+# OAuth public base URLs to this value.
+DEVNEST_FRONTEND_PUBLIC_BASE_URL=https://app.yourdomain.com
 
 # Workspace runtime: projects base (required for persistent workspace files)
 # Must be an absolute path on the Docker host; created automatically if missing.
@@ -141,6 +146,7 @@ DEVNEST_TERMINAL_DEFAULT_ROWS=50
 DEVNEST_GATEWAY_ENABLED=true
 DEVNEST_GATEWAY_URL=http://route-admin:9080
 DEVNEST_BASE_DOMAIN=app.yourdomain.com
+DEVNEST_FRONTEND_PUBLIC_BASE_URL=https://app.yourdomain.com
 
 # Gateway ForwardAuth (enable once TLS and session flows are tested)
 DEVNEST_GATEWAY_AUTH_ENABLED=true

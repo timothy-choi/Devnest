@@ -30,6 +30,9 @@ For `backend` / `workspace-worker`, Docker Compose **`environment:` overrides `e
 | `DEVNEST_FRONTEND_PUBLIC_BASE_URL` | Browser-visible UI origin (scheme + host + port), used for OAuth redirects and `NEXT_PUBLIC_APP_BASE_URL` in the frontend image. |
 | `NEXT_PUBLIC_API_BASE_URL` | Browser → FastAPI origin (often `:8000` on the same host as the API). `deploy-ec2.sh` derives this from `DEVNEST_FRONTEND_PUBLIC_BASE_URL` when unset. |
 | `DEVNEST_GATEWAY_PORT` / `DEVNEST_GATEWAY_PUBLIC_PORT` | Published Traefik HTTP port on the host and the port embedded in `gateway_url` when non-default (see compose header comments). |
+| `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET` | Required together to enable GitHub OAuth sign-in. Legacy aliases `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` also work. |
+| `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET` | Required together to enable Google OAuth sign-in. Legacy aliases `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` also work. |
+| `GITHUB_OAUTH_PUBLIC_BASE_URL` / `GCLOUD_OAUTH_PUBLIC_BASE_URL` | Public callback base URLs. If unset or loopback-only, backend will prefer `DEVNEST_FRONTEND_PUBLIC_BASE_URL` when it is a non-loopback public host. |
 | `DEVNEST_SNAPSHOT_STORAGE_PROVIDER` | Snapshot/archive storage backend. Keep `local` for single-node dev; set `s3` for EC2 / multi-node snapshot restore flows. Live workspace files still stay on `WORKSPACE_PROJECTS_BASE` host bind mounts. |
 | `DEVNEST_S3_SNAPSHOT_BUCKET` | S3 bucket for snapshot archives when `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3`. |
 | `DEVNEST_S3_SNAPSHOT_PREFIX` | Object prefix for snapshots (default `devnest-snapshots`). |
@@ -45,6 +48,24 @@ Set in the environment or compose when you want misconfiguration to **abort at p
 | `DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` | `true` for EC2/remote users | `RuntimeError` if `DEVNEST_BASE_DOMAIN` is `app.lvh.me` or `app.devnest.local`. |
 
 `scripts/deploy-ec2.sh` sets both to `true` automatically when `DATABASE_URL` is set.
+
+### OAuth requirements
+
+GitHub OAuth is considered configured only when all of these are true:
+
+- `OAUTH_GITHUB_CLIENT_ID` or `GITHUB_CLIENT_ID` is set
+- `OAUTH_GITHUB_CLIENT_SECRET` or `GITHUB_CLIENT_SECRET` is set
+- `GITHUB_OAUTH_PUBLIC_BASE_URL` resolves to a non-empty public callback base
+
+Google OAuth is considered configured only when all of these are true:
+
+- `OAUTH_GOOGLE_CLIENT_ID` or `GOOGLE_CLIENT_ID` is set
+- `OAUTH_GOOGLE_CLIENT_SECRET` or `GOOGLE_CLIENT_SECRET` is set
+- `GCLOUD_OAUTH_PUBLIC_BASE_URL` resolves to a non-empty public callback base
+
+For integration/EC2, you will usually set only `DEVNEST_FRONTEND_PUBLIC_BASE_URL`; backend startup will
+derive both OAuth public base URLs from that value when the explicit OAuth bases are unset or still point
+at `localhost`.
 
 ### Compose command (EC2)
 
@@ -111,6 +132,15 @@ export DEVNEST_BASE_DOMAIN="$PUBLIC_HOST"
 export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${PUBLIC_HOST}:3000"
 export NEXT_PUBLIC_API_BASE_URL="http://${PUBLIC_HOST}:8000"
 export JWT_SECRET_KEY="${JWT_SECRET_KEY:-$(openssl rand -hex 32)}"
+
+# Optional but required if you want OAuth sign-in enabled.
+# export OAUTH_GITHUB_CLIENT_ID='...'
+# export OAUTH_GITHUB_CLIENT_SECRET='...'
+# export OAUTH_GOOGLE_CLIENT_ID='...'
+# export OAUTH_GOOGLE_CLIENT_SECRET='...'
+# Optional explicit callback overrides; otherwise backend will reuse DEVNEST_FRONTEND_PUBLIC_BASE_URL:
+# export GITHUB_OAUTH_PUBLIC_BASE_URL="http://${PUBLIC_HOST}:3000"
+# export GCLOUD_OAUTH_PUBLIC_BASE_URL="http://${PUBLIC_HOST}:3000"
 
 # Snapshot archives only: use S3 for create/restore/delete/existence checks.
 # Active workspace files still stay on /var/lib/devnest/workspace-projects bind mounts.
@@ -270,3 +300,18 @@ The practical check is:
 - snapshot row returns to `AVAILABLE`
 - restore job completes successfully
 - `/var/lib/devnest/workspace-projects/${WORKSPACE_ID}/snapshot-proof.txt` is back to `before-snapshot`
+
+## OAuth and Workspace URL startup diagnostics
+
+Backend and worker startup logs now emit the effective public URL configuration without secrets:
+
+```text
+[DevNest diagnostics] API startup frontend_public_base_url=http://203-0-113-10.sslip.io:3000 github_oauth_public_base_url=http://203-0-113-10.sslip.io:3000 gcloud_oauth_public_base_url=http://203-0-113-10.sslip.io:3000 github_oauth_configured=true google_oauth_configured=false
+[DevNest diagnostics] API startup gateway devnest_base_domain=203-0-113-10.sslip.io public_scheme=http public_port=0 gateway_enabled=true route_admin_url=http://route-admin:8080
+```
+
+Use these to verify:
+
+- OAuth is not “configured” unless both credentials and callback base URL are present.
+- Remote workspace URLs come from `DEVNEST_BASE_DOMAIN`, `DEVNEST_GATEWAY_PUBLIC_SCHEME`, and `DEVNEST_GATEWAY_PUBLIC_PORT`.
+- `app.lvh.me` is only safe for same-host local browsing, never for EC2 remote clients.

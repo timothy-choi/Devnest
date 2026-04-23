@@ -43,6 +43,52 @@ def database_host_and_name_for_log(dsn: str) -> tuple[str, str]:
         return ("<unparseable>", "<unparseable>")
 
 
+def _normalized_public_base_for_log(raw: str) -> str:
+    value = (raw or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value}"
+    return value
+
+
+def _hostname_from_public_base(raw: str) -> str:
+    value = _normalized_public_base_for_log(raw)
+    if not value:
+        return ""
+    try:
+        return (urlparse(value).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def is_loopback_public_base(raw: str) -> bool:
+    return _hostname_from_public_base(raw) in ("", "localhost", "127.0.0.1", "::1")
+
+
+def oauth_startup_status_for_log(settings: "Settings") -> dict[str, object]:
+    github_base = _normalized_public_base_for_log(settings.github_oauth_public_base_url)
+    google_base = _normalized_public_base_for_log(settings.gcloud_oauth_public_base_url)
+    frontend_base = _normalized_public_base_for_log(settings.devnest_frontend_public_base_url)
+    github_configured = bool(
+        (settings.oauth_github_client_id or "").strip()
+        and (settings.oauth_github_client_secret or "").strip()
+        and github_base
+    )
+    google_configured = bool(
+        (settings.oauth_google_client_id or "").strip()
+        and (settings.oauth_google_client_secret or "").strip()
+        and google_base
+    )
+    return {
+        "frontend_public_base_url": frontend_base or "-",
+        "github_oauth_public_base_url": github_base or "-",
+        "gcloud_oauth_public_base_url": google_base or "-",
+        "github_oauth_configured": github_configured,
+        "google_oauth_configured": google_configured,
+    }
+
+
 # Database URL resolution (application + Alembic via get_settings().database_url):
 #   1. os.environ["DEVNEST_DATABASE_URL"] — highest precedence (explicit DevNest name).
 #   2. os.environ["DATABASE_URL"] — standard; must win over repo ``backend/.env`` file fallbacks.
@@ -998,6 +1044,30 @@ class Settings(BaseSettings):
                     "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_BASE_DOMAIN is set to a "
                     f"hostname that does not resolve for remote browsers ({domain!r}). Use sslip.io, "
                     "a wildcard DNS zone pointing at this host, or similar; see docs/INTEGRATION_STARTUP.md."
+                )
+            if is_loopback_public_base(self.devnest_frontend_public_base_url):
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_FRONTEND_PUBLIC_BASE_URL is "
+                    "empty or loopback-only. Set it to the browser-visible UI origin "
+                    "(for example http://203-0-113-10.sslip.io:3000)."
+                )
+            github_creds_present = bool(
+                (self.oauth_github_client_id or "").strip() and (self.oauth_github_client_secret or "").strip()
+            )
+            google_creds_present = bool(
+                (self.oauth_google_client_id or "").strip() and (self.oauth_google_client_secret or "").strip()
+            )
+            if github_creds_present and is_loopback_public_base(self.github_oauth_public_base_url):
+                raise RuntimeError(
+                    "GitHub OAuth credentials are set, but GITHUB_OAUTH_PUBLIC_BASE_URL resolves to an "
+                    "empty or loopback-only host. In EC2/remote mode set DEVNEST_FRONTEND_PUBLIC_BASE_URL "
+                    "or GITHUB_OAUTH_PUBLIC_BASE_URL to the public UI origin."
+                )
+            if google_creds_present and is_loopback_public_base(self.gcloud_oauth_public_base_url):
+                raise RuntimeError(
+                    "Google OAuth credentials are set, but GCLOUD_OAUTH_PUBLIC_BASE_URL resolves to an "
+                    "empty or loopback-only host. In EC2/remote mode set DEVNEST_FRONTEND_PUBLIC_BASE_URL "
+                    "or GCLOUD_OAUTH_PUBLIC_BASE_URL to the public UI origin."
                 )
         return self
 

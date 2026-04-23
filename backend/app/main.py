@@ -7,7 +7,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.libs.common.config import database_host_and_name_for_log, format_database_url_for_log, get_settings
+from app.libs.common.config import (
+    database_host_and_name_for_log,
+    format_database_url_for_log,
+    get_settings,
+    oauth_startup_status_for_log,
+)
 from app.libs.db.database import init_db
 from app.libs.events.workspace_event_bus import get_event_bus
 from app.libs.observability.middleware import CorrelationIdMiddleware
@@ -67,6 +72,16 @@ async def lifespan(_app: FastAPI):
         settings.devnest_gateway_enabled,
         settings.devnest_gateway_url,
     )
+    oauth_status = oauth_startup_status_for_log(settings)
+    _lifespan_logger.info(
+        "[DevNest diagnostics] API startup frontend_public_base_url=%s github_oauth_public_base_url=%s "
+        "gcloud_oauth_public_base_url=%s github_oauth_configured=%s google_oauth_configured=%s",
+        oauth_status["frontend_public_base_url"],
+        oauth_status["github_oauth_public_base_url"],
+        oauth_status["gcloud_oauth_public_base_url"],
+        oauth_status["github_oauth_configured"],
+        oauth_status["google_oauth_configured"],
+    )
     get_snapshot_storage_provider()
     snapshot_fields = snapshot_storage_log_fields()
     _lifespan_logger.info(
@@ -89,6 +104,11 @@ async def lifespan(_app: FastAPI):
             "[DevNest diagnostics] DEVNEST_BASE_DOMAIN=app.lvh.me — workspace subdomains resolve to "
             "127.0.0.1 on the machine that runs DNS (fine for same-host browsers; **not** for remote EC2 users). "
             "Use sslip.io or real DNS for remote clients."
+        )
+    if oauth_status["frontend_public_base_url"] == "-":
+        _lifespan_logger.info(
+            "[DevNest diagnostics] DEVNEST_FRONTEND_PUBLIC_BASE_URL is empty. In EC2/remote mode set it to "
+            "the browser-visible UI origin so OAuth redirects and frontend links are correct."
         )
     init_db()
     # Attach the event loop to the in-process SSE event bus so worker threads can
