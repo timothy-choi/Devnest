@@ -1,9 +1,10 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { serialize } from "cookie";
 
-import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { clearAuthCookies, setAuthCookies } from "@/lib/server/auth-cookies";
 import { sendMethodNotAllowed } from "@/lib/server/http";
+import { getSetCookieHeaderValues } from "@/lib/server/response-cookies";
 
 type OAuthCallbackPayload = {
   access_token: string;
@@ -60,15 +61,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const query = new URLSearchParams({ code, state }).toString();
-  const response = await backendRequest({
-    req,
-    res,
-    path: `/auth/oauth/${encodeURIComponent(provider)}/callback?${query}`,
-    method: "GET",
-    authenticated: false,
-    retryOnUnauthorized: false,
-  });
-  const data = await readBackendJson<OAuthCallbackPayload | { detail?: string }>(response);
+  let response: Awaited<ReturnType<typeof backendRequest>>;
+  let data: OAuthCallbackPayload | { detail?: string } | null;
+  try {
+    response = await backendRequest({
+      req,
+      res,
+      path: `/auth/oauth/${encodeURIComponent(provider)}/callback?${query}`,
+      method: "GET",
+      authenticated: false,
+      retryOnUnauthorized: false,
+    });
+    data = await readBackendJson<OAuthCallbackPayload | { detail?: string }>(response);
+  } catch (err) {
+    const detail = backendReachabilityUserDetail(err);
+    const capped = detail.length > 480 ? `${detail.slice(0, 477)}...` : detail;
+    redirectToAuthWithError(req, res, `Sign-in service could not be reached: ${capped}`);
+    return;
+  }
 
   if (!response.ok) {
     const detail =
@@ -80,7 +90,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   const accessToken = (data as OAuthCallbackPayload).access_token?.trim();
-  const refreshToken = extractCookieValue(response.headers.raw()["set-cookie"], "refresh_token");
+  let refreshToken: string | null = null;
+  try {
+    refreshToken = extractCookieValue(getSetCookieHeaderValues(response.headers), "refresh_token");
+  } catch {
+    redirectToAuthWithError(req, res, "OAuth sign-in completed, but the refresh cookie could not be read.");
+    return;
+  }
 
   if (!accessToken || !refreshToken) {
     redirectToAuthWithError(req, res, "OAuth sign-in completed, but the session could not be established.");

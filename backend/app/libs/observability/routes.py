@@ -9,12 +9,13 @@ When disabled (default) access is open; protect at the ingress layer in producti
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Header, HTTPException, Response, status
 from sqlalchemy import text
 from sqlmodel import Session
 
-from app.libs.common.config import get_settings
+from app.libs.common.config import database_host_and_name_for_log, get_settings
 from app.libs.db.database import get_engine
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.security.internal_auth import InternalApiScope, internal_api_key_is_valid
@@ -33,6 +34,72 @@ _logger = logging.getLogger(__name__)
 )
 def get_health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _oauth_public_origin_for_diagnostics(raw: str) -> str:
+    """Scheme + host[:port] only — no path, query, userinfo, or secrets."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if "://" not in s:
+        s = "http://" + s
+    try:
+        p = urlparse(s)
+        if not p.hostname:
+            return "<invalid>"
+        scheme = (p.scheme or "http").lower()
+        default_port = 443 if scheme == "https" else 80
+        port = p.port
+        if port and port != default_port:
+            return f"{scheme}://{p.hostname}:{port}"
+        return f"{scheme}://{p.hostname}"
+    except Exception:
+        return "<invalid>"
+
+
+@router.get(
+    "/internal/devnest-auth-diagnostics",
+    summary="Auth connectivity diagnostics (gated)",
+    description=(
+        "Returns database host/name + connectivity, OAuth config presence, and nothing secret. "
+        "404 unless ``DEVNEST_AUTH_DIAGNOSTICS=true``. Intended for short-lived RDS/auth debugging."
+    ),
+)
+def get_devnest_auth_diagnostics() -> dict:
+    settings = get_settings()
+    if not settings.devnest_auth_diagnostics_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    db_host, db_name = database_host_and_name_for_log(settings.database_url)
+    db_connectivity = "unknown"
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_connectivity = "ok"
+    except Exception as exc:
+        db_connectivity = f"error:{exc.__class__.__name__}"
+
+    gh_id = bool((settings.oauth_github_client_id or "").strip())
+    go_id = bool((settings.oauth_google_client_id or "").strip())
+
+    return {
+        "database": {
+            "host": db_host,
+            "name": db_name,
+            "connectivity": db_connectivity,
+        },
+        "oauth": {
+            "github": {
+                "client_id_configured": gh_id,
+                "public_base_origin": _oauth_public_origin_for_diagnostics(settings.github_oauth_public_base_url),
+            },
+            "google": {
+                "client_id_configured": go_id,
+                "public_base_origin": _oauth_public_origin_for_diagnostics(settings.gcloud_oauth_public_base_url),
+            },
+        },
+    }
 
 
 @router.get(

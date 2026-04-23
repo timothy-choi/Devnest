@@ -1,7 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { readBackendJson } from "@/lib/server/backend-client";
-import { backendRequest } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { setAuthCookies } from "@/lib/server/auth-cookies";
 import { forwardJson, sendMethodNotAllowed } from "@/lib/server/http";
 
@@ -28,17 +27,25 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
-  const loginResponse = await backendRequest({
-    req,
-    res,
-    path: "/auth/login",
-    method: "POST",
-    body: req.body,
-    authenticated: false,
-    retryOnUnauthorized: false,
-  });
-
-  const loginData = await readBackendJson<BackendLoginResponse | { detail: string }>(loginResponse);
+  let loginResponse: Awaited<ReturnType<typeof backendRequest>>;
+  let loginData: BackendLoginResponse | { detail: string } | null;
+  try {
+    loginResponse = await backendRequest({
+      req,
+      res,
+      path: "/auth/login",
+      method: "POST",
+      body: req.body,
+      authenticated: false,
+      retryOnUnauthorized: false,
+    });
+    loginData = await readBackendJson<BackendLoginResponse | { detail: string }>(loginResponse);
+  } catch (err) {
+    res.status(503).json({
+      detail: `Could not reach the API: ${backendReachabilityUserDetail(err)}`,
+    });
+    return;
+  }
 
   if (!loginResponse.ok) {
     forwardJson(res, loginResponse.status, loginData);
@@ -47,28 +54,39 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const tokens = loginData as BackendLoginResponse;
 
+  let authResponse: Awaited<ReturnType<typeof backendRequest>>;
+  let profileResponse: Awaited<ReturnType<typeof backendRequest>>;
+  let auth: AuthProfile;
+  let profile: MyProfile | null;
+  try {
+    authResponse = await backendRequest({
+      req,
+      res,
+      path: "/auth",
+      accessTokenOverride: tokens.access_token,
+      refreshTokenOverride: tokens.refresh_token,
+    });
+    profileResponse = await backendRequest({
+      req,
+      res,
+      path: "/users/me",
+      accessTokenOverride: tokens.access_token,
+      refreshTokenOverride: tokens.refresh_token,
+    });
+
+    auth = await readBackendJson<AuthProfile>(authResponse);
+    profile = profileResponse.ok ? await readBackendJson<MyProfile>(profileResponse) : null;
+  } catch (err) {
+    res.status(503).json({
+      detail: `Login succeeded but profile could not be loaded: ${backendReachabilityUserDetail(err)}`,
+    });
+    return;
+  }
+
   setAuthCookies(res, {
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
   });
-
-  const authResponse = await backendRequest({
-    req,
-    res,
-    path: "/auth",
-    accessTokenOverride: tokens.access_token,
-    refreshTokenOverride: tokens.refresh_token,
-  });
-  const profileResponse = await backendRequest({
-    req,
-    res,
-    path: "/users/me",
-    accessTokenOverride: tokens.access_token,
-    refreshTokenOverride: tokens.refresh_token,
-  });
-
-  const auth = await readBackendJson<AuthProfile>(authResponse);
-  const profile = profileResponse.ok ? await readBackendJson<MyProfile>(profileResponse) : null;
 
   res.status(200).json({
     user: {

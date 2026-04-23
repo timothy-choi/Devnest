@@ -2,23 +2,22 @@
 
 Supports both offline (SQL generation) and online (live DB) migration modes.
 
-DATABASE URL resolution order:
-1. DATABASE_URL environment variable (set by CI, Docker, or production env files)
-2. app.libs.common.config.get_settings().database_url (reads .env if present)
-3. alembic.ini sqlalchemy.url (left blank; env.py always wins)
+DATABASE URL — same source as the running API: ``get_settings().database_url`` (see
+``app.libs.common.config`` module docstring for precedence: ``DEVNEST_DATABASE_URL``,
+``DATABASE_URL``, then ``backend/.env`` fallbacks, then component env).
 
-Importing app.libs.db.database triggers all SQLModel model imports, registering
-every table in SQLModel.metadata — which is used as Alembic's target_metadata for
-autogenerate support.
+Do not rely on reading ``DATABASE_URL`` alone here; that previously diverged from Settings when
+``backend/.env`` contained a different ``DEVNEST_DATABASE_URL``.
+
+``alembic.ini`` sqlalchemy.url is intentionally blank; env.py always supplies the URL.
 """
 
 from __future__ import annotations
 
-import os
+import logging
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
-from sqlalchemy import text
+from sqlalchemy import pool
 from alembic import context
 from sqlmodel import SQLModel
 
@@ -36,21 +35,23 @@ import app.libs.db.database as _db_module  # noqa: F401, E402
 
 target_metadata = SQLModel.metadata
 
+_log = logging.getLogger("alembic.env")
+
 
 # ── Database URL ─────────────────────────────────────────────────────────────
 
-def _get_url() -> str:
-    """Resolve the database URL at migration time."""
-    url = os.environ.get("DATABASE_URL", "").strip()
-    if url:
-        return url
-    # Fall back to application settings (reads .env if present).
-    from app.libs.common.config import get_settings  # noqa: PLC0415
 
-    return get_settings().database_url
+def _get_url() -> str:
+    """Resolve the database URL at migration time (must match FastAPI ``get_settings()``)."""
+    from app.libs.common.config import format_database_url_for_log, get_settings  # noqa: PLC0415
+
+    url = get_settings().database_url
+    _log.info("Alembic effective DB target: %s", format_database_url_for_log(url))
+    return url
 
 
 # ── Offline mode (generate SQL without connecting) ───────────────────────────
+
 
 def run_migrations_offline() -> None:
     """Emit migration SQL to stdout without a live DB connection.
@@ -71,6 +72,7 @@ def run_migrations_offline() -> None:
 
 
 # ── Online mode (apply migrations against a live DB) ─────────────────────────
+
 
 def run_migrations_online() -> None:
     """Apply migrations against the live database."""

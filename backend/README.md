@@ -35,9 +35,25 @@ The API will be available at `http://localhost:8000`. Interactive docs at `/docs
 
 ## Environment Variables
 
+**PostgreSQL URL precedence** (same order for **uvicorn** and **`alembic upgrade`** — both use `get_settings().database_url`):
+
+1. `DEVNEST_DATABASE_URL` (OS environment)
+2. `DATABASE_URL` (OS environment)
+3. `DEVNEST_DATABASE_URL` then `DATABASE_URL` from repo `backend/.env` / cwd `.env` (see `ENV_FILE`)
+4. Component-style `POSTGRES_*` fields if no URL is set
+
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | *(required)* | PostgreSQL connection string. `postgresql+psycopg://user:pass@host/db` |
+| `DATABASE_URL` | *(preferred)* | Full PostgreSQL connection string. Example: `postgresql+psycopg://user:pass@host:5432/db?sslmode=require` |
+| `DEVNEST_DATABASE_URL` | *(empty)* | Optional; when set in the **process environment**, it **overrides** `DATABASE_URL` for the same process. |
+| `POSTGRES_HOST` | *(empty)* | Optional component-style DB config used when `DATABASE_URL` is unset. |
+| `POSTGRES_PORT` | `5432` | Optional component-style DB config. |
+| `POSTGRES_DB` | *(empty)* | Optional component-style DB config. |
+| `POSTGRES_USER` | *(empty)* | Optional component-style DB config. |
+| `POSTGRES_PASSWORD` | *(empty)* | Optional component-style DB config. |
+| `POSTGRES_SSLMODE` | *(empty)* | Optional component-style DB config; useful for RDS (`require`, `verify-full`, etc.). |
+| `POSTGRES_SSLROOTCERT` | *(empty)* | Optional component-style DB config; path to a CA bundle for certificate validation. |
+| `DEVNEST_DB_AUTO_CREATE` | `false` | If `true`, startup runs `SQLModel.metadata.create_all()` before bootstrap tasks. Leave `false` for migration-driven environments like RDS. |
 | `JWT_SECRET_KEY` | `change-me-in-production` | JWT signing secret. **Must be changed in production.** |
 | `DEVNEST_REQUIRE_SECRETS` | `false` | If `true`, startup aborts when `JWT_SECRET_KEY` is the default. Set to `true` in staging/prod. |
 | `DEVNEST_WORKER_ENABLED` | `false` | Enable the in-process background job worker. |
@@ -69,6 +85,33 @@ alembic current
 # View full migration history
 alembic history --verbose
 ```
+
+### RDS / external Postgres
+
+DevNest can run cleanly against a managed Postgres instance as long as all control-plane processes
+use the same DB config path.
+
+Example with a full DSN:
+
+```bash
+export DATABASE_URL='postgresql+psycopg://devnest:***@mydb.abcdefg.us-east-1.rds.amazonaws.com:5432/devnest?sslmode=require'
+alembic upgrade head
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Or with component-style env vars:
+
+```bash
+export POSTGRES_HOST='mydb.abcdefg.us-east-1.rds.amazonaws.com'
+export POSTGRES_PORT='5432'
+export POSTGRES_DB='devnest'
+export POSTGRES_USER='devnest'
+export POSTGRES_PASSWORD='***'
+export POSTGRES_SSLMODE='require'
+alembic upgrade head
+```
+
+For managed databases, keep `DEVNEST_DB_AUTO_CREATE=false` and run Alembic explicitly.
 
 ### Existing deployments (previously using create_all)
 

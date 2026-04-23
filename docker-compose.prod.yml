@@ -2,7 +2,10 @@
 # ----------------------------------------
 # Usage:
 #   cp .env.example .env           # fill in secrets
-#   docker compose -f docker-compose.prod.yml up -d
+#   # External Postgres / RDS (default path):
+#   docker compose -f docker-compose.prod.yml up -d api
+#   # Local self-hosted Postgres for smoke/prod-like testing:
+#   docker compose -f docker-compose.prod.yml --profile local-postgres up -d
 #
 # Services:
 #   postgres      — managed DB (consider RDS in real production)
@@ -15,6 +18,12 @@
 #
 # For real production, run DB migrations before starting services:
 #   docker compose -f docker-compose.prod.yml run --rm api alembic upgrade head
+#
+# External Postgres / RDS:
+#   Set ``DATABASE_URL`` (or ``DEVNEST_DATABASE_URL`` — it wins if both are set) to your managed
+#   Postgres DSN. The API and ``alembic`` both resolve the DSN via ``get_settings().database_url``
+#   (see ``backend/app/libs/common/config.py``). The bundled Postgres container is only started when
+#   the ``local-postgres`` profile is enabled.
 
 version: "3.9"
 
@@ -25,17 +34,19 @@ x-backend-common: &backend-common
     dockerfile: Dockerfile
   env_file:
     - .env
+    - path: ./backend/.env
+      required: false
   environment:
-    DATABASE_URL: postgresql+psycopg://devnest:${POSTGRES_PASSWORD}@postgres:5432/devnest
+    DATABASE_URL: ${DATABASE_URL:-}
+    # Mirrors DATABASE_URL when unset so Settings + Alembic see one explicit DSN in the container.
+    DEVNEST_DATABASE_URL: ${DEVNEST_DATABASE_URL:-${DATABASE_URL:-}}
     DEVNEST_REQUIRE_SECRETS: "true"
-  depends_on:
-    postgres:
-      condition: service_healthy
   restart: unless-stopped
 
 services:
   postgres:
     image: postgres:15
+    profiles: ["local-postgres"]
     environment:
       POSTGRES_USER: devnest
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-production}
@@ -56,7 +67,8 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://devnest:${POSTGRES_PASSWORD}@postgres:5432/devnest
+      DATABASE_URL: ${DATABASE_URL:-}
+      DEVNEST_DATABASE_URL: ${DEVNEST_DATABASE_URL:-${DATABASE_URL:-}}
       DEVNEST_REQUIRE_SECRETS: "true"
       # Built-in background job worker — runs inside the API process.
       DEVNEST_WORKER_ENABLED: "${DEVNEST_WORKER_ENABLED:-true}"

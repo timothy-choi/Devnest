@@ -1,11 +1,13 @@
 """Application entrypoint. Run: ``uvicorn app.main:app`` from the ``backend`` directory."""
 
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.libs.common.config import database_host_and_name_for_log, format_database_url_for_log, get_settings
 from app.libs.db.database import init_db
 from app.libs.events.workspace_event_bus import get_event_bus
 from app.libs.observability.middleware import CorrelationIdMiddleware
@@ -39,9 +41,44 @@ from app.services.integration_service.api.routers import (
     workspace_terminal_router,
 )
 
+_lifespan_logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    settings = get_settings()
+    db_host, db_name = database_host_and_name_for_log(settings.database_url)
+    _lifespan_logger.info(
+        "[DevNest diagnostics] API startup database_host=%s database_name=%s",
+        db_host,
+        db_name,
+    )
+    _lifespan_logger.info(
+        "[DevNest diagnostics] API startup database_target=%s",
+        format_database_url_for_log(settings.database_url),
+    )
+    _lifespan_logger.info(
+        "[DevNest diagnostics] API startup gateway devnest_base_domain=%s public_scheme=%s "
+        "public_port=%s gateway_enabled=%s route_admin_url=%s",
+        settings.devnest_base_domain,
+        settings.devnest_gateway_public_scheme,
+        settings.devnest_gateway_public_port,
+        settings.devnest_gateway_enabled,
+        settings.devnest_gateway_url,
+    )
+    if db_host == "postgres" and not settings.devnest_expect_external_postgres:
+        _lifespan_logger.info(
+            "[DevNest diagnostics] API startup using bundled Postgres (DB host is the compose service "
+            "name `postgres`). For RDS set DEVNEST_COMPOSE_DATABASE_URL / DATABASE_URL before compose up; "
+            "set DEVNEST_EXPECT_EXTERNAL_POSTGRES=true to fail fast if the resolved host is still `postgres` "
+            "(see docs/INTEGRATION_STARTUP.md)."
+        )
+    if (settings.devnest_base_domain or "").strip().lower() == "app.lvh.me":
+        _lifespan_logger.info(
+            "[DevNest diagnostics] DEVNEST_BASE_DOMAIN=app.lvh.me — workspace subdomains resolve to "
+            "127.0.0.1 on the machine that runs DNS (fine for same-host browsers; **not** for remote EC2 users). "
+            "Use sslip.io or real DNS for remote clients."
+        )
     init_db()
     # Attach the event loop to the in-process SSE event bus so worker threads can
     # signal SSE generators via call_soon_threadsafe.

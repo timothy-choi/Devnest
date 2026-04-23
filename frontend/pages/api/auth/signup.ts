@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-import { readBackendJson, backendRequest } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { forwardJson, sendMethodNotAllowed } from "@/lib/server/http";
 
 type RegisterOk = {
@@ -22,21 +22,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     password: string;
   };
 
-  const registerResponse = await backendRequest({
-    req,
-    res,
-    path: "/auth/register",
-    method: "POST",
-    body: {
-      username,
-      email,
-      password,
-    },
-    authenticated: false,
-    retryOnUnauthorized: false,
-  });
-
-  const registerData = await readBackendJson<RegisterOk | { detail: string }>(registerResponse);
+  let registerResponse: Awaited<ReturnType<typeof backendRequest>>;
+  let registerData: RegisterOk | { detail: string } | null;
+  try {
+    registerResponse = await backendRequest({
+      req,
+      res,
+      path: "/auth/register",
+      method: "POST",
+      body: {
+        username,
+        email,
+        password,
+      },
+      authenticated: false,
+      retryOnUnauthorized: false,
+    });
+    registerData = await readBackendJson<RegisterOk | { detail: string }>(registerResponse);
+  } catch (err) {
+    res.status(503).json({
+      detail: `Could not reach the API: ${backendReachabilityUserDetail(err)}`,
+    });
+    return;
+  }
 
   if (!registerResponse.ok) {
     forwardJson(res, registerResponse.status, registerData);

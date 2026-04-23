@@ -30,6 +30,8 @@ These are **intended shapes**, not separate products. Pick the combination that 
 
 **Quota:** `CREATE` and start-class intents enforce `max_running_workspaces`, **monthly** `max_runtime_hours` (from `WORKSPACE_STOPPED` usage quantities in seconds), and **`max_cpu` / `max_memory_mb`** against summed `WorkspaceRuntime.reserved_*` plus the workspace being started.
 
+**Compose integration / EC2 full stack:** See [INTEGRATION_STARTUP.md](./INTEGRATION_STARTUP.md) for required environment variables, `docker compose` commands, DB and gateway verification, and optional fail-fast flags (`DEVNEST_EXPECT_EXTERNAL_POSTGRES`, `DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`).
+
 ---
 
 ## Production Deployment Checklist

@@ -1,10 +1,68 @@
+import contextvars
 import os
+import shlex
 from functools import lru_cache
 from pathlib import Path
 from typing import Self
+from urllib.parse import quote_plus, urlencode, urlparse
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def format_database_url_for_log(dsn: str) -> str:
+    """Return driver/host/port/database for logs — never username or password."""
+    raw = (dsn or "").strip()
+    if not raw:
+        return "database=<empty>"
+    try:
+        from sqlalchemy.engine.url import make_url
+
+        u = make_url(raw)
+        return (
+            f"driver={u.drivername or 'unknown'} "
+            f"host={u.host or '<none>'} "
+            f"port={u.port or ''} "
+            f"database={u.database or '<none>'}"
+        )
+    except Exception:
+        return "database=<unparseable>"
+
+
+def database_host_and_name_for_log(dsn: str) -> tuple[str, str]:
+    """Safe (host, database name) tuple for diagnostics — no credentials."""
+    raw = (dsn or "").strip()
+    if not raw:
+        return ("<empty>", "<empty>")
+    try:
+        from sqlalchemy.engine.url import make_url
+
+        u = make_url(raw)
+        return (u.host or "<none>", u.database or "<none>")
+    except Exception:
+        return ("<unparseable>", "<unparseable>")
+
+
+# Database URL resolution (application + Alembic via get_settings().database_url):
+#   1. os.environ["DEVNEST_DATABASE_URL"] — highest precedence (explicit DevNest name).
+#   2. os.environ["DATABASE_URL"] — standard; must win over repo ``backend/.env`` file fallbacks.
+#   3. ``backend/.env`` / cwd ``.env`` file: DEVNEST_DATABASE_URL, then DATABASE_URL (see _repo_env_fallbacks).
+#   4. Pydantic field / component env (postgres_* construction in _derive_database_url).
+# Docker Compose: ``services.*.environment`` injects keys into the container process env, so (1)-(2) pick up
+# the compose file values and **override the same keys** from ``env_file: backend/.env`` — backend and worker
+# therefore cannot silently fall back to a different DSN from ``backend/.env`` when compose sets DATABASE_URL.
+# Alembic ``env.py`` uses only ``get_settings().database_url`` so migrations and the API always agree.
+#
+# Optional integration guards (fail fast when mis-set): ``DEVNEST_EXPECT_EXTERNAL_POSTGRES``,
+# ``DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`` (see ``_validate_integration_startup_expectations``).
+
+# When true, ``Settings(database_url=...)`` was called with that keyword — do not replace it from
+# ``os.environ`` / repo ``.env`` inside ``_prefer_devnest_database_url_alias`` (matches pydantic-settings:
+# init kwargs override environment for tests and one-off tools).
+_explicit_database_url_from_init_kwarg: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_explicit_database_url_from_init_kwarg",
+    default=False,
+)
 
 
 class Settings(BaseSettings):
@@ -14,7 +72,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    database_url: str
+    database_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("DEVNEST_DATABASE_URL", "database_url", "DATABASE_URL"),
+    )
+    postgres_host: str = ""
+    postgres_port: int = 5432
+    postgres_db: str = ""
+    postgres_user: str = ""
+    postgres_password: str = ""
+    postgres_sslmode: str = ""
+    postgres_sslrootcert: str = ""
+    devnest_db_auto_create: bool = True
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     # Active runtime environment. Accepted values: "development", "staging", "production".
@@ -36,6 +105,28 @@ class Settings(BaseSettings):
     password_reset_token_expire_minutes: int = 60
     # If true, PUT /auth/forgot-password includes reset_token in JSON (local/testing only; use email in production).
     password_reset_return_token: bool = False
+    # When true, exposes GET /internal/devnest-auth-diagnostics (JSON only; no secrets). Disable in prod.
+    devnest_auth_diagnostics_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DEVNEST_AUTH_DIAGNOSTICS", "devnest_auth_diagnostics_enabled"),
+    )
+    # When true, reject resolved DB host ``postgres`` (bundled compose service) so RDS deploys do not
+    # silently use local Postgres. ``scripts/deploy-ec2.sh`` sets this when ``DATABASE_URL`` is set.
+    devnest_expect_external_postgres: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_EXPECT_EXTERNAL_POSTGRES",
+            "devnest_expect_external_postgres",
+        ),
+    )
+    # When true, reject ``app.lvh.me`` / ``app.devnest.local`` as DEVNEST_BASE_DOMAIN (client-side / lab DNS).
+    devnest_expect_remote_gateway_clients: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS",
+            "devnest_expect_remote_gateway_clients",
+        ),
+    )
 
     # OAuth redirect bases (no trailing slash). Env may be host:port only; code prepends http:// if needed.
     github_oauth_public_base_url: str = ""
@@ -44,6 +135,9 @@ class Settings(BaseSettings):
     oauth_github_client_secret: str = ""
     oauth_google_client_id: str = ""
     oauth_google_client_secret: str = ""
+    # Browser-visible UI origin (``docker-compose.integration.yml`` / EC2). Used to fix OAuth redirect
+    # bases when ``backend/.env`` still pins ``GITHUB_OAUTH_PUBLIC_BASE_URL`` to localhost.
+    devnest_frontend_public_base_url: str = ""
 
     # --- Internal platform auth (sensitive; header X-Internal-API-Key) ---
     # Legacy single key: used for any internal surface whose scope-specific key is unset.
@@ -140,6 +234,43 @@ class Settings(BaseSettings):
                 break
         return values
 
+    @staticmethod
+    def _coerce_libpq_database_url(raw: str) -> str:
+        value = (raw or "").strip()
+        if not value or "://" in value or "=" not in value:
+            return value
+        try:
+            parts = shlex.split(value)
+        except ValueError:
+            return value
+
+        parsed: dict[str, str] = {}
+        for part in parts:
+            if "=" not in part:
+                return value
+            key, part_value = part.split("=", 1)
+            parsed[key.strip().lower()] = part_value.strip()
+
+        host = parsed.get("host", "")
+        db = parsed.get("dbname", "") or parsed.get("database", "")
+        user = parsed.get("user", "")
+        if not (host and db and user):
+            return value
+
+        password = parsed.get("password", "")
+        port = parsed.get("port", "5432").strip() or "5432"
+        userinfo = quote_plus(user)
+        if password:
+            userinfo = f"{userinfo}:{quote_plus(password)}"
+
+        query_params = {
+            "sslmode": parsed.get("sslmode", "").strip(),
+            "sslrootcert": parsed.get("sslrootcert", "").strip(),
+        }
+        query = urlencode({k: v for k, v in query_params.items() if v})
+        url = f"postgresql+psycopg://{userinfo}@{host}:{port}/{db}"
+        return f"{url}?{query}" if query else url
+
     @field_validator(
         "github_oauth_public_base_url",
         "gcloud_oauth_public_base_url",
@@ -190,10 +321,53 @@ class Settings(BaseSettings):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _database_url_aliases(cls, v):  # noqa: ANN001
+        if isinstance(v, str) and v.strip():
+            return cls._coerce_libpq_database_url(v.strip())
+        for env_name in ("DEVNEST_DATABASE_URL", "database_url", "DATABASE_URL"):
+            raw = os.getenv(env_name, "")
+            if raw.strip():
+                return cls._coerce_libpq_database_url(raw.strip())
+        for env_name in ("DEVNEST_DATABASE_URL", "database_url", "DATABASE_URL"):
+            raw = cls._repo_env_fallbacks().get(env_name, "")
+            if raw.strip():
+                return cls._coerce_libpq_database_url(raw.strip())
+        return v
+
+    @field_validator("postgres_port", mode="before")
+    @classmethod
+    def _coerce_postgres_port(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 5432
+        return max(1, min(n, 65535))
+
+    @field_validator(
+        "devnest_expect_external_postgres",
+        "devnest_expect_remote_gateway_clients",
+        mode="before",
+    )
+    @classmethod
+    def _parse_expect_startup_flags(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("", "0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+            return False
+        return bool(v)
+
     @field_validator(
         "devnest_gateway_enabled",
         "devnest_gateway_auth_enabled",
         "devnest_workspace_projects_prune_orphans_on_startup",
+        "devnest_db_auto_create",
         "devnest_reconcile_enabled",
         "devnest_topology_janitor_enabled",
         "devnest_rate_limit_enabled",
@@ -212,6 +386,109 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return v.strip().lower() in ("1", "true", "yes", "on")
         return bool(v)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mark_explicit_database_url_kwarg(cls, data: object) -> object:
+        if isinstance(data, dict):
+            _explicit_database_url_from_init_kwarg.set("database_url" in data)
+        else:
+            _explicit_database_url_from_init_kwarg.set(False)
+        return data
+
+    @model_validator(mode="after")
+    def _derive_database_url(self) -> Self:
+        if (self.database_url or "").strip():
+            self.database_url = self.database_url.strip()
+            return self
+
+        host = str(self.postgres_host or "").strip()
+        db = str(self.postgres_db or "").strip()
+        user = str(self.postgres_user or "").strip()
+        if not (host and db and user):
+            return self
+
+        query: dict[str, str] = {}
+        sslmode = str(self.postgres_sslmode or "").strip()
+        sslrootcert = str(self.postgres_sslrootcert or "").strip()
+        if sslmode:
+            query["sslmode"] = sslmode
+        if sslrootcert:
+            query["sslrootcert"] = sslrootcert
+        suffix = f"?{urlencode(query)}" if query else ""
+        self.database_url = (
+            "postgresql+psycopg://"
+            f"{quote_plus(user)}:{quote_plus(str(self.postgres_password or ''))}"
+            f"@{host}:{int(self.postgres_port)}/{db}{suffix}"
+        )
+        return self
+
+    @model_validator(mode="after")
+    def _prefer_devnest_database_url_alias(self) -> Self:
+        """Single authoritative merge: OS env beats repo ``.env`` files; DEVNEST_DATABASE_URL beats DATABASE_URL."""
+        try:
+            if _explicit_database_url_from_init_kwarg.get():
+                self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())
+                return self
+
+            raw = os.getenv("DEVNEST_DATABASE_URL", "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
+            raw = os.getenv("DATABASE_URL", "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
+            raw = (self._repo_env_fallbacks().get("DEVNEST_DATABASE_URL") or "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
+            raw = (self._repo_env_fallbacks().get("DATABASE_URL") or "").strip()
+            if raw:
+                self.database_url = self._coerce_libpq_database_url(raw)
+                return self
+
+            self.database_url = self._coerce_libpq_database_url(str(self.database_url or "").strip())
+
+            return self
+        finally:
+            _explicit_database_url_from_init_kwarg.set(False)
+
+    @staticmethod
+    def _hostname_is_loopback(host: str) -> bool:
+        h = (host or "").strip().lower()
+        return h in ("localhost", "127.0.0.1", "::1", "")
+
+    @model_validator(mode="after")
+    def _sync_oauth_public_bases_from_devnest_frontend(self) -> Self:
+        """Prefer ``DEVNEST_FRONTEND_PUBLIC_BASE_URL`` when OAuth bases are loopback (common ``backend/.env``)."""
+        front = (self.devnest_frontend_public_base_url or "").strip().rstrip("/")
+        if not front:
+            raw = os.getenv("DEVNEST_FRONTEND_PUBLIC_BASE_URL", "").strip().rstrip("/")
+            front = raw
+        if not front:
+            return self
+        try:
+            parsed = urlparse(front if "://" in front else f"http://{front}")
+            fh = (parsed.hostname or "").lower()
+        except ValueError:
+            return self
+        if self._hostname_is_loopback(fh):
+            return self
+
+        for attr in ("github_oauth_public_base_url", "gcloud_oauth_public_base_url"):
+            current = (getattr(self, attr) or "").strip()
+            if not current:
+                setattr(self, attr, front)
+                continue
+            try:
+                cur_p = urlparse(current if "://" in current else f"http://{current}")
+                ch = (cur_p.hostname or "").lower()
+            except ValueError:
+                continue
+            if self._hostname_is_loopback(ch):
+                setattr(self, attr, front)
+        return self
 
     @field_validator("devnest_gateway_public_port", mode="before")
     @classmethod
@@ -693,6 +970,35 @@ class Settings(BaseSettings):
                 f"DEVNEST_RECONCILE_LOCK_BACKEND={self.devnest_reconcile_lock_backend!r} is not "
                 "allowed in staging/production; use postgres_advisory.",
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_integration_startup_expectations(self) -> Self:
+        """Fail fast when EC2/RDS-style expectations contradict bundled or lab-only defaults."""
+        if self.devnest_expect_external_postgres:
+            host = ""
+            try:
+                from sqlalchemy.engine.url import make_url
+
+                u = make_url(self.database_url)
+                host = (u.host or "").lower()
+            except Exception:
+                host = ""
+            if host == "postgres":
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_EXTERNAL_POSTGRES=true but the resolved database host is "
+                    "'postgres' (bundled docker-compose Postgres). Set DEVNEST_COMPOSE_DATABASE_URL "
+                    "or DATABASE_URL to your managed Postgres/RDS DSN, or set "
+                    "DEVNEST_EXPECT_EXTERNAL_POSTGRES=false when using the bundled postgres service."
+                )
+        if self.devnest_expect_remote_gateway_clients:
+            domain = (self.devnest_base_domain or "").strip().lower()
+            if domain in ("app.lvh.me", "app.devnest.local"):
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_BASE_DOMAIN is set to a "
+                    f"hostname that does not resolve for remote browsers ({domain!r}). Use sslip.io, "
+                    "a wildcard DNS zone pointing at this host, or similar; see docs/INTEGRATION_STARTUP.md."
+                )
         return self
 
 

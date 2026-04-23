@@ -400,25 +400,9 @@ jobs:
             REPO_URL="https://github.com/timothy-choi/Devnest.git"
             REPO_DIR="${HOME}/Devnest"
             COMMIT_SHA="${{ github.sha }}"
-            COMPOSE="${REPO_DIR}/docker-compose.integration.yml"
             if [ ! -d "${REPO_DIR}/.git" ]; then
               mkdir -p "$(dirname "${REPO_DIR}")"
               git clone "${REPO_URL}" "${REPO_DIR}"
-            fi
-            cd "${REPO_DIR}"
-            git remote set-url origin "${REPO_URL}"
-            git fetch origin --prune --tags
-            if ! git checkout -f "${COMMIT_SHA}"; then
-              echo "WARN: ${COMMIT_SHA} not in local repo yet; syncing main then retrying." >&2
-              git checkout -f main
-              git pull --ff-only origin main
-              git checkout -f "${COMMIT_SHA}"
-            fi
-            if [ ! -f "${COMPOSE}" ]; then
-              echo "Missing ${COMPOSE} (commit $(git rev-parse --short HEAD))." >&2
-              ls -la "${REPO_DIR}" >&2
-              git ls-tree -r HEAD --name-only | head -80 >&2
-              exit 1
             fi
             EC2_HOST_PUBLIC="${{ secrets.EC2_HOST }}"
             if [[ "${EC2_HOST_PUBLIC}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -426,8 +410,14 @@ jobs:
             else
               EC2_HOST_OAUTH="${EC2_HOST_PUBLIC}"
             fi
+            export DEVNEST_DEPLOY_DIR="${REPO_DIR}"
+            export DEVNEST_DEPLOY_GIT_REF="${COMMIT_SHA}"
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
             export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
+            export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
+            export DEVNEST_COMPOSE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
+            export DEVNEST_REQUIRE_EXTERNAL_DB="1"
             export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
             export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
@@ -438,8 +428,11 @@ jobs:
             export SMTP_PASSWORD="${{ secrets.SMTP_PASSWORD }}"
             export SMTP_FROM_ADDRESS="${{ secrets.SMTP_FROM_ADDRESS }}"
             export SMTP_USE_TLS="${{ secrets.SMTP_USE_TLS }}"
-            docker compose -f "${COMPOSE}" --project-directory "${REPO_DIR}" down || true
-            docker compose -f "${COMPOSE}" --project-directory "${REPO_DIR}" up -d --build
+            if [ ! -f "${REPO_DIR}/scripts/deploy-ec2.sh" ]; then
+              echo "Missing ${REPO_DIR}/scripts/deploy-ec2.sh; sync repo then retry." >&2
+              exit 1
+            fi
+            bash "${REPO_DIR}/scripts/deploy-ec2.sh" main
             echo "Deployment complete."
 
       - name: Print DevNest URL

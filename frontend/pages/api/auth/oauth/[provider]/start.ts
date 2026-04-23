@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { serialize } from "cookie";
 
-import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
+import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { sendMethodNotAllowed } from "@/lib/server/http";
 
 type OAuthStartPayload = {
@@ -45,16 +45,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
   setOAuthReturnCookie(res, authRoute);
 
-  const response = await backendRequest({
-    req,
-    res,
-    path: `/auth/oauth/${encodeURIComponent(provider)}`,
-    method: "POST",
-    authenticated: false,
-    retryOnUnauthorized: false,
-  });
-
-  const data = await readBackendJson<OAuthStartPayload | { detail?: string }>(response);
+  let response: Awaited<ReturnType<typeof backendRequest>>;
+  let data: OAuthStartPayload | { detail?: string } | null;
+  try {
+    response = await backendRequest({
+      req,
+      res,
+      path: `/auth/oauth/${encodeURIComponent(provider)}`,
+      method: "POST",
+      authenticated: false,
+      retryOnUnauthorized: false,
+    });
+    data = await readBackendJson<OAuthStartPayload | { detail?: string }>(response);
+  } catch (err) {
+    const detail = backendReachabilityUserDetail(err);
+    const capped = detail.length > 480 ? `${detail.slice(0, 477)}...` : detail;
+    redirectToAuthWithError(res, authRoute, `Sign-in service could not be reached: ${capped}`);
+    return;
+  }
 
   if (!response.ok) {
     const detail =
