@@ -30,6 +30,10 @@ For `backend` / `workspace-worker`, Docker Compose **`environment:` overrides `e
 | `DEVNEST_FRONTEND_PUBLIC_BASE_URL` | Browser-visible UI origin (scheme + host + port), used for OAuth redirects and `NEXT_PUBLIC_APP_BASE_URL` in the frontend image. |
 | `NEXT_PUBLIC_API_BASE_URL` | Browser → FastAPI origin (often `:8000` on the same host as the API). `deploy-ec2.sh` derives this from `DEVNEST_FRONTEND_PUBLIC_BASE_URL` when unset. |
 | `DEVNEST_GATEWAY_PORT` / `DEVNEST_GATEWAY_PUBLIC_PORT` | Published Traefik HTTP port on the host and the port embedded in `gateway_url` when non-default (see compose header comments). |
+| `DEVNEST_SNAPSHOT_STORAGE_PROVIDER` | Snapshot/archive storage backend. Keep `local` for single-node dev; set `s3` for EC2 / multi-node snapshot restore flows. Live workspace files still stay on `WORKSPACE_PROJECTS_BASE` host bind mounts. |
+| `DEVNEST_S3_SNAPSHOT_BUCKET` | S3 bucket for snapshot archives when `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3`. |
+| `DEVNEST_S3_SNAPSHOT_PREFIX` | Object prefix for snapshots (default `devnest-snapshots`). |
+| `AWS_REGION` | AWS region for S3 snapshot access. Required when `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3`. |
 
 ### Optional fail-fast flags (backend + workspace-worker)
 
@@ -108,6 +112,16 @@ export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${PUBLIC_HOST}:3000"
 export NEXT_PUBLIC_API_BASE_URL="http://${PUBLIC_HOST}:8000"
 export JWT_SECRET_KEY="${JWT_SECRET_KEY:-$(openssl rand -hex 32)}"
 
+# Snapshot archives only: use S3 for create/restore/delete/existence checks.
+# Active workspace files still stay on /var/lib/devnest/workspace-projects bind mounts.
+export DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3
+export DEVNEST_S3_SNAPSHOT_BUCKET='your-devnest-snapshots-bucket'
+export DEVNEST_S3_SNAPSHOT_PREFIX='devnest-snapshots'
+export AWS_REGION='us-east-1'
+# Optional when not using an instance profile:
+# export AWS_ACCESS_KEY_ID='...'
+# export AWS_SECRET_ACCESS_KEY='...'
+
 # Traefik on host port 80; omit :port in generated workspace URLs (typical EC2)
 export DEVNEST_GATEWAY_PORT="${DEVNEST_GATEWAY_PORT:-80}"
 export DEVNEST_GATEWAY_PUBLIC_PORT="${DEVNEST_GATEWAY_PUBLIC_PORT:-0}"
@@ -148,3 +162,111 @@ docker compose -f docker-compose.integration.yml exec -T backend python -c "from
 ```
 
 Expect something like `http://ws-<workspace_id>.203-0-113-10.sslip.io/` (or with `:9081` if `DEVNEST_GATEWAY_PUBLIC_PORT` is non-zero). Confirm `ws-<id>.<DEVNEST_BASE_DOMAIN>` resolves to Traefik from a **remote** client (`dig +short ws-1.<domain>` or open in browser after creating a workspace).
+
+## Snapshot S3 verification
+
+### Startup diagnostics
+
+Both `backend` and `workspace-worker` now log snapshot storage configuration on startup without secrets:
+
+- `provider`
+- `bucket`
+- `prefix`
+- `region`
+
+Expected log pattern:
+
+```text
+[DevNest diagnostics] API startup snapshot_storage provider=s3 bucket=... prefix=... region=... root=-
+[DevNest diagnostics] workspace-worker startup snapshot_storage provider=s3 bucket=... prefix=... region=... root=-
+```
+
+If `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` is set without `DEVNEST_S3_SNAPSHOT_BUCKET` or `AWS_REGION`, process startup fails immediately with a clear `RuntimeError`.
+
+### Manual verification commands
+
+Set a token and base URL once:
+
+```bash
+export API_BASE_URL="http://${PUBLIC_HOST}:8000"
+export AUTH_TOKEN='replace-with-a-real-bearer-token'
+```
+
+1. Create workspace:
+
+```bash
+curl -sS -X POST "${API_BASE_URL}/workspaces" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"snapshot-s3-check"}'
+```
+
+2. Create snapshot:
+
+```bash
+export WORKSPACE_ID='<workspace-id>'
+
+curl -sS "${API_BASE_URL}/workspaces/${WORKSPACE_ID}" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}"
+
+# Wait until the workspace status is RUNNING or STOPPED before snapshotting.
+
+docker compose -f docker-compose.integration.yml exec -T backend \
+  sh -lc "mkdir -p /var/lib/devnest/workspace-projects/${WORKSPACE_ID} && printf 'before-snapshot\n' > /var/lib/devnest/workspace-projects/${WORKSPACE_ID}/snapshot-proof.txt"
+
+curl -sS -X POST "${API_BASE_URL}/workspaces/${WORKSPACE_ID}/snapshots" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"pre-restore"}'
+```
+
+3. Verify object exists in S3:
+
+```bash
+export SNAPSHOT_ID='<snapshot-id-from-response>'
+
+until curl -fsS "${API_BASE_URL}/snapshots/${SNAPSHOT_ID}" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" | grep -q '"status":"AVAILABLE"'; do
+  sleep 2
+done
+
+aws s3api head-object \
+  --bucket "${DEVNEST_S3_SNAPSHOT_BUCKET}" \
+  --key "${DEVNEST_S3_SNAPSHOT_PREFIX}/ws-${WORKSPACE_ID}/snapshot-${SNAPSHOT_ID}.tar.gz" \
+  --region "${AWS_REGION}"
+```
+
+4. Restore snapshot:
+
+```bash
+curl -sS -X POST "${API_BASE_URL}/workspaces/stop/${WORKSPACE_ID}" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}"
+
+docker compose -f docker-compose.integration.yml exec -T backend \
+  sh -lc "printf 'after-snapshot-change\n' > /var/lib/devnest/workspace-projects/${WORKSPACE_ID}/snapshot-proof.txt"
+
+curl -sS -X POST "${API_BASE_URL}/snapshots/${SNAPSHOT_ID}/restore" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}"
+
+# Wait until the snapshot status returns to AVAILABLE after the restore job completes.
+until curl -fsS "${API_BASE_URL}/snapshots/${SNAPSHOT_ID}" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" | grep -q '"status":"AVAILABLE"'; do
+  sleep 2
+done
+```
+
+5. Verify restore worked:
+
+```bash
+docker compose -f docker-compose.integration.yml exec -T backend \
+  sh -lc "cat /var/lib/devnest/workspace-projects/${WORKSPACE_ID}/snapshot-proof.txt"
+
+curl -sS "${API_BASE_URL}/workspaces/${WORKSPACE_ID}/snapshots" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}"
+```
+
+The practical check is:
+
+- snapshot row returns to `AVAILABLE`
+- restore job completes successfully
+- `/var/lib/devnest/workspace-projects/${WORKSPACE_ID}/snapshot-proof.txt` is back to `before-snapshot`

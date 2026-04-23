@@ -12,6 +12,7 @@ from app.libs.db.database import init_db
 from app.libs.events.workspace_event_bus import get_event_bus
 from app.libs.observability.middleware import CorrelationIdMiddleware
 from app.libs.security.rate_limit import RateLimitMiddleware
+from app.services.storage.factory import get_snapshot_storage_provider, snapshot_storage_log_fields
 from app.workers.lifespan_worker import start_background_worker, stop_background_worker
 from app.workers.lifespan_reconcile import start_reconcile_loop, stop_reconcile_loop
 from app.libs.observability.routes import router as observability_router
@@ -65,6 +66,16 @@ async def lifespan(_app: FastAPI):
         settings.devnest_gateway_public_port,
         settings.devnest_gateway_enabled,
         settings.devnest_gateway_url,
+    )
+    get_snapshot_storage_provider()
+    snapshot_fields = snapshot_storage_log_fields()
+    _lifespan_logger.info(
+        "[DevNest diagnostics] API startup snapshot_storage provider=%s bucket=%s prefix=%s region=%s root=%s",
+        snapshot_fields.get("provider", ""),
+        snapshot_fields.get("bucket", "-"),
+        snapshot_fields.get("prefix", "-"),
+        snapshot_fields.get("region", "-"),
+        snapshot_fields.get("root", "-"),
     )
     if db_host == "postgres" and not settings.devnest_expect_external_postgres:
         _lifespan_logger.info(

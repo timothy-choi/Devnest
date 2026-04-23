@@ -168,7 +168,7 @@ class Settings(BaseSettings):
     devnest_snapshot_storage_root: str = ""
     # Snapshot storage backend: "local" (default) or "s3".
     devnest_snapshot_storage_provider: str = "local"
-    # S3 provider settings (only used when devnest_snapshot_storage_provider=s3).
+    # S3 provider settings (used when devnest_snapshot_storage_provider=s3).
     devnest_s3_snapshot_bucket: str = ""
     devnest_s3_snapshot_prefix: str = "devnest-snapshots"
     # Temp directory for staging S3 snapshot archives locally. Empty → system temp.
@@ -999,6 +999,33 @@ class Settings(BaseSettings):
                     f"hostname that does not resolve for remote browsers ({domain!r}). Use sslip.io, "
                     "a wildcard DNS zone pointing at this host, or similar; see docs/INTEGRATION_STARTUP.md."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_snapshot_storage_config(self) -> Self:
+        provider = (self.devnest_snapshot_storage_provider or "local").strip().lower()
+        if provider not in ("local", "s3"):
+            raise RuntimeError(
+                "DEVNEST_SNAPSHOT_STORAGE_PROVIDER must be 'local' or 's3' "
+                f"(got {self.devnest_snapshot_storage_provider!r})."
+            )
+        if provider != "s3":
+            return self
+
+        bucket = (self.devnest_s3_snapshot_bucket or "").strip()
+        region = (self.aws_region or "").strip()
+        missing: list[str] = []
+        if not bucket:
+            missing.append("DEVNEST_S3_SNAPSHOT_BUCKET")
+        if not region:
+            missing.append("AWS_REGION")
+        if missing:
+            raise RuntimeError(
+                "S3 snapshot storage selected but required configuration is missing: "
+                + ", ".join(missing)
+                + ". Set DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3 only when the S3 snapshot bucket "
+                "and AWS region are configured."
+            )
         return self
 
 

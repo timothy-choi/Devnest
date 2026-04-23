@@ -149,6 +149,7 @@ DEVNEST_GATEWAY_AUTH_ENABLED=true
 DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3
 DEVNEST_S3_SNAPSHOT_BUCKET=your-devnest-snapshots-bucket
 DEVNEST_S3_SNAPSHOT_PREFIX=devnest-snapshots
+DEVNEST_SNAPSHOT_TEMP_DIR=/var/lib/devnest/snapshot-staging
 # Leave AWS keys empty to use IAM instance profile (recommended)
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
@@ -572,6 +573,10 @@ DEVNEST_S3_SNAPSHOT_BUCKET=your-devnest-snapshots-bucket
 DEVNEST_S3_SNAPSHOT_PREFIX=devnest-snapshots
 AWS_REGION=us-east-1
 ```
+
+When `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` is selected, startup fails fast unless both
+`DEVNEST_S3_SNAPSHOT_BUCKET` and `AWS_REGION` are set. API and workspace-worker startup logs include the
+effective snapshot storage `provider`, `bucket`, `prefix`, and `region` without logging AWS secrets.
 
 S3 versioning on the bucket is recommended for durability. The IAM role/instance profile used by the backend needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:HeadObject` on `arn:aws:s3:::your-bucket/*`.
 

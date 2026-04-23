@@ -57,6 +57,16 @@
 #   ``DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`` when ``DATABASE_URL`` is set so miswired URLs fail at process start
 #   instead of silently using bundled Postgres or ``app.lvh.me`` (see ``docs/INTEGRATION_STARTUP.md``).
 #
+# Snapshot/archive storage (workspace files stay on host bind mounts):
+#   Live workspace project data remains under ``WORKSPACE_PROJECTS_BASE`` on the host. Only snapshot archives
+#   are routed through the snapshot storage provider. For EC2 / multi-node restore flows set:
+#     DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3
+#     DEVNEST_S3_SNAPSHOT_BUCKET=<bucket>
+#     DEVNEST_S3_SNAPSHOT_PREFIX=<prefix>      # optional; default devnest-snapshots
+#     AWS_REGION=<region>
+#   Compose passes the same snapshot storage config to both ``backend`` and ``workspace-worker`` so snapshot
+#   create/restore/delete/existence checks use the same provider and object pathing.
+#
 # Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
 # Backend uses the host Docker socket for workspace containers; NET_ADMIN helps topology bring-up on Linux.
@@ -138,6 +148,13 @@ services:
       # Pydantic Settings: field workspace_projects_base → env WORKSPACE_PROJECTS_BASE.
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
+      DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-local}
+      DEVNEST_S3_SNAPSHOT_BUCKET: ${DEVNEST_S3_SNAPSHOT_BUCKET:-}
+      DEVNEST_S3_SNAPSHOT_PREFIX: ${DEVNEST_S3_SNAPSHOT_PREFIX:-devnest-snapshots}
+      DEVNEST_SNAPSHOT_TEMP_DIR: ${DEVNEST_SNAPSHOT_TEMP_DIR:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       # After topology attach, poll workspace IDE TCP before failing bring-up (code-server cold start).
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
@@ -212,6 +229,13 @@ services:
       <<: *workspace_image
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
+      DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-local}
+      DEVNEST_S3_SNAPSHOT_BUCKET: ${DEVNEST_S3_SNAPSHOT_BUCKET:-}
+      DEVNEST_S3_SNAPSHOT_PREFIX: ${DEVNEST_S3_SNAPSHOT_PREFIX:-devnest-snapshots}
+      DEVNEST_SNAPSHOT_TEMP_DIR: ${DEVNEST_SNAPSHOT_TEMP_DIR:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
       DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"
