@@ -275,7 +275,7 @@ def _ensure_traefik_edge_observes_host(settings, *, host_header_source: str) -> 
         try:
             with httpx.Client(timeout=3.0) as client:
                 response = client.get(url, headers={"Host": host_header}, follow_redirects=False)
-        except httpx.RequestException:
+        except httpx.RequestError:
             time.sleep(interval_s)
             continue
         if response.status_code != 404:
