@@ -95,7 +95,7 @@ services:
       dockerfile: Dockerfile.workspace
       args:
         # Bump or export a new value to invalidate build cache when debugging stale EC2 images.
-        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-5-coder-config-dirs}
+        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-7-resilient-extension-install}
     entrypoint: ["/bin/true"]
 
   postgres:
