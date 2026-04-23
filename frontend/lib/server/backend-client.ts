@@ -28,8 +28,9 @@ function logServerBackendResolutionOnce(): void {
   }
   _serverBackendResolutionLogged = true;
   const r = getServerBackendResolution();
+  const fetchMode = r.inDocker ? "docker_network" : "host_next_dev";
   console.info(
-    `[DevNest] Server→FastAPI baseUrl=${r.baseUrl} source=${r.source} inDocker=${String(r.inDocker)}`,
+    `[DevNest] Next server→FastAPI fetch_mode=${fetchMode} baseUrl=${r.baseUrl} url_source=${r.source} inDocker=${String(r.inDocker)}`,
   );
 }
 
@@ -166,8 +167,9 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
       last = e;
       if (!isTransientNetworkError(e) || attempt === maxAttempts - 1) {
         const r = getServerBackendResolution();
+        const fetchMode = r.inDocker ? "docker_network" : "host_next_dev";
         console.warn(
-          `[DevNest] Backend fetch failed (attempt ${attempt + 1}/${maxAttempts}) baseUrl=${r.baseUrl} source=${r.source}`,
+          `[DevNest] Backend fetch failed (attempt ${attempt + 1}/${maxAttempts}) fetch_mode=${fetchMode} baseUrl=${r.baseUrl} url_source=${r.source}`,
         );
         const classified = describeBackendFetchFailure(e);
         throw createBackendFetchError(classified, r.baseUrl, e);

@@ -48,7 +48,13 @@ def database_host_and_name_for_log(dsn: str) -> tuple[str, str]:
 #   2. os.environ["DATABASE_URL"] — standard; must win over repo ``backend/.env`` file fallbacks.
 #   3. ``backend/.env`` / cwd ``.env`` file: DEVNEST_DATABASE_URL, then DATABASE_URL (see _repo_env_fallbacks).
 #   4. Pydantic field / component env (postgres_* construction in _derive_database_url).
+# Docker Compose: ``services.*.environment`` injects keys into the container process env, so (1)-(2) pick up
+# the compose file values and **override the same keys** from ``env_file: backend/.env`` — backend and worker
+# therefore cannot silently fall back to a different DSN from ``backend/.env`` when compose sets DATABASE_URL.
 # Alembic ``env.py`` uses only ``get_settings().database_url`` so migrations and the API always agree.
+#
+# Optional integration guards (fail fast when mis-set): ``DEVNEST_EXPECT_EXTERNAL_POSTGRES``,
+# ``DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`` (see ``_validate_integration_startup_expectations``).
 
 # When true, ``Settings(database_url=...)`` was called with that keyword — do not replace it from
 # ``os.environ`` / repo ``.env`` inside ``_prefer_devnest_database_url_alias`` (matches pydantic-settings:
@@ -103,6 +109,23 @@ class Settings(BaseSettings):
     devnest_auth_diagnostics_enabled: bool = Field(
         default=False,
         validation_alias=AliasChoices("DEVNEST_AUTH_DIAGNOSTICS", "devnest_auth_diagnostics_enabled"),
+    )
+    # When true, reject resolved DB host ``postgres`` (bundled compose service) so RDS deploys do not
+    # silently use local Postgres. ``scripts/deploy-ec2.sh`` sets this when ``DATABASE_URL`` is set.
+    devnest_expect_external_postgres: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_EXPECT_EXTERNAL_POSTGRES",
+            "devnest_expect_external_postgres",
+        ),
+    )
+    # When true, reject ``app.lvh.me`` / ``app.devnest.local`` as DEVNEST_BASE_DOMAIN (client-side / lab DNS).
+    devnest_expect_remote_gateway_clients: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS",
+            "devnest_expect_remote_gateway_clients",
+        ),
     )
 
     # OAuth redirect bases (no trailing slash). Env may be host:port only; code prepends http:// if needed.
@@ -321,6 +344,24 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 5432
         return max(1, min(n, 65535))
+
+    @field_validator(
+        "devnest_expect_external_postgres",
+        "devnest_expect_remote_gateway_clients",
+        mode="before",
+    )
+    @classmethod
+    def _parse_expect_startup_flags(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("", "0", "false", "no", "off"):
+                return False
+            if s in ("1", "true", "yes", "on"):
+                return True
+            return False
+        return bool(v)
 
     @field_validator(
         "devnest_gateway_enabled",
@@ -929,6 +970,35 @@ class Settings(BaseSettings):
                 f"DEVNEST_RECONCILE_LOCK_BACKEND={self.devnest_reconcile_lock_backend!r} is not "
                 "allowed in staging/production; use postgres_advisory.",
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_integration_startup_expectations(self) -> Self:
+        """Fail fast when EC2/RDS-style expectations contradict bundled or lab-only defaults."""
+        if self.devnest_expect_external_postgres:
+            host = ""
+            try:
+                from sqlalchemy.engine.url import make_url
+
+                u = make_url(self.database_url)
+                host = (u.host or "").lower()
+            except Exception:
+                host = ""
+            if host == "postgres":
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_EXTERNAL_POSTGRES=true but the resolved database host is "
+                    "'postgres' (bundled docker-compose Postgres). Set DEVNEST_COMPOSE_DATABASE_URL "
+                    "or DATABASE_URL to your managed Postgres/RDS DSN, or set "
+                    "DEVNEST_EXPECT_EXTERNAL_POSTGRES=false when using the bundled postgres service."
+                )
+        if self.devnest_expect_remote_gateway_clients:
+            domain = (self.devnest_base_domain or "").strip().lower()
+            if domain in ("app.lvh.me", "app.devnest.local"):
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_BASE_DOMAIN is set to a "
+                    f"hostname that does not resolve for remote browsers ({domain!r}). Use sslip.io, "
+                    "a wildcard DNS zone pointing at this host, or similar; see docs/INTEGRATION_STARTUP.md."
+                )
         return self
 
 

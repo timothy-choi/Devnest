@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 class TestDatabaseConfig:
     def test_db_auto_create_defaults_on(self, monkeypatch) -> None:
@@ -122,3 +124,40 @@ class TestDatabaseConfig:
         )
         assert "sslmode=verify-full" in s.database_url
         assert "sslrootcert=%2Fetc%2Fssl%2Fcerts%2Frds-ca.pem" in s.database_url
+
+    def test_expect_external_postgres_rejects_compose_service_hostname(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        with pytest.raises(RuntimeError, match="postgres"):
+            Settings(
+                database_url="postgresql+psycopg://u:p@postgres:5432/devnest_dev",
+                devnest_expect_external_postgres=True,
+            )
+
+    def test_expect_external_postgres_allows_rds_style_host(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        s = Settings(
+            database_url="postgresql+psycopg://u:p@db.xyz.us-east-1.rds.amazonaws.com:5432/devnest",
+            devnest_expect_external_postgres=True,
+        )
+        assert "rds.amazonaws.com" in s.database_url
+
+    def test_expect_remote_gateway_rejects_app_lvh_me(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        with pytest.raises(RuntimeError, match="app.lvh.me"):
+            Settings(
+                database_url="postgresql+psycopg://u:p@db.example.com:5432/db",
+                devnest_base_domain="app.lvh.me",
+                devnest_expect_remote_gateway_clients=True,
+            )

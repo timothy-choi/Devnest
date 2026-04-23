@@ -30,8 +30,10 @@ fi
 # the backend container so the API and Alembic agree (see ``backend/app/libs/common/config.py``).
 if [[ -n "${DATABASE_URL:-}" ]]; then
   export DEVNEST_COMPOSE_DATABASE_URL="${DATABASE_URL}"
-fi
-if [[ -n "${DATABASE_URL:-}" ]]; then
+  # Fail fast in backend/worker if compose still wired DATABASE_URL to bundled ``postgres`` by mistake.
+  export DEVNEST_EXPECT_EXTERNAL_POSTGRES=true
+  # Fail fast if DEVNEST_BASE_DOMAIN is still a client-loopback pattern (e.g. app.lvh.me) for remote browsers.
+  export DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true
   echo "External DATABASE_URL detected; control-plane services will target managed Postgres/RDS."
 elif [[ -n "${DEVNEST_REQUIRE_EXTERNAL_DB:-}" ]]; then
   echo "DEVNEST_REQUIRE_EXTERNAL_DB is set, but DATABASE_URL / DEVNEST_DATABASE_URL is empty." >&2

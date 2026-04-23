@@ -75,7 +75,7 @@ export type ServerBackendResolution = {
  * | Mode | Typical result |
  * |------|----------------|
  * | ``next dev`` on host | ``NEXT_PUBLIC_API_BASE_URL`` (e.g. ``http://127.0.0.1:8000``). No ``backend`` hostname — ``docker-compose.dev.yml`` has no API service. |
- * | Frontend container (integration / EC2) | ``INTERNAL_API_BASE_URL`` or default ``http://backend:8000`` on the Compose network. |
+ * | Frontend container (integration / EC2) | ``INTERNAL_API_BASE_URL`` or default ``http://backend:8000`` on the Compose network. In-container detection uses ``DOCKER_CONTAINER=true`` (compose) and/or ``/.dockerenv``. |
  *
  * Browsers use {@link getApiBaseUrl} / ``NEXT_PUBLIC_API_BASE_URL``; this module is server-only.
  */

@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 
+from app.libs.common.config import database_host_and_name_for_log, format_database_url_for_log, get_settings
 from app.libs.db.database import get_engine
 from app.services.orchestrator_service.app_factory import build_orchestrator_for_workspace_job
 from app.services.orchestrator_service.errors import AppOrchestratorBindingError
@@ -68,6 +69,22 @@ def run_poll_loop(
     ``stop_event`` when set causes the loop to exit after the current tick. If ``None``, SIGINT /
     SIGTERM install a process-wide stop event.
     """
+    ws = get_settings()
+    db_host, _db_name = database_host_and_name_for_log(ws.database_url)
+    logger.info(
+        "[DevNest diagnostics] workspace-worker startup database_host=%s database_target=%s base_domain=%s public_scheme=%s public_port=%s expect_external_postgres=%s",
+        db_host,
+        format_database_url_for_log(ws.database_url),
+        ws.devnest_base_domain,
+        ws.devnest_gateway_public_scheme,
+        ws.devnest_gateway_public_port,
+        ws.devnest_expect_external_postgres,
+    )
+    if db_host == "postgres" and not ws.devnest_expect_external_postgres:
+        logger.info(
+            "[DevNest diagnostics] workspace-worker using bundled Postgres host `postgres` "
+            "(same DSN resolution as API; override via compose DATABASE_URL for RDS)."
+        )
     engine = get_engine()
     own_stop = stop_event is None
     evt = stop_event or threading.Event()

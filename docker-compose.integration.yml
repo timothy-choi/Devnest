@@ -27,7 +27,7 @@
 #     (redirect URI ``{that origin}/auth/oauth/{provider}/callback``). Must match GitHub/Google app settings (use sslip
 #     or DNS hostname, not raw public IP for Google).
 #   - ``NEXT_PUBLIC_API_BASE_URL`` (+ frontend build args) → browser calls to the API (:8000 from the client).
-#   - Postgres reachable → backend migrations + ``/health`` pass → frontend ``depends_on`` backend healthy.
+#   - Postgres reachable → ``alembic upgrade`` + backend ``GET /ready`` (DB check) pass → frontend ``depends_on`` backend healthy.
 #   - Frontend service: ``INTERNAL_API_BASE_URL`` (default ``http://backend:8000``) so Next API routes can reach FastAPI.
 #   - Optional: ``DEVNEST_AUTH_DIAGNOSTICS=true`` on backend + frontend → ``/internal/devnest-auth-diagnostics`` and ``/api/internal/devnest-diagnostics`` (remove after debugging).
 #   - Do not set ``AUTH_COOKIE_SECURE=true`` unless the UI is served over HTTPS (plain HTTP ignores Secure cookies).
@@ -49,8 +49,13 @@
 #   • ``DEVNEST_COMPOSE_DATABASE_URL`` — preferred single knob for RDS / external Postgres (CI / deploy-ec2).
 #   • ``DATABASE_URL`` — used when ``DEVNEST_COMPOSE_DATABASE_URL`` is unset.
 #   Default when both unset: bundled ``postgres`` (``postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev``).
-#   In-container precedence for the **app + Alembic**: ``DEVNEST_DATABASE_URL`` > ``DATABASE_URL`` > ``backend/.env``
-#   file keys (see ``backend/app/libs/common/config.py``). Set both via Compose so they always match.
+#   In-container precedence for the **app + Alembic** (``get_settings().database_url``): process
+#   ``DEVNEST_DATABASE_URL`` > ``DATABASE_URL`` > ``backend/.env`` / cwd ``.env`` file fallbacks (see
+#   ``backend/app/libs/common/config.py``). Compose ``environment:`` keys override ``env_file: backend/.env``
+#   for the same name, so set RDS/bundled URLs here; keep ``backend/.env`` aligned or omit DB keys there.
+#   EC2/RDS: ``scripts/deploy-ec2.sh`` exports ``DEVNEST_EXPECT_EXTERNAL_POSTGRES`` and
+#   ``DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`` when ``DATABASE_URL`` is set so miswired URLs fail at process start
+#   instead of silently using bundled Postgres or ``app.lvh.me`` (see ``docs/INTEGRATION_STARTUP.md``).
 #
 # Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
@@ -127,6 +132,9 @@ services:
       DEVNEST_WORKER_ENABLED: "false"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
       <<: *workspace_image
+      # Optional fail-fast for EC2/RDS (see header + docs/INTEGRATION_STARTUP.md). deploy-ec2.sh sets when using RDS.
+      DEVNEST_EXPECT_EXTERNAL_POSTGRES: "${DEVNEST_EXPECT_EXTERNAL_POSTGRES:-false}"
+      DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS: "${DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS:-false}"
       # Pydantic Settings: field workspace_projects_base → env WORKSPACE_PROJECTS_BASE.
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
@@ -171,7 +179,8 @@ services:
       route-admin:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      # /ready includes DB connectivity so dependents do not start before migrations + Postgres/RDS accept connections.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ready || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -211,6 +220,8 @@ services:
       DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
       DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
       DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
+      DEVNEST_EXPECT_EXTERNAL_POSTGRES: "${DEVNEST_EXPECT_EXTERNAL_POSTGRES:-false}"
+      DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS: "${DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS:-false}"
       # Passed explicitly so Settings can prefer this over loopback values from ``backend/.env``.
       DEVNEST_FRONTEND_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
       GITHUB_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
@@ -289,6 +300,8 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - route-admin
+    # Traefik does not ``depends_on`` backend: EC2 deploy starts route-admin + traefik before backend
+    # (``scripts/deploy-ec2.sh``). ForwardAuth to ``backend:8000`` works once the API is up; recycle traefik if needed.
 
   frontend:
     build:
