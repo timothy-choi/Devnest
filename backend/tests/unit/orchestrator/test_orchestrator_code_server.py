@@ -207,6 +207,14 @@ class TestCodeServerBindMounts:
         assert len(mounts) == 2
         assert stale.exists()
 
+    def test_fallback_uses_project_storage_key_when_host_path_missing(self, tmp_path: Path) -> None:
+        """Without workspace_host_path, resolve the same keyed dir as primary project mounts."""
+        svc = _make_svc(tmp_path)
+        mounts = svc._code_server_extra_bind_mounts("7", None, "resume", "mykey")
+        assert len(mounts) == 2
+        cfg = tmp_path / "workspaces" / "7-mykey" / "code-server" / "config" / "config.yaml"
+        assert cfg.is_file()
+
 
 class TestCodeServerBringUp:
     def test_bring_up_passes_code_server_env(self, tmp_path: Path) -> None:

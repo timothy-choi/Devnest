@@ -252,6 +252,61 @@ def test_attach_repairs_missing_gateway_route(workspace_unit_engine, owner_user_
         get_settings.cache_clear()
 
 
+def test_attach_waits_until_gateway_route_observable_after_register(
+    workspace_unit_engine,
+    owner_user_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After POST /routes, GET /routes may lag; open should not succeed until observed state matches."""
+
+    class _EventuallyConsistentGatewayClient:
+        def __init__(self) -> None:
+            self.routes: list[dict] = []
+            self.register_calls: list[tuple[str, str, str]] = []
+            self._gets_after_register = 0
+
+        def get_registered_routes(self) -> list[dict]:
+            if self.register_calls and self._gets_after_register < 2:
+                self._gets_after_register += 1
+                return []
+            return list(self.routes)
+
+        def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
+            self.register_calls.append((workspace_id, internal_endpoint, public_host))
+            self.routes = [
+                {
+                    "workspace_id": workspace_id,
+                    "target": f"http://{internal_endpoint}",
+                    "public_host": public_host,
+                }
+            ]
+
+    fake_client = _EventuallyConsistentGatewayClient()
+    monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.services.workspace_service.services.workspace_intent_service.DevnestGatewayClient.from_settings",
+        lambda _settings: fake_client,
+    )
+
+    try:
+        with Session(workspace_unit_engine) as session:
+            wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+        with Session(workspace_unit_engine) as session:
+            out = workspace_intent_service.request_attach_workspace(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                requested_by_user_id=owner_user_id,
+            )
+        assert out.accepted is True
+        assert out.gateway_url == f"http://{PUBLIC_HOST}/"
+        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, PUBLIC_HOST)]
+        assert fake_client._gets_after_register == 2
+    finally:
+        get_settings.cache_clear()
+
+
 def test_attach_queues_reconcile_when_gateway_state_cannot_be_verified(
     workspace_unit_engine,
     owner_user_id: int,
@@ -606,11 +661,20 @@ def test_attach_gateway_url_includes_public_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _FakeGatewayClient:
+        def __init__(self) -> None:
+            self.routes: list[dict] = []
+
         def get_registered_routes(self) -> list[dict]:
-            return []
+            return list(self.routes)
 
         def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
-            return None
+            self.routes.append(
+                {
+                    "workspace_id": workspace_id,
+                    "target": f"http://{internal_endpoint}",
+                    "public_host": public_host,
+                }
+            )
 
     monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
     monkeypatch.setenv("DEVNEST_BASE_DOMAIN", "app.devnest.local")

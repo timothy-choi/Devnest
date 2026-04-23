@@ -84,14 +84,32 @@ export default function WorkspacePage() {
           return;
         }
 
-        const attachRes = await fetch(`/api/workspaces/${workspaceId}/attach`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
-        const attach = (await attachRes.json()) as AttachJson;
-        if (!attachRes.ok) {
-          setMessage(typeof attach.detail === "string" ? attach.detail : "Unable to attach to this workspace.");
+        const maxAttachAttempts = 8;
+        let attach: AttachJson | null = null;
+        for (let attempt = 0; attempt < maxAttachAttempts; attempt++) {
+          const attachRes = await fetch(`/api/workspaces/${workspaceId}/attach`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          attach = (await attachRes.json()) as AttachJson;
+          if (attachRes.ok) {
+            break;
+          }
+          const detail = typeof attach.detail === "string" ? attach.detail : "";
+          const transient =
+            attachRes.status === 409 &&
+            /retry shortly|not ready|reconcile job was queued|timeout/i.test(detail);
+          if (transient && attempt < maxAttachAttempts - 1) {
+            await new Promise((r) => setTimeout(r, 180 + attempt * 140));
+            continue;
+          }
+          setMessage(detail || "Unable to attach to this workspace.");
+          redirectToDashboard();
+          return;
+        }
+        if (!attach) {
+          setMessage("Unable to attach to this workspace.");
           redirectToDashboard();
           return;
         }

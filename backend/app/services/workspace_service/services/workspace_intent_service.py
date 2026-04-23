@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -306,8 +307,9 @@ def _ensure_gateway_route_ready_for_open(
         )
 
     expected_public_host = _resolve_public_host_for_gateway_display(ws, rt)
+    client = DevnestGatewayClient.from_settings(settings)
     try:
-        routes = DevnestGatewayClient.from_settings(settings).get_registered_routes()
+        routes = client.get_registered_routes()
     except GatewayClientError as exc:
         _best_effort_enqueue_reconcile_for_access_drift(
             session,
@@ -330,7 +332,7 @@ def _ensure_gateway_route_ready_for_open(
         public_host = (expected_public_host or "").strip()
         if not public_host:
             raise WorkspaceInvalidStateError("Workspace public host is not ready for gateway routing.")
-        DevnestGatewayClient.from_settings(settings).register_route(
+        client.register_route(
             str(wid),
             internal_endpoint,
             public_host,
@@ -345,6 +347,46 @@ def _ensure_gateway_route_ready_for_open(
             "Workspace gateway route was stale and could not be repaired automatically. "
             "A reconcile job was queued; retry shortly.",
         ) from exc
+
+    # Route-admin may briefly lag after POST /routes; avoid returning gateway_url until GET /routes agrees.
+    deadline = time.monotonic() + 4.0
+    poll_interval_s = 0.12
+    while True:
+        try:
+            routes_observed = client.get_registered_routes()
+        except GatewayClientError as exc:
+            if time.monotonic() >= deadline:
+                _best_effort_enqueue_reconcile_for_access_drift(
+                    session,
+                    workspace_id=wid,
+                    correlation_id=correlation_id,
+                )
+                raise WorkspaceInvalidStateError(
+                    "Workspace gateway route was repaired but could not be verified before timeout. "
+                    "A reconcile job was queued; retry shortly.",
+                ) from exc
+            time.sleep(poll_interval_s)
+            continue
+        observed_row = route_row_for_workspace(routes_observed, wid)
+        if not gateway_route_needs_repair(
+            route_row=observed_row,
+            observed_internal_endpoint=internal_endpoint,
+            expected_public_host=expected_public_host,
+        ):
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(poll_interval_s)
+
+    _best_effort_enqueue_reconcile_for_access_drift(
+        session,
+        workspace_id=wid,
+        correlation_id=correlation_id,
+    )
+    raise WorkspaceInvalidStateError(
+        "Workspace gateway route was repaired but route-admin still reports drift. "
+        "A reconcile job was queued; retry shortly.",
+    )
 
 
 def _access_issues_for_runtime(rt: WorkspaceRuntime) -> tuple[str, ...]:

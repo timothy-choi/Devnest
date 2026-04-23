@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { browserApi } from "@/lib/api/browser-client";
@@ -11,6 +11,7 @@ import { Workspace } from "@/types/workspace";
 
 export function useWorkspaces() {
   const queryClient = useQueryClient();
+  const openInFlight = useRef<Set<number>>(new Set());
   const [query, setQuery] = useState("");
   const [isCreateDialogOpen, setCreateDialogOpen] = useState(false);
   const [optimisticWorkspaces, setOptimisticWorkspaces] = useState<Workspace[]>([]);
@@ -208,6 +209,10 @@ export function useWorkspaces() {
       setActionError("Invalid workspace id.");
       return;
     }
+    if (openInFlight.current.has(workspaceId)) {
+      return;
+    }
+    openInFlight.current.add(workspaceId);
 
     setActionError(null);
     const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
@@ -230,15 +235,35 @@ export function useWorkspaces() {
     );
 
     try {
-        const detail = await browserApi.workspaces.get(workspaceId);
-        if ((detail.status || "").toUpperCase() !== "RUNNING") {
-          throw new ApiError(
-            409,
-            "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
-          );
-        }
+      const detail = await browserApi.workspaces.get(workspaceId);
+      if ((detail.status || "").toUpperCase() !== "RUNNING") {
+        throw new ApiError(
+          409,
+          "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
+        );
+      }
 
-      const attach = await browserApi.workspaces.attach(workspaceId);
+      const maxAttachAttempts = 8;
+      let attach: Awaited<ReturnType<typeof browserApi.workspaces.attach>> | null = null;
+      for (let attempt = 0; attempt < maxAttachAttempts; attempt++) {
+        try {
+          attach = await browserApi.workspaces.attach(workspaceId);
+          break;
+        } catch (err) {
+          const isTransient =
+            err instanceof ApiError &&
+            err.status === 409 &&
+            /retry shortly|not ready|reconcile job was queued|timeout/i.test(err.detail);
+          if (isTransient && attempt < maxAttachAttempts - 1) {
+            await new Promise((r) => setTimeout(r, 180 + attempt * 140));
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (!attach) {
+        throw new ApiError(502, "Attach did not return a response.");
+      }
       if (!attach.accepted) {
         throw new ApiError(
           409,
@@ -266,6 +291,8 @@ export function useWorkspaces() {
       queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);
       void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
       setActionError(error instanceof ApiError ? error.detail : "Unable to open the workspace right now.");
+    } finally {
+      openInFlight.current.delete(workspaceId);
     }
   };
 

@@ -296,6 +296,7 @@ class DefaultOrchestratorService(OrchestratorService):
         wid: str,
         workspace_host_path: str | None = None,
         launch_mode: str = "resume",
+        project_storage_key: str | None = None,
     ) -> list[WorkspaceExtraBindMountSpec]:
         """Build code-server persistence bind mounts for config and data.
 
@@ -314,7 +315,12 @@ class DefaultOrchestratorService(OrchestratorService):
             project_root = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
         else:
             try:
-                project_root = self._ensure_workspace_project_dir(self._workspace_projects_base, wid_clean, None)
+                key = (project_storage_key or "").strip() or None
+                project_root = self._ensure_workspace_project_dir(
+                    self._workspace_projects_base,
+                    wid_clean,
+                    key,
+                )
             except ValueError:
                 return []
         if not project_root:
@@ -493,6 +499,7 @@ class DefaultOrchestratorService(OrchestratorService):
             ctx.wid,
             ctx.workspace_host_path,
             ctx.launch_mode,
+            ctx.project_storage_key,
         )
 
         for spec in cs_extra_mounts or []:
