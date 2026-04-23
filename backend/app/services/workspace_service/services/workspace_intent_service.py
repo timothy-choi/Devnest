@@ -48,6 +48,9 @@ from app.services.workspace_service.services.workspace_session_service import (
     create_workspace_session,
     resolve_workspace_session_for_access,
 )
+from app.services.gateway_client.errors import GatewayClientError
+from app.services.gateway_client.gateway_client import DevnestGatewayClient
+from app.services.reconcile_service.decisions import gateway_route_needs_repair, route_row_for_workspace
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
@@ -260,6 +263,90 @@ def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | 
     return f"{scheme}://{host}/"
 
 
+def _best_effort_enqueue_reconcile_for_access_drift(
+    session: Session,
+    *,
+    workspace_id: int,
+    correlation_id: str | None,
+) -> None:
+    try:
+        enqueue_reconcile_runtime_job(
+            session,
+            workspace_id=workspace_id,
+            correlation_id=correlation_id,
+        )
+    except (WorkspaceBusyError, WorkspaceInvalidStateError, WorkspaceNotFoundError):
+        session.rollback()
+
+
+def _ensure_gateway_route_ready_for_open(
+    session: Session,
+    *,
+    ws: Workspace,
+    rt: WorkspaceRuntime,
+    correlation_id: str | None,
+) -> None:
+    from app.libs.common.config import get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+    if not settings.devnest_gateway_enabled:
+        return
+
+    wid = ws.workspace_id
+    assert wid is not None
+    internal_endpoint = (rt.internal_endpoint or "").strip()
+    if not internal_endpoint:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=wid,
+            correlation_id=correlation_id,
+        )
+        raise WorkspaceInvalidStateError(
+            "Workspace is RUNNING but its gateway target is missing. A reconcile job was queued; retry shortly.",
+        )
+
+    expected_public_host = _resolve_public_host_for_gateway_display(ws, rt)
+    try:
+        routes = DevnestGatewayClient.from_settings(settings).get_registered_routes()
+    except GatewayClientError as exc:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=wid,
+            correlation_id=correlation_id,
+        )
+        raise WorkspaceInvalidStateError(
+            "Workspace gateway state could not be verified right now. A reconcile job was queued; retry shortly.",
+        ) from exc
+
+    route_row = route_row_for_workspace(routes, wid)
+    if not gateway_route_needs_repair(
+        route_row=route_row,
+        observed_internal_endpoint=internal_endpoint,
+        expected_public_host=expected_public_host,
+    ):
+        return
+
+    try:
+        public_host = (expected_public_host or "").strip()
+        if not public_host:
+            raise WorkspaceInvalidStateError("Workspace public host is not ready for gateway routing.")
+        DevnestGatewayClient.from_settings(settings).register_route(
+            str(wid),
+            internal_endpoint,
+            public_host,
+        )
+    except (GatewayClientError, ValueError) as exc:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=wid,
+            correlation_id=correlation_id,
+        )
+        raise WorkspaceInvalidStateError(
+            "Workspace gateway route was stale and could not be repaired automatically. "
+            "A reconcile job was queued; retry shortly.",
+        ) from exc
+
+
 def _access_issues_for_runtime(rt: WorkspaceRuntime) -> tuple[str, ...]:
     if rt.health_status == WorkspaceRuntimeHealthStatus.HEALTHY.value:
         return ()
@@ -297,6 +384,12 @@ def get_workspace_access(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
+    _ensure_gateway_route_ready_for_open(
+        session,
+        ws=ws,
+        rt=rt,
+        correlation_id=correlation_id,
+    )
     resolve_workspace_session_for_access(
         session,
         workspace_id=workspace_id,
@@ -358,6 +451,12 @@ def request_attach_workspace(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
+    _ensure_gateway_route_ready_for_open(
+        session,
+        ws=ws,
+        rt=rt,
+        correlation_id=correlation_id,
+    )
     issues = _access_issues_for_runtime(rt)
 
     # Quota + policy checks before creating the session

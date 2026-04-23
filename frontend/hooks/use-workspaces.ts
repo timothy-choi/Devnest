@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { browserApi } from "@/lib/api/browser-client";
@@ -17,6 +17,45 @@ export function useWorkspaces() {
   const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const clearStaleOpeningState = () => {
+      queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+        current.map((workspace) =>
+          workspace.pendingAction === "Opening"
+            ? {
+                ...workspace,
+                pendingAction: null,
+                isBusy: false,
+                canOpen: workspace.rawStatus === "RUNNING",
+                canStart: workspace.rawStatus === "STOPPED",
+                canStop: workspace.rawStatus === "RUNNING",
+                canRestart: workspace.rawStatus === "RUNNING" || workspace.rawStatus === "STOPPED",
+                canDelete:
+                  workspace.rawStatus === "RUNNING" ||
+                  workspace.rawStatus === "STOPPED" ||
+                  workspace.rawStatus === "ERROR",
+                statusDetail:
+                  workspace.rawStatus === "RUNNING"
+                    ? null
+                    : workspace.statusDetail,
+              }
+            : workspace,
+        ),
+      );
+      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+    };
+
+    clearStaleOpeningState();
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.addEventListener("pageshow", clearStaleOpeningState);
+    return () => {
+      window.removeEventListener("pageshow", clearStaleOpeningState);
+    };
+  }, [queryClient]);
 
   const hasBusyOptimisticWorkspace = optimisticWorkspaces.some((workspace) => workspace.isBusy);
 
@@ -225,6 +264,7 @@ export function useWorkspaces() {
       return;
     } catch (error) {
       queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);
+      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
       setActionError(error instanceof ApiError ? error.detail : "Unable to open the workspace right now.");
     }
   };
