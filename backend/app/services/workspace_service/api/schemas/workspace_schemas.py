@@ -226,3 +226,7 @@ class WorkspaceDetailResponse(BaseModel):
     last_started: datetime | None
     last_stopped: datetime | None
     latest_config_version: int | None = None
+    reopen_issues: list[str] = Field(
+        default_factory=list,
+        description="Control-plane checks (host/path drift vs current settings) that block a safe reopen.",
+    )

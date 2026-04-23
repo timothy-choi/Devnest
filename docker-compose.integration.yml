@@ -161,6 +161,8 @@ services:
       # Traefik + route-admin (same compose network): enable attach ``gateway_url`` and worker route registration.
       DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"
       DEVNEST_GATEWAY_URL: "http://route-admin:8080"
+      # Wait for Traefik to observe dynamic routes before attach returns gateway_url (avoids first-hit 404).
+      DEVNEST_GATEWAY_TRAEFIK_HTTP_PROBE_BASE: "http://traefik:80"
       DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.lvh.me}
       DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
       DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}

@@ -247,6 +247,9 @@ class Settings(BaseSettings):
     # When true, GET /internal/gateway/auth enforces workspace session validation for Traefik ForwardAuth.
     # Set false in local/dev mode (default) to skip session requirement during development.
     devnest_gateway_auth_enabled: bool = False
+    # Optional Traefik HTTP base (e.g. ``http://traefik:80`` on the Docker network). When set, attach/access
+    # waits until a GET with ``Host: <workspace hostname>`` is not 404 so the edge has loaded dynamic routes.
+    devnest_gateway_traefik_http_probe_base: str = ""
 
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""

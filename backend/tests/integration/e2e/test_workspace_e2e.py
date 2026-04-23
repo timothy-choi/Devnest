@@ -308,11 +308,9 @@ def test_e2e_running_workspace_delete_deleted(client, db_session: Session) -> No
     rt = _reload_runtime(db_session, wid)
     assert rt is None or (rt.internal_endpoint is None or rt.internal_endpoint == "")
 
-    # GET workspace returns 404 or DELETED
+    # DELETED workspaces are hidden from the control-plane GET API (same as attach).
     r = client.get(f"/workspaces/{wid}", headers=_auth_header(token))
-    assert r.status_code in (status.HTTP_200_OK, status.HTTP_404_NOT_FOUND)
-    if r.status_code == status.HTTP_200_OK:
-        assert r.json()["status"] == WorkspaceStatus.DELETED.value
+    assert r.status_code == status.HTTP_404_NOT_FOUND
 
 
 # ---------------------------------------------------------------------------

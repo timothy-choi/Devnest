@@ -28,7 +28,9 @@ export function useWorkspaces() {
                 ...workspace,
                 pendingAction: null,
                 isBusy: false,
-                canOpen: workspace.rawStatus === "RUNNING",
+                canOpen:
+                  workspace.rawStatus === "RUNNING" &&
+                  !(workspace.reopenIssues && workspace.reopenIssues.length > 0),
                 canStart: workspace.rawStatus === "STOPPED",
                 canStop: workspace.rawStatus === "RUNNING",
                 canRestart: workspace.rawStatus === "RUNNING" || workspace.rawStatus === "STOPPED",
@@ -241,6 +243,12 @@ export function useWorkspaces() {
           409,
           "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
         );
+      }
+      const reopenBlockers = detail.reopen_issues?.length
+        ? detail.reopen_issues
+        : detail.reopenIssues ?? [];
+      if (reopenBlockers.length > 0) {
+        throw new ApiError(409, reopenBlockers.join("; "));
       }
 
       const maxAttachAttempts = 8;

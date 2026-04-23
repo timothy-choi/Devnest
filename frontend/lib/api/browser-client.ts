@@ -37,6 +37,8 @@ export type WorkspaceRecord = {
   activeSessionsCount: number;
   statusReason: string | null;
   lastErrorMessage: string | null;
+  /** Present when the control plane detected host/path drift vs current settings. */
+  reopenIssues?: string[];
 };
 
 export type WorkspaceDetail = {
@@ -53,6 +55,9 @@ export type WorkspaceDetail = {
   activeSessionsCount: number;
   statusReason: string | null;
   lastErrorMessage: string | null;
+  /** Snake_case when proxied directly from FastAPI; camelCase when mapped via list API. */
+  reopen_issues?: string[];
+  reopenIssues?: string[];
 };
 
 export type WorkspaceAttachResponse = {

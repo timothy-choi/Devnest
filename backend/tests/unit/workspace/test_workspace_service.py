@@ -347,6 +347,39 @@ def test_get_workspace_missing_returns_none(workspace_unit_engine: Engine, owner
         )
 
 
+def test_deleted_workspace_not_listed_and_get_returns_none(
+    workspace_unit_engine: Engine,
+    owner_user_id: int,
+) -> None:
+    with Session(workspace_unit_engine) as session:
+        out = workspace_intent_service.create_workspace(
+            session,
+            owner_user_id=owner_user_id,
+            body=_sample_create_body(),
+        )
+        wid = out.workspace_id
+        ws = session.get(Workspace, wid)
+        assert ws is not None
+        ws.status = WorkspaceStatus.DELETED.value
+        session.add(ws)
+        session.commit()
+
+    with Session(workspace_unit_engine) as session:
+        items, total = workspace_intent_service.list_workspaces(session, owner_user_id=owner_user_id)
+        assert total == 0
+        assert items == []
+
+    with Session(workspace_unit_engine) as session:
+        assert (
+            workspace_intent_service.get_workspace(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+            )
+            is None
+        )
+
+
 def test_get_workspace_wrong_owner_returns_none(
     workspace_unit_engine: Engine,
     owner_user_id: int,

@@ -28,6 +28,7 @@ type BackendWorkspaceDetail = {
   updated_at: string;
   last_started: string | null;
   last_stopped: string | null;
+  reopen_issues?: string[];
 };
 
 function mapDetail(detail: BackendWorkspaceDetail) {
@@ -45,6 +46,7 @@ function mapDetail(detail: BackendWorkspaceDetail) {
     activeSessionsCount: detail.active_sessions_count,
     statusReason: detail.status_reason,
     lastErrorMessage: detail.last_error_message,
+    reopenIssues: detail.reopen_issues ?? [],
   };
 }
 

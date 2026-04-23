@@ -113,8 +113,14 @@ function getStatusDetail(record: WorkspaceRecord) {
 
 export function toWorkspace(record: WorkspaceRecord): Workspace {
   const isBusy = BUSY_STATUSES.has(record.status);
-  const canOpen = record.status === "RUNNING";
+  const reopenIssues = record.reopenIssues ?? [];
+  const hasReopenBlockers = reopenIssues.length > 0;
+  const canOpen = record.status === "RUNNING" && !hasReopenBlockers;
   const canStart = record.status === "STOPPED";
+
+  const baseDetail = getStatusDetail(record);
+  const reopenDetail = hasReopenBlockers ? `Reopen blocked: ${reopenIssues.join("; ")}` : null;
+  const statusDetail = [reopenDetail, baseDetail].filter(Boolean).join(" — ") || null;
 
   return {
     id: record.id,
@@ -127,7 +133,7 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
     status: mapBackendStatus(record.status),
     rawStatus: record.status,
     statusLabel: getStatusLabel(record.status),
-    statusDetail: getStatusDetail(record),
+    statusDetail,
     lastOpenedLabel: formatRelativeDate(record.lastStarted || record.createdAt),
     lastModifiedLabel: formatRelativeDate(record.updatedAt),
     pendingAction: null,
@@ -137,5 +143,6 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
     canStop: record.status === "RUNNING",
     canRestart: record.status === "RUNNING" || record.status === "STOPPED",
     canDelete: record.status === "RUNNING" || record.status === "STOPPED" || record.status === "ERROR",
+    reopenIssues: hasReopenBlockers ? reopenIssues : undefined,
   };
 }

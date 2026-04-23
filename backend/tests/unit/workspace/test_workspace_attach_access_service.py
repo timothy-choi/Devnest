@@ -31,9 +31,19 @@ from app.services.workspace_service.services import workspace_intent_service
 from app.libs.common.config import get_settings
 
 ENDPOINT_REF = "node-prod-1:32001"
-PUBLIC_HOST = "ws-123.devnest.local"
 INTERNAL_EP = "10.128.0.10:8080"
 CONTAINER_ID = "ctr-unit-abc123"
+
+
+def _expected_gateway_public_host(session: Session, wid: int) -> str:
+    ws = session.get(Workspace, wid)
+    assert ws is not None
+    key = (ws.project_storage_key or "").strip() or None
+    return workspace_intent_service._gateway_unique_public_host(
+        int(wid),
+        get_settings().devnest_base_domain,
+        project_storage_key=key,
+    )
 
 
 def _seed_running_with_runtime(
@@ -41,7 +51,7 @@ def _seed_running_with_runtime(
     owner_id: int,
     *,
     endpoint_ref: str = ENDPOINT_REF,
-    public_host: str = PUBLIC_HOST,
+    public_host: str | None = None,
     internal_endpoint: str = INTERNAL_EP,
     container_id: str = CONTAINER_ID,
     health_status: str = WorkspaceRuntimeHealthStatus.HEALTHY.value,
@@ -125,7 +135,7 @@ def test_request_attach_happy_path(workspace_unit_engine, owner_user_id: int) ->
     assert out.status == WorkspaceStatus.RUNNING.value
     assert out.runtime_ready is True
     assert out.endpoint_ref == ENDPOINT_REF
-    assert out.public_host == PUBLIC_HOST
+    assert out.public_host is None
     assert out.internal_endpoint == INTERNAL_EP
     assert out.gateway_url is None
     assert out.issues == ()
@@ -167,7 +177,7 @@ def test_get_workspace_access_happy_path(workspace_unit_engine, owner_user_id: i
     assert out.status == WorkspaceStatus.RUNNING.value
     assert out.runtime_ready is True
     assert out.endpoint_ref == ENDPOINT_REF
-    assert out.public_host == PUBLIC_HOST
+    assert out.public_host is None
     assert out.internal_endpoint == INTERNAL_EP
     assert out.gateway_url is None
     assert out.issues == ()
@@ -238,6 +248,7 @@ def test_attach_repairs_missing_gateway_route(workspace_unit_engine, owner_user_
     try:
         with Session(workspace_unit_engine) as session:
             wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+            exp_host = _expected_gateway_public_host(session, wid)
         with Session(workspace_unit_engine) as session:
             out = workspace_intent_service.request_attach_workspace(
                 session,
@@ -246,8 +257,8 @@ def test_attach_repairs_missing_gateway_route(workspace_unit_engine, owner_user_
                 requested_by_user_id=owner_user_id,
             )
         assert out.accepted is True
-        assert out.gateway_url == f"http://{PUBLIC_HOST}/"
-        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, PUBLIC_HOST)]
+        assert out.gateway_url == f"http://{exp_host}/"
+        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
     finally:
         get_settings.cache_clear()
 
@@ -292,6 +303,7 @@ def test_attach_waits_until_gateway_route_observable_after_register(
     try:
         with Session(workspace_unit_engine) as session:
             wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+            exp_host = _expected_gateway_public_host(session, wid)
         with Session(workspace_unit_engine) as session:
             out = workspace_intent_service.request_attach_workspace(
                 session,
@@ -300,8 +312,8 @@ def test_attach_waits_until_gateway_route_observable_after_register(
                 requested_by_user_id=owner_user_id,
             )
         assert out.accepted is True
-        assert out.gateway_url == f"http://{PUBLIC_HOST}/"
-        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, PUBLIC_HOST)]
+        assert out.gateway_url == f"http://{exp_host}/"
+        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
         assert fake_client._gets_after_register == 2
     finally:
         get_settings.cache_clear()
@@ -428,17 +440,19 @@ def test_get_workspace_access_rejects_expired_session(workspace_unit_engine, own
 
 
 @pytest.mark.parametrize(
-    "status",
+    "status,exc_type,match",
     [
-        WorkspaceStatus.STOPPED.value,
-        WorkspaceStatus.ERROR.value,
-        WorkspaceStatus.DELETED.value,
+        (WorkspaceStatus.STOPPED.value, WorkspaceInvalidStateError, "RUNNING"),
+        (WorkspaceStatus.ERROR.value, WorkspaceInvalidStateError, "RUNNING"),
+        (WorkspaceStatus.DELETED.value, WorkspaceNotFoundError, "not found"),
     ],
 )
 def test_attach_rejected_when_not_running(
     workspace_unit_engine,
     owner_user_id: int,
     status: str,
+    exc_type: type[Exception],
+    match: str,
 ) -> None:
     with Session(workspace_unit_engine) as session:
         wid = _seed_running_with_runtime(session, owner_user_id)
@@ -449,7 +463,7 @@ def test_attach_rejected_when_not_running(
         session.commit()
 
     with Session(workspace_unit_engine) as session:
-        with pytest.raises(WorkspaceInvalidStateError, match="RUNNING"):
+        with pytest.raises(exc_type, match=match):
             workspace_intent_service.request_attach_workspace(
                 session,
                 workspace_id=wid,
@@ -694,6 +708,7 @@ def test_attach_gateway_url_includes_public_port(
                 public_host=None,
                 name="gw-port-ws",
             )
+            exp_host = _expected_gateway_public_host(session, wid)
             out = workspace_intent_service.request_attach_workspace(
                 session,
                 workspace_id=wid,
@@ -702,6 +717,6 @@ def test_attach_gateway_url_includes_public_port(
                 client_metadata={},
                 correlation_id=None,
             )
-        assert out.gateway_url == f"http://ws-{wid}.app.devnest.local:9081/"
+        assert out.gateway_url == f"http://{exp_host}:9081/"
     finally:
         get_settings.cache_clear()

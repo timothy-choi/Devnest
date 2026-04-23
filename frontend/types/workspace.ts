@@ -17,4 +17,6 @@ export type Workspace = {
   canStop: boolean;
   canRestart: boolean;
   canDelete: boolean;
+  /** Control-plane reopen blockers (stale host, missing project dir, legacy paths). */
+  reopenIssues?: string[];
 };

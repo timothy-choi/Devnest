@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 type WorkspaceDetailJson = {
   status?: string;
   last_error_message?: string | null;
+  reopen_issues?: string[];
 };
 
 type AttachJson = {
@@ -80,6 +81,11 @@ export default function WorkspacePage() {
           setMessage(
             "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
           );
+          redirectToDashboard();
+          return;
+        }
+        if (detail.reopen_issues?.length) {
+          setMessage(detail.reopen_issues.join("; "));
           redirectToDashboard();
           return;
         }

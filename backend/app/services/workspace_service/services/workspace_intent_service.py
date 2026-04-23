@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import func
+import httpx
+from sqlalchemy import and_, func
 from sqlmodel import Session, select
 
 from app.libs.observability.correlation import generate_correlation_id
@@ -51,6 +54,7 @@ from app.services.workspace_service.services.workspace_session_service import (
 )
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
+from app.services.node_execution_service.workspace_project_dir import workspace_project_dir_name
 from app.services.reconcile_service.decisions import gateway_route_needs_repair, route_row_for_workspace
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
@@ -166,9 +170,101 @@ def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int
     ws = session.get(Workspace, workspace_id)
     if ws is None or ws.owner_user_id != owner_user_id:
         raise WorkspaceNotFoundError("Workspace not found")
+    if ws.status == WorkspaceStatus.DELETED.value:
+        raise WorkspaceNotFoundError("Workspace not found")
     # V1 attach/access are owner-only. ``is_private`` gates listing elsewhere; collaborators / shared
     # workspaces are deferred (TODO).
     return ws
+
+
+def _compute_workspace_reopen_issues(ws: Workspace) -> list[str]:
+    """Detect stale gateway hosts or missing/legacy project dirs vs current Settings (best-effort, local FS)."""
+    issues: list[str] = []
+    if ws.status == WorkspaceStatus.DELETED.value:
+        return issues
+    from app.libs.common.config import get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+    wid = ws.workspace_id
+    if wid is None:
+        return issues
+    wid_s = str(int(wid))
+    key = (ws.project_storage_key or "").strip() or None
+
+    if settings.devnest_gateway_enabled:
+        expected = _gateway_unique_public_host(int(wid), settings.devnest_base_domain, project_storage_key=key)
+        stored = (ws.public_host or "").strip()
+        if stored and stored.lower() != expected.lower():
+            issues.append(
+                "Stored gateway hostname does not match the current DEVNEST_BASE_DOMAIN pattern; "
+                "routing may target the wrong edge host until a reconcile updates public_host.",
+            )
+
+    base = (settings.workspace_projects_base or "").strip()
+    if not base:
+        return issues
+    if ws.status not in (
+        WorkspaceStatus.RUNNING.value,
+        WorkspaceStatus.STOPPED.value,
+        WorkspaceStatus.ERROR.value,
+    ):
+        return issues
+
+    root = Path(os.path.realpath(os.path.expanduser(base)))
+    dir_name = workspace_project_dir_name(wid_s, key)
+    canon = root / dir_name
+    canon_ok = canon.is_dir()
+    legacy_candidates = [
+        Path(f"/tmp/devnest-workspaces/ws-{wid_s}"),
+        Path(f"/tmp/devnest-workspaces/{wid_s}"),
+    ]
+    if key:
+        legacy_candidates.append(Path(f"/tmp/devnest-workspaces/{wid_s}-{key}"))
+    legacy_hits = [str(p) for p in legacy_candidates if p.is_dir()]
+
+    if not canon_ok:
+        msg = f"Expected workspace project directory is missing: {canon}."
+        if legacy_hits:
+            msg += f" Legacy data exists under {legacy_hits[0]}; migrate into WORKSPACE_PROJECTS_BASE or recreate."
+        issues.append(msg)
+    elif legacy_hits:
+        issues.append(
+            f"Legacy project directories still exist ({', '.join(legacy_hits)}); remove or migrate to avoid confusion.",
+        )
+
+    return issues
+
+
+def _ensure_workspace_reopen_allowed(ws: Workspace) -> None:
+    blockers = _compute_workspace_reopen_issues(ws)
+    if blockers:
+        raise WorkspaceInvalidStateError("; ".join(blockers))
+
+
+def _ensure_traefik_edge_observes_host(settings, *, host_header_source: str) -> None:
+    """When configured, poll Traefik until the workspace Host is not 404 (dynamic config propagation)."""
+    base = (getattr(settings, "devnest_gateway_traefik_http_probe_base", "") or "").strip()
+    if not base:
+        return
+    host_header = (host_header_source or "").strip().split(":")[0].strip()
+    if not host_header:
+        return
+    url = base.rstrip("/") + "/"
+    deadline = time.monotonic() + 5.0
+    interval_s = 0.12
+    while time.monotonic() < deadline:
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                response = client.get(url, headers={"Host": host_header}, follow_redirects=False)
+        except httpx.RequestException:
+            time.sleep(interval_s)
+            continue
+        if response.status_code != 404:
+            return
+        time.sleep(interval_s)
+    raise WorkspaceInvalidStateError(
+        "Edge gateway (Traefik) has not picked up the workspace route yet; retry shortly.",
+    )
 
 
 def _require_not_busy(ws: Workspace) -> None:
@@ -233,7 +329,8 @@ def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime
     wid = ws.workspace_id
     if wid is None:
         return None
-    return _gateway_unique_public_host(int(wid), settings.devnest_base_domain)
+    psk = (ws.project_storage_key or "").strip() or None
+    return _gateway_unique_public_host(int(wid), settings.devnest_base_domain, project_storage_key=psk)
 
 
 def _gateway_public_host_for_url(host: str, scheme: str, port: int) -> str:
@@ -326,6 +423,9 @@ def _ensure_gateway_route_ready_for_open(
         observed_internal_endpoint=internal_endpoint,
         expected_public_host=expected_public_host,
     ):
+        host_probe = (expected_public_host or "").strip()
+        if host_probe:
+            _ensure_traefik_edge_observes_host(settings, host_header_source=host_probe)
         return
 
     try:
@@ -373,6 +473,9 @@ def _ensure_gateway_route_ready_for_open(
             observed_internal_endpoint=internal_endpoint,
             expected_public_host=expected_public_host,
         ):
+            host_probe = (expected_public_host or "").strip()
+            if host_probe:
+                _ensure_traefik_edge_observes_host(settings, host_header_source=host_probe)
             return
         if time.monotonic() >= deadline:
             break
@@ -426,6 +529,7 @@ def get_workspace_access(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
+    _ensure_workspace_reopen_allowed(ws)
     _ensure_gateway_route_ready_for_open(
         session,
         ws=ws,
@@ -493,6 +597,7 @@ def request_attach_workspace(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
+    _ensure_workspace_reopen_allowed(ws)
     _ensure_gateway_route_ready_for_open(
         session,
         ws=ws,
@@ -1241,13 +1346,16 @@ def list_workspaces(
     skip: int = 0,
     limit: int = 100,
 ) -> tuple[list[WorkspaceSummaryResponse], int]:
-    where_owner = Workspace.owner_user_id == owner_user_id
-    count_stmt = select(func.count()).select_from(Workspace).where(where_owner)
+    where_scope = and_(
+        Workspace.owner_user_id == owner_user_id,
+        Workspace.status != WorkspaceStatus.DELETED.value,
+    )
+    count_stmt = select(func.count()).select_from(Workspace).where(where_scope)
     total = session.exec(count_stmt).one()
 
     page_stmt = (
         select(Workspace)
-        .where(where_owner)
+        .where(where_scope)
         .order_by(Workspace.created_at.desc())
         .offset(skip)
         .limit(min(limit, 500))
@@ -1270,6 +1378,9 @@ def get_workspace(
     ws = session.exec(stmt).first()
     if ws is None:
         return None
+    if ws.status == WorkspaceStatus.DELETED.value:
+        return None
     latest = _latest_config_version(session, workspace_id)
     base = WorkspaceDetailResponse.model_validate(ws)
-    return base.model_copy(update={"latest_config_version": latest})
+    reopen = _compute_workspace_reopen_issues(ws)
+    return base.model_copy(update={"latest_config_version": latest, "reopen_issues": reopen})
