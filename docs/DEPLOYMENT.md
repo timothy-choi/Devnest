@@ -581,8 +581,11 @@ AWS_REGION=us-east-1
 ```
 
 When `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` is selected, startup fails fast unless both
-`DEVNEST_S3_SNAPSHOT_BUCKET` and `AWS_REGION` are set. API and workspace-worker startup logs include the
-effective snapshot storage `provider`, `bucket`, `prefix`, and `region` without logging AWS secrets.
+`DEVNEST_S3_SNAPSHOT_BUCKET` and `AWS_REGION` are set. If `DEVNEST_EXPECT_EXTERNAL_POSTGRES` or
+`DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` is true (RDS / remote EC2 posture), `DEVNEST_SNAPSHOT_STORAGE_PROVIDER`
+must be `s3` or Settings aborts—there is no silent local fallback. API and workspace-worker startup logs
+include the effective snapshot storage `provider`, `bucket`, `prefix`, `region`, and `root` (local `root`
+path or `-` for S3) without logging AWS secrets.
 
 S3 versioning on the bucket is recommended for durability. The IAM role/instance profile used by the backend needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:HeadObject` on `arn:aws:s3:::your-bucket/*`.
 

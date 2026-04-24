@@ -1082,6 +1082,18 @@ class Settings(BaseSettings):
                 "DEVNEST_SNAPSHOT_STORAGE_PROVIDER must be 'local' or 's3' "
                 f"(got {self.devnest_snapshot_storage_provider!r})."
             )
+        cloud_posture = bool(
+            self.devnest_expect_external_postgres or self.devnest_expect_remote_gateway_clients
+        )
+        if cloud_posture and provider != "s3":
+            raise RuntimeError(
+                "Integration/cloud posture is enabled (DEVNEST_EXPECT_EXTERNAL_POSTGRES and/or "
+                "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS) but DEVNEST_SNAPSHOT_STORAGE_PROVIDER is not 's3'. "
+                "Snapshot archives must use object storage so the API and workspace-worker stay consistent "
+                "across hosts. Set DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3, DEVNEST_S3_SNAPSHOT_BUCKET, AWS_REGION, "
+                "and optional DEVNEST_S3_SNAPSHOT_PREFIX (see docs/INTEGRATION_STARTUP.md). "
+                "Or set both expect flags to false for single-node/local snapshot storage only."
+            )
         if provider != "s3":
             return self
 

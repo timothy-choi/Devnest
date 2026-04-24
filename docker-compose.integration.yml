@@ -64,8 +64,10 @@
 #     DEVNEST_S3_SNAPSHOT_BUCKET=<bucket>
 #     DEVNEST_S3_SNAPSHOT_PREFIX=<prefix>      # optional; default devnest-snapshots
 #     AWS_REGION=<region>
-#   Compose passes the same snapshot storage config to both ``backend`` and ``workspace-worker`` so snapshot
-#   create/restore/delete/existence checks use the same provider and object pathing.
+#   Compose injects the same snapshot + workspace image keys via ``x-workspace-snapshot-env`` for ``backend``
+#   and ``workspace-worker`` so snapshot create/restore/delete/existence checks use the same provider and paths.
+#   When ``DEVNEST_EXPECT_*`` RDS/remote flags are true, Settings requires ``DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3``
+#   plus bucket and ``AWS_REGION`` (see ``backend/app/libs/common/config.py``).
 #
 # Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
@@ -92,9 +94,17 @@ name: devnest-integration
 x-pid-host: &pid_host
   pid: "host"
 
-# Default workspace runtime for orchestrator bring-up (matches Dockerfile.workspace).
-x-workspace-image: &workspace_image
+# Workspace image + snapshot storage: one merge anchor so backend and workspace-worker always get
+# identical values (matches Dockerfile.workspace + same S3/local snapshot env).
+x-workspace-snapshot-env: &workspace_snapshot_env
   DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-devnest/workspace:latest}
+  DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-local}
+  DEVNEST_S3_SNAPSHOT_BUCKET: ${DEVNEST_S3_SNAPSHOT_BUCKET:-}
+  DEVNEST_S3_SNAPSHOT_PREFIX: ${DEVNEST_S3_SNAPSHOT_PREFIX:-devnest-snapshots}
+  DEVNEST_SNAPSHOT_TEMP_DIR: ${DEVNEST_SNAPSHOT_TEMP_DIR:-}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
 
 services:
   # Build-only helper: tags devnest/workspace:latest so backend/worker can start user workspaces.
@@ -141,20 +151,13 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_WORKER_ENABLED: "false"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
-      <<: *workspace_image
+      <<: *workspace_snapshot_env
       # Optional fail-fast for EC2/RDS (see header + docs/INTEGRATION_STARTUP.md). deploy-ec2.sh sets when using RDS.
       DEVNEST_EXPECT_EXTERNAL_POSTGRES: "${DEVNEST_EXPECT_EXTERNAL_POSTGRES:-false}"
       DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS: "${DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS:-false}"
       # Pydantic Settings: field workspace_projects_base → env WORKSPACE_PROJECTS_BASE.
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
-      DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-local}
-      DEVNEST_S3_SNAPSHOT_BUCKET: ${DEVNEST_S3_SNAPSHOT_BUCKET:-}
-      DEVNEST_S3_SNAPSHOT_PREFIX: ${DEVNEST_S3_SNAPSHOT_PREFIX:-devnest-snapshots}
-      DEVNEST_SNAPSHOT_TEMP_DIR: ${DEVNEST_SNAPSHOT_TEMP_DIR:-}
-      AWS_REGION: ${AWS_REGION:-}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       # After topology attach, poll workspace IDE TCP before failing bring-up (code-server cold start).
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
@@ -228,16 +231,9 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_RATE_LIMIT_ENABLED: "false"
-      <<: *workspace_image
+      <<: *workspace_snapshot_env
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
-      DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-local}
-      DEVNEST_S3_SNAPSHOT_BUCKET: ${DEVNEST_S3_SNAPSHOT_BUCKET:-}
-      DEVNEST_S3_SNAPSHOT_PREFIX: ${DEVNEST_S3_SNAPSHOT_PREFIX:-devnest-snapshots}
-      DEVNEST_SNAPSHOT_TEMP_DIR: ${DEVNEST_SNAPSHOT_TEMP_DIR:-}
-      AWS_REGION: ${AWS_REGION:-}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
       DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"

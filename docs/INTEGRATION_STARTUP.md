@@ -33,7 +33,7 @@ For `backend` / `workspace-worker`, Docker Compose **`environment:` overrides `e
 | `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET` | Required together to enable GitHub OAuth sign-in. Legacy aliases `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` also work. |
 | `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET` | Required together to enable Google OAuth sign-in. Legacy aliases `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` also work. |
 | `GITHUB_OAUTH_PUBLIC_BASE_URL` / `GCLOUD_OAUTH_PUBLIC_BASE_URL` | Public callback base URLs. If unset or loopback-only, backend will prefer `DEVNEST_FRONTEND_PUBLIC_BASE_URL` when it is a non-loopback public host. |
-| `DEVNEST_SNAPSHOT_STORAGE_PROVIDER` | Snapshot/archive storage backend. Keep `local` for single-node dev; set `s3` for EC2 / multi-node snapshot restore flows. Live workspace files still stay on `WORKSPACE_PROJECTS_BASE` host bind mounts. |
+| `DEVNEST_SNAPSHOT_STORAGE_PROVIDER` | Snapshot/archive storage backend. Keep `local` for single-node dev **when** `DEVNEST_EXPECT_EXTERNAL_POSTGRES` and `DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` are both false. If either expect flag is `true` (RDS / remote posture), this **must** be `s3` or Settings aborts startup. Live workspace files still stay on `WORKSPACE_PROJECTS_BASE` host bind mounts. |
 | `DEVNEST_S3_SNAPSHOT_BUCKET` | S3 bucket for snapshot archives when `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3`. |
 | `DEVNEST_S3_SNAPSHOT_PREFIX` | Object prefix for snapshots (default `devnest-snapshots`). |
 | `AWS_REGION` | AWS region for S3 snapshot access. Required when `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3`. |
@@ -48,6 +48,8 @@ Set in the environment or compose when you want misconfiguration to **abort at p
 | `DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` | `true` for EC2/remote users | `RuntimeError` if `DEVNEST_BASE_DOMAIN` is `app.lvh.me` or `app.devnest.local`. |
 
 `scripts/deploy-ec2.sh` sets both to `true` automatically when `DATABASE_URL` is set.
+
+When either expect flag is `true`, **snapshot archives must use S3** (`DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` plus `DEVNEST_S3_SNAPSHOT_BUCKET` and `AWS_REGION`). This keeps the FastAPI process and `workspace-worker` aligned: both read the same Settings-derived provider, and there is no silent fallback to local disk in cloud posture. `deploy-ec2.sh` exits before `docker compose` if `DATABASE_URL` is set but S3 snapshot variables are missing.
 
 ### OAuth requirements
 
@@ -211,7 +213,9 @@ Expected log pattern:
 [DevNest diagnostics] workspace-worker startup snapshot_storage provider=s3 bucket=... prefix=... region=... root=-
 ```
 
-If `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` is set without `DEVNEST_S3_SNAPSHOT_BUCKET` or `AWS_REGION`, process startup fails immediately with a clear `RuntimeError`.
+For `provider=local`, the same log line shape applies: `bucket`, `prefix`, and `region` are logged as `-`, and `root` is the resolved filesystem path for archives.
+
+If `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` is set without `DEVNEST_S3_SNAPSHOT_BUCKET` or `AWS_REGION`, process startup fails immediately with a clear `RuntimeError`. If either `DEVNEST_EXPECT_EXTERNAL_POSTGRES` or `DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` is `true` but the provider is not `s3`, startup also fails with an explicit `RuntimeError`.
 
 ### Manual verification commands
 

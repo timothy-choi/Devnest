@@ -35,6 +35,22 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
   # Fail fast if DEVNEST_BASE_DOMAIN is still a client-loopback pattern (e.g. app.lvh.me) for remote browsers.
   export DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true
   echo "External DATABASE_URL detected; control-plane services will target managed Postgres/RDS."
+  # Same snapshot storage for API + workspace-worker (Settings enforces S3 when expect-* flags are set).
+  _snap_provider="${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-}"
+  if [[ "${_snap_provider}" != "s3" ]]; then
+    echo "ERROR: External DATABASE_URL requires S3 snapshot storage (DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3)." >&2
+    echo "Set DEVNEST_S3_SNAPSHOT_BUCKET and AWS_REGION (optional: DEVNEST_S3_SNAPSHOT_PREFIX, credentials)." >&2
+    exit 1
+  fi
+  if [[ -z "${DEVNEST_S3_SNAPSHOT_BUCKET:-}" ]]; then
+    echo "ERROR: DEVNEST_S3_SNAPSHOT_BUCKET must be set when using DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3." >&2
+    exit 1
+  fi
+  if [[ -z "${AWS_REGION:-}" ]]; then
+    echo "ERROR: AWS_REGION must be set when using DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3." >&2
+    exit 1
+  fi
+  unset _snap_provider || true
 elif [[ -n "${DEVNEST_REQUIRE_EXTERNAL_DB:-}" ]]; then
   echo "DEVNEST_REQUIRE_EXTERNAL_DB is set, but DATABASE_URL / DEVNEST_DATABASE_URL is empty." >&2
   exit 1

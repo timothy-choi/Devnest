@@ -38,18 +38,20 @@ def get_snapshot_storage_root() -> str:
 
 
 def snapshot_storage_log_fields() -> dict[str, str]:
-    """Safe startup diagnostics for snapshot storage configuration."""
+    """Safe startup diagnostics for snapshot storage (same keys for local and S3; no secrets)."""
     s = get_settings()
     provider_name = (s.devnest_snapshot_storage_provider or "local").strip().lower() or "local"
-    fields = {"provider": provider_name}
+    fields: dict[str, str] = {
+        "provider": provider_name,
+        "bucket": "-",
+        "prefix": "-",
+        "region": "-",
+        "root": "-",
+    }
     if provider_name == "s3":
-        fields.update(
-            {
-                "bucket": (s.devnest_s3_snapshot_bucket or "").strip() or "<missing>",
-                "prefix": (s.devnest_s3_snapshot_prefix or "devnest-snapshots").strip() or "devnest-snapshots",
-                "region": (s.aws_region or "").strip() or "<missing>",
-            }
-        )
+        fields["bucket"] = (s.devnest_s3_snapshot_bucket or "").strip() or "<missing>"
+        fields["prefix"] = (s.devnest_s3_snapshot_prefix or "devnest-snapshots").strip() or "devnest-snapshots"
+        fields["region"] = (s.aws_region or "").strip() or "<missing>"
         return fields
 
     fields["root"] = get_snapshot_storage_root()
