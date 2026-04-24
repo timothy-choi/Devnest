@@ -139,8 +139,17 @@ if [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
   _frontend_name="${_frontend_host%%:*}"
   _frontend_port="${_frontend_host#${_frontend_name}}"
   if [[ "${_frontend_name}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    _fe_before="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
     export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${_frontend_name//./-}.sslip.io${_frontend_port:-:3000}"
+    # .env.integration often mirrors the same URL for GitHub/Google; keep OAuth bases aligned with sslip.
+    if [[ "${GITHUB_OAUTH_PUBLIC_BASE_URL:-}" == "${_fe_before}" ]]; then
+      export GITHUB_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+    fi
+    if [[ "${GCLOUD_OAUTH_PUBLIC_BASE_URL:-}" == "${_fe_before}" ]]; then
+      export GCLOUD_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+    fi
     echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL raw IPv4 normalized to ${DEVNEST_FRONTEND_PUBLIC_BASE_URL} for OAuth callbacks."
+    unset _fe_before || true
   fi
   unset _frontend_host _frontend_name _frontend_port || true
 elif [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
@@ -155,6 +164,8 @@ elif [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
   fi
   if [[ -n "${_pub_ip:-}" ]] && [[ "${_pub_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${_pub_ip//./-}.sslip.io:3000"
+    export GITHUB_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+    export GCLOUD_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
     echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL unset: using ${DEVNEST_FRONTEND_PUBLIC_BASE_URL} for OAuth callbacks."
   fi
   unset _meta_token _pub_ip || true
