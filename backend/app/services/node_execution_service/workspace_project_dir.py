@@ -352,6 +352,53 @@ def ensure_host_path_owned_by_workspace_user(path: str, *, strict: bool = False)
             raise
 
 
+# Host subdirectory under each workspace bundle root for user-visible IDE files (v2 layout).
+# code-server config/data stay under ``<bundle>/code-server/`` so they are not under ``/home/coder/project``.
+WORKSPACE_USER_PROJECT_SUBDIR = "project"
+
+
+def workspace_bundle_has_legacy_root_level_files(bundle_root: Path) -> bool:
+    """True when v1 layout left user files directly under the bundle (outside ``project/``)."""
+    if not bundle_root.is_dir():
+        return False
+    skip = {WORKSPACE_USER_PROJECT_SUBDIR, "code-server"}
+    for child in bundle_root.iterdir():
+        if child.name in skip or child.name.startswith("."):
+            continue
+        return True
+    return False
+
+
+def resolve_workspace_ide_bind_host_path(
+    bundle_host_path: str,
+    *,
+    launch_mode_raw: str | None,
+) -> str:
+    """Return the host path to bind at ``/home/coder/project`` (creates ``project/`` when adopting v2).
+
+    ``bundle_host_path`` is ``<WORKSPACE_PROJECTS_BASE>/<dir_name>`` (the workspace bundle root).
+
+    - **v2:** ``<bundle>/project`` — used for new workspaces, when ``project/`` already exists, or
+      permissive bring-up (``launch_mode_raw is None``) on an empty legacy-only bundle.
+    - **v1 legacy:** bind the bundle root when user files still live next to ``code-server/`` at the
+      bundle root and ``project/`` is absent.
+    """
+    br = Path(os.path.realpath(os.path.expanduser(str(bundle_host_path))))
+    pr = br / WORKSPACE_USER_PROJECT_SUBDIR
+
+    if pr.is_dir():
+        return str(pr.resolve())
+
+    explicit = (launch_mode_raw or "").strip().lower() if launch_mode_raw is not None else None
+    if explicit == "new":
+        pr.mkdir(parents=True, exist_ok=True)
+        return str(pr.resolve())
+    if launch_mode_raw is None and not workspace_bundle_has_legacy_root_level_files(br):
+        pr.mkdir(parents=True, exist_ok=True)
+        return str(pr.resolve())
+    return str(br.resolve())
+
+
 def workspace_project_dir_name(workspace_id: str, project_storage_key: str | None = None) -> str:
     """Stable host directory name for one workspace record.
 

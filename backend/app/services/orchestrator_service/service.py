@@ -44,10 +44,12 @@ from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
 from app.services.node_execution_service.workspace_project_dir import (
+    WORKSPACE_USER_PROJECT_SUBDIR,
     default_local_ensure_workspace_project_dir,
     ensure_code_server_bind_auth_proxy_config,
     finalize_workspace_host_project_tree_ownership,
     log_workspace_config_bind_host_before_docker_start,
+    resolve_workspace_ide_bind_host_path,
     stat_mode_octal,
     stat_uid_gid,
     verify_workspace_runtime_can_read_write_file,
@@ -246,7 +248,7 @@ class DefaultOrchestratorService(OrchestratorService):
             mode = (launch_mode or "").strip().lower() or "resume"
             allow_create = mode == "new"
         try:
-            workspace_host_path = self._ensure_workspace_project_dir(
+            bundle_host_path = self._ensure_workspace_project_dir(
                 self._workspace_projects_base,
                 wid,
                 project_storage_key,
@@ -254,6 +256,11 @@ class DefaultOrchestratorService(OrchestratorService):
             )
         except ValueError as e:
             raise WorkspaceBringUpError(str(e)) from e
+
+        workspace_host_path = resolve_workspace_ide_bind_host_path(
+            bundle_host_path,
+            launch_mode_raw=launch_mode,
+        )
 
         labels: dict[str, str] = {
             "devnest.workspace_id": wid,
@@ -267,6 +274,7 @@ class DefaultOrchestratorService(OrchestratorService):
             extra={
                 "workspace_id": wid,
                 "project_storage_key": (project_storage_key or "").strip() or None,
+                "workspace_bundle_host_path": bundle_host_path,
                 "workspace_host_path": workspace_host_path,
                 "launch_mode": mode,
                 "is_resumed_workspace": (mode != "new"),
@@ -322,14 +330,14 @@ class DefaultOrchestratorService(OrchestratorService):
         if not wid_clean:
             return []
         if workspace_host_path and str(workspace_host_path).strip():
-            project_root = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
+            ide_bind_host = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
         else:
             try:
                 key = (project_storage_key or "").strip() or None
                 # Primary resume strictness is enforced in ``_bring_up_build_context`` (real bring-up
                 # always passes ``workspace_host_path`` here). This fallback resolves the host tree
                 # for tests and helpers; create-if-missing so code-server dirs can be prepared.
-                project_root = self._ensure_workspace_project_dir(
+                ide_bind_host = self._ensure_workspace_project_dir(
                     self._workspace_projects_base,
                     wid_clean,
                     key,
@@ -337,9 +345,14 @@ class DefaultOrchestratorService(OrchestratorService):
                 )
             except ValueError:
                 return []
-        if not project_root:
+        if not ide_bind_host:
             return []
-        cs_base = os.path.join(project_root, "code-server")
+        ide_path = Path(ide_bind_host)
+        if ide_path.name == WORKSPACE_USER_PROJECT_SUBDIR:
+            bundle_root_for_cs = str(ide_path.parent.resolve())
+        else:
+            bundle_root_for_cs = str(ide_path.resolve())
+        cs_base = os.path.join(bundle_root_for_cs, "code-server")
         cfg_host = os.path.join(cs_base, "config")
         data_host = os.path.join(cs_base, "data")
         cfg_file = os.path.join(cfg_host, "config.yaml")
@@ -356,7 +369,8 @@ class DefaultOrchestratorService(OrchestratorService):
                 "workspace_code_server_host_prepare_start",
                 extra={
                     "workspace_id": wid_clean,
-                    "workspace_host_path": project_root,
+                    "workspace_ide_bind_host": ide_bind_host,
+                    "workspace_bundle_host_path": bundle_root_for_cs,
                     "cs_base": cs_base,
                     "cfg_host": cfg_host,
                     "data_host": data_host,
@@ -376,9 +390,9 @@ class DefaultOrchestratorService(OrchestratorService):
             )
             # Seed/patch ``config.yaml`` first; this may create or rewrite the file as root.
             ensure_code_server_bind_auth_proxy_config(cfg_host)
-            # Chown the entire project tree (not only code-server/) so nothing under the bind root
+            # Chown the workspace bundle (``project/`` + ``code-server/``) so nothing under the tree
             # stays root-owned after mkdir/seed/rmtree steps.
-            finalize_workspace_host_project_tree_ownership(project_root, strict=_strict_chown)
+            finalize_workspace_host_project_tree_ownership(bundle_root_for_cs, strict=_strict_chown)
             for label, host in (("config", cfg_host), ("data", data_host)):
                 verify_workspace_runtime_owns_path(host)
                 verify_workspace_runtime_can_write_dir(host)
@@ -1817,14 +1831,20 @@ class DefaultOrchestratorService(OrchestratorService):
             raise WorkspaceSnapshotError("workspace_id is empty")
         _parse_topology_workspace_id(wid)
         try:
-            return self._ensure_workspace_project_dir(
-                self._workspace_projects_base,
-                wid,
-                project_storage_key,
-                allow_create=True,
-            )
+            bundle = Path(
+                self._ensure_workspace_project_dir(
+                    self._workspace_projects_base,
+                    wid,
+                    project_storage_key,
+                    allow_create=True,
+                )
+            ).resolve()
         except ValueError as e:
             raise WorkspaceSnapshotError(str(e)) from e
+        pr = bundle / WORKSPACE_USER_PROJECT_SUBDIR
+        if pr.is_dir():
+            return str(pr)
+        return str(bundle)
 
     @staticmethod
     def _validate_tar_members(tf: tarfile.TarFile, dest_resolved: Path) -> None:
