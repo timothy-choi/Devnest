@@ -103,9 +103,10 @@ export default function WorkspacePage() {
             break;
           }
           const detail = typeof attach.detail === "string" ? attach.detail : "";
+          const transientDetail =
+            /retry shortly|not ready|reconcile job was queued|timeout|traefik|gateway edge|ide upstream|restart workspace/i;
           const transient =
-            attachRes.status === 409 &&
-            /retry shortly|not ready|reconcile job was queued|timeout/i.test(detail);
+            (attachRes.status === 503 || attachRes.status === 409) && transientDetail.test(detail);
           if (transient && attempt < maxAttachAttempts - 1) {
             await new Promise((r) => setTimeout(r, 180 + attempt * 140));
             continue;

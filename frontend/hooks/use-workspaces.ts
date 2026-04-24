@@ -258,10 +258,12 @@ export function useWorkspaces() {
           attach = await browserApi.workspaces.attach(workspaceId);
           break;
         } catch (err) {
+          const transientDetail =
+            /retry shortly|not ready|reconcile job was queued|timeout|traefik|gateway edge|ide upstream|restart workspace/i;
           const isTransient =
             err instanceof ApiError &&
-            err.status === 409 &&
-            /retry shortly|not ready|reconcile job was queued|timeout/i.test(err.detail);
+            ((err.status === 503 && transientDetail.test(err.detail)) ||
+              (err.status === 409 && transientDetail.test(err.detail)));
           if (isTransient && attempt < maxAttachAttempts - 1) {
             await new Promise((r) => setTimeout(r, 180 + attempt * 140));
             continue;

@@ -28,6 +28,7 @@ from app.services.workspace_service.api.schemas import (
 )
 from app.services.workspace_service.errors import (
     WorkspaceBusyError,
+    WorkspaceGatewayUnavailableError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
 )
@@ -260,8 +261,25 @@ def _ensure_workspace_reopen_allowed(ws: Workspace, rt: WorkspaceRuntime | None)
         raise WorkspaceInvalidStateError("; ".join(blockers))
 
 
-def _ensure_traefik_edge_observes_host(settings, *, host_header_source: str) -> None:
-    """When configured, poll Traefik until the workspace Host is not 404 (dynamic config propagation)."""
+_TRAEFIK_UPSTREAM_ERROR_STATUSES = frozenset({502, 503, 504})
+
+
+def _ensure_traefik_edge_observes_host(
+    settings,
+    *,
+    host_header_source: str,
+    session: Session | None = None,
+    workspace_id: int | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """When configured, poll Traefik until the workspace Host routes (not 404).
+
+    502/503/504 mean the edge matched the Host but the workspace upstream failed — surface as
+    gateway-unavailable (HTTP 503) and best-effort enqueue reconcile so the workspace can recover.
+
+    Persistent 404 means Traefik has not applied the route yet — same handling so callers can retry
+    without treating it as a workspace *state* conflict (HTTP 409).
+    """
     base = (getattr(settings, "devnest_gateway_traefik_http_probe_base", "") or "").strip()
     if not base:
         return
@@ -269,7 +287,7 @@ def _ensure_traefik_edge_observes_host(settings, *, host_header_source: str) -> 
     if not host_header:
         return
     url = base.rstrip("/") + "/"
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + 8.0
     interval_s = 0.12
     while time.monotonic() < deadline:
         try:
@@ -278,11 +296,32 @@ def _ensure_traefik_edge_observes_host(settings, *, host_header_source: str) -> 
         except httpx.RequestError:
             time.sleep(interval_s)
             continue
-        if response.status_code != 404:
-            return
-        time.sleep(interval_s)
-    raise WorkspaceInvalidStateError(
-        "Edge gateway (Traefik) has not picked up the workspace route yet; retry shortly.",
+        status_code = int(response.status_code)
+        if status_code == 404:
+            time.sleep(interval_s)
+            continue
+        if status_code in _TRAEFIK_UPSTREAM_ERROR_STATUSES:
+            if session is not None and workspace_id is not None:
+                _best_effort_enqueue_reconcile_for_access_drift(
+                    session,
+                    workspace_id=workspace_id,
+                    correlation_id=correlation_id,
+                )
+            raise WorkspaceGatewayUnavailableError(
+                "Gateway edge reached the workspace Host but the IDE upstream did not respond "
+                f"(HTTP {status_code}). A reconcile job was queued where possible; retry shortly, "
+                "or use Restart workspace from the dashboard if this persists.",
+            )
+        return
+    if session is not None and workspace_id is not None:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=workspace_id,
+            correlation_id=correlation_id,
+        )
+    raise WorkspaceGatewayUnavailableError(
+        "Edge gateway (Traefik) has not picked up the workspace route yet. "
+        "A reconcile job was queued where possible; retry shortly, or use Restart workspace from the dashboard if this persists.",
     )
 
 
@@ -444,7 +483,13 @@ def _ensure_gateway_route_ready_for_open(
     ):
         host_probe = (expected_public_host or "").strip()
         if host_probe:
-            _ensure_traefik_edge_observes_host(settings, host_header_source=host_probe)
+            _ensure_traefik_edge_observes_host(
+                settings,
+                host_header_source=host_probe,
+                session=session,
+                workspace_id=wid,
+                correlation_id=correlation_id,
+            )
         return
 
     try:
@@ -494,7 +539,13 @@ def _ensure_gateway_route_ready_for_open(
         ):
             host_probe = (expected_public_host or "").strip()
             if host_probe:
-                _ensure_traefik_edge_observes_host(settings, host_header_source=host_probe)
+                _ensure_traefik_edge_observes_host(
+                    settings,
+                    host_header_source=host_probe,
+                    session=session,
+                    workspace_id=wid,
+                    correlation_id=correlation_id,
+                )
             return
         if time.monotonic() >= deadline:
             break
