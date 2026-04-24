@@ -146,6 +146,9 @@ class TestDatabaseConfig:
         s = Settings(
             database_url="postgresql+psycopg://u:p@db.xyz.us-east-1.rds.amazonaws.com:5432/devnest",
             devnest_expect_external_postgres=True,
+            devnest_snapshot_storage_provider="s3",
+            devnest_s3_snapshot_bucket="unit-test-snapshots-bucket",
+            aws_region="us-east-1",
         )
         assert "rds.amazonaws.com" in s.database_url
 
