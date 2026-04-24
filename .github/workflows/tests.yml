@@ -688,6 +688,10 @@ jobs:
               git checkout -f main
               git reset --hard origin/main
             fi
+            # fetch alone does not update the worktree; checkout so repo scripts match the branch being deployed
+            git fetch origin "${{ github.ref_name }}"
+            git checkout -f "${{ github.ref_name }}" 2>/dev/null || git checkout -B "${{ github.ref_name }}" "origin/${{ github.ref_name }}"
+            git reset --hard "origin/${{ github.ref_name }}"
             export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DATABASE_URL }}"
             if [ -z "${DEVNEST_CI_WRITE_DATABASE_URL}" ]; then export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"; fi
             export DEVNEST_CI_WRITE_S3_BUCKET="${{ secrets.DEVNEST_S3_SNAPSHOT_BUCKET }}"
@@ -799,6 +803,9 @@ jobs:
               git checkout -f main
               git reset --hard origin/main
             fi
+            git fetch origin main
+            git checkout -f main
+            git reset --hard origin/main
             export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DATABASE_URL }}"
             if [ -z "${DEVNEST_CI_WRITE_DATABASE_URL}" ]; then export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"; fi
             export DEVNEST_CI_WRITE_S3_BUCKET="${{ secrets.DEVNEST_S3_SNAPSHOT_BUCKET }}"

@@ -429,6 +429,9 @@ jobs:
               echo "Missing ${REPO_DIR}/scripts/deploy-ec2.sh; sync repo then retry." >&2
               exit 1
             fi
+            cd "${REPO_DIR}"
+            git fetch origin
+            git checkout -f "${COMMIT_SHA}"
             export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DATABASE_URL }}"
             if [ -z "${DEVNEST_CI_WRITE_DATABASE_URL}" ]; then export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"; fi
             export DEVNEST_CI_WRITE_S3_BUCKET="${{ secrets.DEVNEST_S3_SNAPSHOT_BUCKET }}"
