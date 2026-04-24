@@ -4,6 +4,8 @@
 #   NEXT_PUBLIC_API_BASE_URL — e.g. http://<public-ip>:8000 for the browser UI build
 #   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it (via DEVNEST_COMPOSE_DATABASE_URL)
 #     instead of local compose Postgres
+#   ${REPO_DIR}/.env.integration — optional; when present, sourced into this shell before validation and passed to
+#     ``docker compose --env-file`` so RDS + S3 vars survive non-interactive SSH reliably.
 #   DEVNEST_DEPLOY_DIR — repo path (default: ~/Devnest)
 #   DEVNEST_DEPLOY_REPO_URL — git remote (default: upstream Devnest URL)
 #   DEVNEST_DEPLOY_GIT_REF — when set (e.g. CI ``github.sha``), check out this commit/tag after fetch instead of
@@ -15,6 +17,43 @@ BRANCH="${1:-main}"
 REPO_DIR="${DEVNEST_DEPLOY_DIR:-${HOME}/Devnest}"
 REPO_URL="${DEVNEST_DEPLOY_REPO_URL:-https://github.com/timothy-choi/Devnest.git}"
 COMPOSE="${COMPOSE_FILE:-docker-compose.integration.yml}"
+INTEGRATION_ENV_FILE="${REPO_DIR}/.env.integration"
+
+_devnest_load_integration_env_file() {
+  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+    echo "Loading ${INTEGRATION_ENV_FILE} into deploy shell (values not printed)."
+    set -a
+    # shellcheck disable=SC1091
+    source "${INTEGRATION_ENV_FILE}"
+    set +a
+  fi
+}
+
+_devnest_compose() {
+  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+    docker compose --env-file "${INTEGRATION_ENV_FILE}" -f "${COMPOSE}" "$@"
+  else
+    docker compose -f "${COMPOSE}" "$@"
+  fi
+}
+
+_devnest_deploy_env_presence() {
+  echo "--- deploy env presence (no secret values) ---"
+  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+    echo ".env.integration: present (${INTEGRATION_ENV_FILE})"
+  else
+    echo ".env.integration: absent (compose uses shell env only)"
+  fi
+  if [[ -n "${DATABASE_URL:-}" ]]; then echo "DATABASE_URL: set"; else echo "DATABASE_URL: missing"; fi
+  if [[ -n "${DEVNEST_COMPOSE_DATABASE_URL:-}" ]]; then echo "DEVNEST_COMPOSE_DATABASE_URL: set"; else echo "DEVNEST_COMPOSE_DATABASE_URL: missing"; fi
+  echo "DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-<unset>}"
+  if [[ -n "${DEVNEST_S3_SNAPSHOT_BUCKET:-}" ]]; then echo "DEVNEST_S3_SNAPSHOT_BUCKET: set"; else echo "DEVNEST_S3_SNAPSHOT_BUCKET: missing"; fi
+  if [[ -n "${AWS_REGION:-}" ]]; then echo "AWS_REGION: set"; else echo "AWS_REGION: missing"; fi
+  if [[ -n "${DEVNEST_S3_SNAPSHOT_PREFIX:-}" ]]; then echo "DEVNEST_S3_SNAPSHOT_PREFIX: set"; else echo "DEVNEST_S3_SNAPSHOT_PREFIX: missing"; fi
+  echo "---"
+}
+
+_devnest_load_integration_env_file
 
 if [[ -n "${DEVNEST_DEPLOY_GIT_REF:-}" ]]; then
   echo "Deploying DevNest at ref: ${DEVNEST_DEPLOY_GIT_REF} (branch arg: ${BRANCH})"
@@ -140,21 +179,23 @@ else
   git reset --hard "origin/${BRANCH}"
 fi
 
-docker compose -f "${COMPOSE}" down || true
+_devnest_deploy_env_presence
+
+_devnest_compose down || true
 # Build workspace-image explicitly so devnest/workspace:latest always reflects Dockerfile.workspace
 # on this host (Compose may otherwise reuse a stale :latest if cache is not invalidated).
-docker compose -f "${COMPOSE}" build workspace-image
+_devnest_compose build workspace-image
 # --force-recreate ensures services pick up compose changes (e.g. pid: host for Linux topology attach).
 if [[ -n "${DATABASE_URL:-}" ]]; then
   echo "Skipping local postgres service because DATABASE_URL points to an external database."
-  docker compose -f "${COMPOSE}" up -d route-admin traefik
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps backend
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps workspace-worker
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps frontend
+  _devnest_compose up -d route-admin traefik
+  _devnest_compose up -d --build --force-recreate --no-deps backend
+  _devnest_compose up -d --build --force-recreate --no-deps workspace-worker
+  _devnest_compose up -d --build --force-recreate --no-deps frontend
 else
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate
+  _devnest_compose up -d --build --force-recreate
 fi
-docker compose -f "${COMPOSE}" ps
+_devnest_compose ps
 
 echo "--- workspace image (expected: Entrypoint = [\"/usr/bin/entrypoint.sh\"] only; Cmd without code-server) ---"
 docker image inspect devnest/workspace:latest --format '{{json .Config.Labels}}' 2>/dev/null || true
@@ -171,5 +212,5 @@ echo "Browsers must resolve ws-<id>.<DEVNEST_BASE_DOMAIN> to this host's Traefik
 echo "--- deploy diagnostics ---"
 git status || true
 git rev-parse HEAD || true
-docker compose -f "${COMPOSE}" ps || true
-docker compose -f "${COMPOSE}" logs --no-color || true
+_devnest_compose ps || true
+_devnest_compose logs --no-color || true

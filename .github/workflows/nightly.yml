@@ -414,22 +414,7 @@ jobs:
             export DEVNEST_DEPLOY_GIT_REF="${COMMIT_SHA}"
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
             export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
-            export DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
-            export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
-            export DEVNEST_COMPOSE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_REQUIRE_EXTERNAL_DB="1"
-            # RDS + snapshots: deploy-ec2.sh requires S3 when DATABASE_URL is set (never echo these).
-            export DEVNEST_SNAPSHOT_STORAGE_PROVIDER="${{ secrets.DEVNEST_SNAPSHOT_STORAGE_PROVIDER }}"
-            export DEVNEST_SNAPSHOT_STORAGE_PROVIDER="${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-s3}"
-            export DEVNEST_S3_SNAPSHOT_BUCKET="${{ secrets.DEVNEST_S3_SNAPSHOT_BUCKET }}"
-            export AWS_REGION="${{ secrets.AWS_REGION }}"
-            if [ -z "${AWS_REGION}" ]; then export AWS_REGION="${{ vars.AWS_REGION }}"; fi
-            _snap_prefix="${{ vars.DEVNEST_S3_SNAPSHOT_PREFIX }}"
-            if [ -n "${_snap_prefix}" ]; then export DEVNEST_S3_SNAPSHOT_PREFIX="${_snap_prefix}"; fi
-            _ak="${{ secrets.AWS_ACCESS_KEY_ID }}"
-            _sk="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-            if [ -n "${_ak}" ]; then export AWS_ACCESS_KEY_ID="${_ak}"; fi
-            if [ -n "${_sk}" ]; then export AWS_SECRET_ACCESS_KEY="${_sk}"; fi
             export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
             export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
@@ -444,6 +429,20 @@ jobs:
               echo "Missing ${REPO_DIR}/scripts/deploy-ec2.sh; sync repo then retry." >&2
               exit 1
             fi
+            export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DATABASE_URL }}"
+            if [ -z "${DEVNEST_CI_WRITE_DATABASE_URL}" ]; then export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"; fi
+            export DEVNEST_CI_WRITE_S3_BUCKET="${{ secrets.DEVNEST_S3_SNAPSHOT_BUCKET }}"
+            export DEVNEST_CI_WRITE_AWS_REGION="${{ secrets.AWS_REGION }}"
+            if [ -z "${DEVNEST_CI_WRITE_AWS_REGION}" ]; then export DEVNEST_CI_WRITE_AWS_REGION="${{ vars.AWS_REGION }}"; fi
+            export DEVNEST_CI_WRITE_S3_PREFIX="${{ vars.DEVNEST_S3_SNAPSHOT_PREFIX }}"
+            export DEVNEST_CI_WRITE_SNAPSHOT_PROVIDER="s3"
+            _ak="${{ secrets.AWS_ACCESS_KEY_ID }}"
+            _sk="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            if [ -n "${_ak}" ]; then export DEVNEST_CI_WRITE_AWS_ACCESS_KEY_ID="${_ak}"; fi
+            if [ -n "${_sk}" ]; then export DEVNEST_CI_WRITE_AWS_SECRET_ACCESS_KEY="${_sk}"; fi
+            bash "${REPO_DIR}/scripts/write-integration-deploy-env.sh"
+            unset DEVNEST_CI_WRITE_DATABASE_URL DEVNEST_CI_WRITE_S3_BUCKET DEVNEST_CI_WRITE_AWS_REGION DEVNEST_CI_WRITE_S3_PREFIX DEVNEST_CI_WRITE_SNAPSHOT_PROVIDER DEVNEST_CI_WRITE_AWS_ACCESS_KEY_ID DEVNEST_CI_WRITE_AWS_SECRET_ACCESS_KEY || true
+            unset _ak _sk || true
             bash "${REPO_DIR}/scripts/deploy-ec2.sh" main
             echo "Deployment complete."
 
