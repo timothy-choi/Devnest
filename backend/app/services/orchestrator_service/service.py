@@ -54,6 +54,7 @@ from app.services.node_execution_service.workspace_project_dir import (
     verify_workspace_runtime_can_write_dir,
     verify_workspace_runtime_owns_path,
     workspace_container_uid_gid,
+    workspace_project_dir_name,
 )
 from app.services.placement_service.runtime_policy import authoritative_container_ref_required
 
@@ -325,12 +326,14 @@ class DefaultOrchestratorService(OrchestratorService):
         else:
             try:
                 key = (project_storage_key or "").strip() or None
-                allow_create = (launch_mode or "").strip().lower() == "new"
+                # Primary resume strictness is enforced in ``_bring_up_build_context`` (real bring-up
+                # always passes ``workspace_host_path`` here). This fallback resolves the host tree
+                # for tests and helpers; create-if-missing so code-server dirs can be prepared.
                 project_root = self._ensure_workspace_project_dir(
                     self._workspace_projects_base,
                     wid_clean,
                     key,
-                    allow_create=allow_create,
+                    allow_create=True,
                 )
             except ValueError:
                 return []
@@ -1420,6 +1423,19 @@ class DefaultOrchestratorService(OrchestratorService):
         )
         return result
 
+    def _workspace_project_host_dir_exists(self, workspace_id: str, project_storage_key: str | None) -> bool:
+        """True when the canonical project bind-mount host directory exists (stat only; no mkdir)."""
+        wid = (workspace_id or "").strip()
+        if not wid:
+            return False
+        base = (self._workspace_projects_base or "").strip()
+        if not base:
+            return False
+        key = (project_storage_key or "").strip() or None
+        dir_name = workspace_project_dir_name(wid, key)
+        p = Path(os.path.realpath(os.path.expanduser(str(Path(base) / dir_name))))
+        return p.is_dir()
+
     def restart_workspace_runtime(
         self,
         *,
@@ -1493,12 +1509,19 @@ class DefaultOrchestratorService(OrchestratorService):
                 issues=_issues_or_none(issues),
             )
 
+        # First successful bring-up may never have run (e.g. stop no-op on missing container). In that
+        # case the host project directory does not exist yet — use permissive ``launch_mode=None``
+        # so bring-up can create the tree; otherwise keep ``resume`` to avoid silent empty recreation
+        # when persisted data was removed after a real run.
+        bring_launch_mode: str | None = (
+            None if not self._workspace_project_host_dir_exists(wid, project_storage_key) else "resume"
+        )
         try:
             up_res = self.bring_up_workspace_runtime(
                 workspace_id=wid,
                 project_storage_key=project_storage_key,
                 requested_config_version=requested_config_version,
-                launch_mode="resume",
+                launch_mode=bring_launch_mode,
             )
         except WorkspaceBringUpError as e:
             issues.append(f"bringup:failed:{e}")
