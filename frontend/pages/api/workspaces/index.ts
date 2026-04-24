@@ -29,6 +29,7 @@ type BackendWorkspaceDetail = {
   last_started: string | null;
   last_stopped: string | null;
   reopen_issues?: string[];
+  restorable_snapshot_count?: number;
 };
 
 function mapDetail(detail: BackendWorkspaceDetail) {
@@ -47,6 +48,7 @@ function mapDetail(detail: BackendWorkspaceDetail) {
     statusReason: detail.status_reason,
     lastErrorMessage: detail.last_error_message,
     reopenIssues: detail.reopen_issues ?? [],
+    restorableSnapshotCount: detail.restorable_snapshot_count ?? 0,
   };
 }
 

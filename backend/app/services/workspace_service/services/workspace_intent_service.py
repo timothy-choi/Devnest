@@ -40,6 +40,8 @@ from app.services.workspace_service.models import (
     WorkspaceJobType,
     WorkspaceRuntime,
     WorkspaceRuntimeHealthStatus,
+    WorkspaceSnapshot,
+    WorkspaceSnapshotStatus,
     WorkspaceStatus,
 )
 from app.services.workspace_service.services.workspace_event_service import (
@@ -178,13 +180,6 @@ def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int
     return ws
 
 
-def _runtime_has_container_placement(ws: Workspace, rt: WorkspaceRuntime | None) -> bool:
-    """True when control-plane says RUNNING and a runtime row shows an actual container placement."""
-    if ws.status != WorkspaceStatus.RUNNING.value or rt is None:
-        return False
-    return bool((rt.container_id or "").strip())
-
-
 def _compute_workspace_reopen_issues(
     ws: Workspace,
     *,
@@ -192,9 +187,10 @@ def _compute_workspace_reopen_issues(
 ) -> list[str]:
     """Detect stale gateway hosts or missing/legacy project dirs vs current Settings (best-effort, local FS).
 
-    When the workspace is RUNNING with a placed container, **local** ``WORKSPACE_PROJECTS_BASE`` existence
-    is not authoritative (API may run off the Docker host or without the bind mount), so we skip FS-only
-    reopen blockers and rely on runtime/orchestrator placement instead.
+    Project-directory checks run only when ``WORKSPACE_PROJECTS_BASE`` resolves to a directory **on this
+    process's filesystem** so the control plane does not block remote-only deployments with false
+    positives. When that path is visible, missing persisted project data is a reopen blocker even if a
+    container row still exists (stale placement vs empty bind).
     """
     issues: list[str] = []
     if ws.status == WorkspaceStatus.DELETED.value:
@@ -217,40 +213,37 @@ def _compute_workspace_reopen_issues(
                 "routing may target the wrong edge host until a reconcile updates public_host.",
             )
 
-    if _runtime_has_container_placement(ws, rt):
-        return issues
-
     base = (settings.workspace_projects_base or "").strip()
-    if not base:
-        return issues
-    if ws.status not in (
+    if base and ws.status in (
         WorkspaceStatus.RUNNING.value,
         WorkspaceStatus.STOPPED.value,
         WorkspaceStatus.ERROR.value,
     ):
-        return issues
+        root = Path(os.path.realpath(os.path.expanduser(base)))
+        if root.is_dir():
+            dir_name = workspace_project_dir_name(wid_s, key)
+            canon = root / dir_name
+            canon_ok = canon.is_dir()
+            legacy_candidates = [
+                Path(f"/tmp/devnest-workspaces/ws-{wid_s}"),
+                Path(f"/tmp/devnest-workspaces/{wid_s}"),
+            ]
+            if key:
+                legacy_candidates.append(Path(f"/tmp/devnest-workspaces/{wid_s}-{key}"))
+            legacy_hits = [str(p) for p in legacy_candidates if p.is_dir()]
 
-    root = Path(os.path.realpath(os.path.expanduser(base)))
-    dir_name = workspace_project_dir_name(wid_s, key)
-    canon = root / dir_name
-    canon_ok = canon.is_dir()
-    legacy_candidates = [
-        Path(f"/tmp/devnest-workspaces/ws-{wid_s}"),
-        Path(f"/tmp/devnest-workspaces/{wid_s}"),
-    ]
-    if key:
-        legacy_candidates.append(Path(f"/tmp/devnest-workspaces/{wid_s}-{key}"))
-    legacy_hits = [str(p) for p in legacy_candidates if p.is_dir()]
-
-    if not canon_ok:
-        msg = f"Expected workspace project directory is missing: {canon}."
-        if legacy_hits:
-            msg += f" Legacy data exists under {legacy_hits[0]}; migrate into WORKSPACE_PROJECTS_BASE or recreate."
-        issues.append(msg)
-    elif legacy_hits:
-        issues.append(
-            f"Legacy project directories still exist ({', '.join(legacy_hits)}); remove or migrate to avoid confusion.",
-        )
+            if not canon_ok:
+                msg = (
+                    f"Project directory is missing at {canon}; restore from snapshot if available. "
+                    "(DevNest will not create an empty tree for an existing workspace.)"
+                )
+                if legacy_hits:
+                    msg += f" Legacy data exists under {legacy_hits[0]}; migrate into WORKSPACE_PROJECTS_BASE."
+                issues.append(msg)
+            elif legacy_hits:
+                issues.append(
+                    f"Legacy project directories still exist ({', '.join(legacy_hits)}); remove or migrate to avoid confusion.",
+                )
 
     return issues
 
@@ -259,6 +252,16 @@ def _ensure_workspace_reopen_allowed(ws: Workspace, rt: WorkspaceRuntime | None)
     blockers = _compute_workspace_reopen_issues(ws, rt=rt)
     if blockers:
         raise WorkspaceInvalidStateError("; ".join(blockers))
+
+
+def _restorable_snapshot_count(session: Session, workspace_id: int) -> int:
+    v = session.exec(
+        select(func.count())
+        .select_from(WorkspaceSnapshot)
+        .where(WorkspaceSnapshot.workspace_id == workspace_id)
+        .where(WorkspaceSnapshot.status == WorkspaceSnapshotStatus.AVAILABLE.value),
+    ).one()
+    return int(v or 0)
 
 
 _TRAEFIK_UPSTREAM_ERROR_STATUSES = frozenset({502, 503, 504})
@@ -888,6 +891,8 @@ def request_start_workspace(
         raise WorkspaceInvalidStateError(
             f"Start is only allowed when stopped or error (current={ws.status})"
         )
+    rt = _get_workspace_runtime(session, workspace_id)
+    _ensure_workspace_reopen_allowed(ws, rt)
     cfg_v = _intent_config_version(session, workspace_id)
     return _persist_intent(
         session,
@@ -940,6 +945,8 @@ def request_restart_workspace(
         raise WorkspaceInvalidStateError(
             f"Restart is only allowed when running or stopped (current={ws.status})"
         )
+    rt = _get_workspace_runtime(session, workspace_id)
+    _ensure_workspace_reopen_allowed(ws, rt)
     cfg_v = _intent_config_version(session, workspace_id)
     return _persist_intent(
         session,
@@ -1458,4 +1465,11 @@ def get_workspace(
     latest = _latest_config_version(session, workspace_id)
     base = WorkspaceDetailResponse.model_validate(ws)
     reopen = _compute_workspace_reopen_issues(ws, rt=rt)
-    return base.model_copy(update={"latest_config_version": latest, "reopen_issues": reopen})
+    snaps = _restorable_snapshot_count(session, workspace_id)
+    return base.model_copy(
+        update={
+            "latest_config_version": latest,
+            "reopen_issues": reopen,
+            "restorable_snapshot_count": snaps,
+        },
+    )

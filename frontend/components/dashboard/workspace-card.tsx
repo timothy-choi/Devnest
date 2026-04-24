@@ -1,6 +1,7 @@
 "use client";
 
-import { Download, Loader2, MoreVertical, PlayCircle, RotateCcw, Square, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { ArchiveRestore, Download, Loader2, MoreVertical, PlayCircle, RotateCcw, Square, Trash2 } from "lucide-react";
 
 import { DetailedStatusBadge } from "@/components/dashboard/workspace-status-badge";
 import {
@@ -11,6 +12,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Workspace } from "@/types/workspace";
 
 type WorkspaceCardProps = {
@@ -32,16 +41,20 @@ export function WorkspaceCard({
   onDownload,
   onRunWorkflow,
 }: WorkspaceCardProps) {
+  const [recoverOpen, setRecoverOpen] = useState(false);
   const isPending = workspace.pendingAction !== null;
   const isDeleting = workspace.pendingAction === "Deleting";
   const primaryActionDisabled = isPending || (!workspace.canOpen && !workspace.canStart);
   const primaryActionLabel = workspace.pendingAction
     ? `${workspace.pendingAction}...`
-    : workspace.canOpen
-      ? "Open workspace"
-      : workspace.canStart
-        ? "Start workspace"
-        : workspace.statusLabel;
+    : workspace.projectDirectoryMissing
+      ? "Project data missing"
+      : workspace.canOpen
+        ? "Open workspace"
+        : workspace.canStart
+          ? "Start workspace"
+          : workspace.statusLabel;
+  const snapshots = workspace.restorableSnapshotCount ?? 0;
 
   return (
     <Card
@@ -87,6 +100,12 @@ export function WorkspaceCard({
               <PlayCircle className="h-4 w-4" />
               Run CI/CD Workflow
             </DropdownMenuItem>
+            {workspace.projectDirectoryMissing ? (
+              <DropdownMenuItem onClick={() => setRecoverOpen(true)}>
+                <ArchiveRestore className="h-4 w-4" />
+                Recover project files…
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="text-rose-600 focus:text-rose-600"
@@ -136,6 +155,48 @@ export function WorkspaceCard({
           {primaryActionLabel}
         </button>
       </CardContent>
+
+      <Dialog open={recoverOpen} onOpenChange={setRecoverOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Project directory missing</DialogTitle>
+            <DialogDescription asChild>
+              <div className="space-y-3 text-sm leading-6 text-slate-600">
+                <p>
+                  The control plane cannot find persisted files for this workspace on the configured host path.
+                  DevNest will not create an empty directory in place of lost data.
+                </p>
+                {snapshots > 0 ? (
+                  <ol className="list-decimal space-y-2 pl-5">
+                    <li>Stop the workspace if it is RUNNING.</li>
+                    <li>
+                      Choose an AVAILABLE snapshot and call{" "}
+                      <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">POST /snapshots/&lt;id&gt;/restore</code>{" "}
+                      (authenticated). This recreates the project tree from the archive.
+                    </li>
+                    <li>Start the workspace again.</li>
+                  </ol>
+                ) : (
+                  <p className="font-medium text-amber-800">
+                    No AVAILABLE snapshots were found for this workspace. Recovery requires a host-level backup,
+                    redeployed files under WORKSPACE_PROJECTS_BASE, or operator assistance; there is no automatic
+                    repair path.
+                  </p>
+                )}
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <button
+              type="button"
+              className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50"
+              onClick={() => setRecoverOpen(false)}
+            >
+              Close
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

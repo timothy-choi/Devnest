@@ -8,16 +8,12 @@ Future phases may add gRPC/agents while reusing the same bundle shape.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 import docker
 
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology.system.command_runner import CommandRunner
-
-_EnsureProjectDir = Callable[[str, str, str | None], str]
-
 
 @runtime_checkable
 class NodeExecutionBackend(Protocol):
@@ -44,6 +40,8 @@ class NodeExecutionBackend(Protocol):
         projects_base: str,
         workspace_id: str,
         project_storage_key: str | None = None,
+        *,
+        allow_create: bool = True,
     ) -> str:
-        """Return absolute project path on the execution host, creating directories if needed."""
+        """Return absolute project path on the execution host; create dirs when ``allow_create``."""
         ...

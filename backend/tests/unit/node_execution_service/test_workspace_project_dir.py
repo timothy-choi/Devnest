@@ -32,6 +32,21 @@ def test_default_local_uses_storage_key_for_isolated_directory() -> None:
         assert p.endswith("1-abc123")
 
 
+def test_default_local_resume_missing_raises_without_creating() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "9-deadbeef"
+        with pytest.raises(ValueError, match="missing for resume"):
+            default_local_ensure_workspace_project_dir(tmp, "9", "deadbeef", allow_create=False)
+        assert not missing.exists()
+
+
+def test_default_local_resume_allows_existing_dir() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        p = default_local_ensure_workspace_project_dir(tmp, "3", "aa", allow_create=True)
+        p2 = default_local_ensure_workspace_project_dir(tmp, "3", "aa", allow_create=False)
+        assert p == p2
+
+
 def test_workspace_project_dir_name_changes_when_storage_key_changes() -> None:
     assert workspace_project_dir_name("1", "key-a") != workspace_project_dir_name("1", "key-b")
     assert workspace_project_dir_name("1", "key-a") == workspace_project_dir_name("1", "key-a")
@@ -74,10 +89,21 @@ def test_ssh_remote_requires_absolute_base() -> None:
         ssh_remote_ensure_workspace_project_dir(runner, "relative/path", "ws1")
 
 
+def test_ssh_remote_resume_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_UID", "1000")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_GID", "1000")
+    runner = MagicMock()
+    runner.run.side_effect = RuntimeError("no dir")
+    with pytest.raises(ValueError, match="missing on execution host"):
+        ssh_remote_ensure_workspace_project_dir(runner, "/var/devnest", "ws7", "k1", allow_create=False)
+
+
 def test_ssh_remote_mkdir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_UID", "1000")
     monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_GID", "1000")
     runner = MagicMock()
+    # First call is ``test -d`` (missing dir); then ``mkdir -p``; then ``chown``.
+    runner.run.side_effect = [RuntimeError("missing"), None, None]
     path = ssh_remote_ensure_workspace_project_dir(runner, "/var/devnest", "ws7", "k1")
     assert path == "/var/devnest/ws7-k1"
     assert runner.run.call_count == 3

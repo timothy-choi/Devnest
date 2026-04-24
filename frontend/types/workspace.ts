@@ -19,4 +19,8 @@ export type Workspace = {
   canDelete: boolean;
   /** Control-plane reopen blockers (stale host, missing project dir, legacy paths). */
   reopenIssues?: string[];
+  /** AVAILABLE snapshots count from GET /workspaces/{id} (restore when project data is missing). */
+  restorableSnapshotCount?: number;
+  /** True when reopen issues indicate the persisted project directory is absent. */
+  projectDirectoryMissing?: boolean;
 };

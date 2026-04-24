@@ -311,6 +311,24 @@ class TestBringUpHappyPath:
 
         assert first_path == second_path
 
+    def test_resume_raises_when_project_dir_missing(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with pytest.raises(WorkspaceBringUpError, match="missing for resume"):
+            svc.bring_up_workspace_runtime(
+                workspace_id=WORKSPACE_ID,
+                project_storage_key="no-such-dir-on-disk",
+                launch_mode="resume",
+            )
+
 
 class TestBringUpRuntimeFailures:
     def test_ensure_empty_container_id_raises_and_skips_topology_and_probe(

@@ -115,8 +115,11 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
   const isBusy = BUSY_STATUSES.has(record.status);
   const reopenIssues = record.reopenIssues ?? [];
   const hasReopenBlockers = reopenIssues.length > 0;
+  const projectDirectoryMissing = reopenIssues.some((issue) =>
+    /project directory is missing/i.test(issue),
+  );
   const canOpen = record.status === "RUNNING" && !hasReopenBlockers;
-  const canStart = record.status === "STOPPED";
+  const canStart = record.status === "STOPPED" && !hasReopenBlockers;
 
   const baseDetail = getStatusDetail(record);
   const reopenDetail = hasReopenBlockers ? `Reopen blocked: ${reopenIssues.join("; ")}` : null;
@@ -141,8 +144,11 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
     canOpen,
     canStart,
     canStop: record.status === "RUNNING",
-    canRestart: record.status === "RUNNING" || record.status === "STOPPED",
+    canRestart:
+      (record.status === "RUNNING" || record.status === "STOPPED") && !hasReopenBlockers,
     canDelete: record.status === "RUNNING" || record.status === "STOPPED" || record.status === "ERROR",
     reopenIssues: hasReopenBlockers ? reopenIssues : undefined,
+    restorableSnapshotCount: record.restorableSnapshotCount,
+    projectDirectoryMissing: projectDirectoryMissing || undefined,
   };
 }

@@ -82,7 +82,7 @@ _CONFIG_VERSION_LABEL = "devnest.config_version"
 
 logger = logging.getLogger(__name__)
 
-_EnsureWorkspaceProjectDir = Callable[[str, str], str]
+_EnsureWorkspaceProjectDir = Callable[..., str]
 
 
 def _env_skip_linux_topology_attachment() -> bool:
@@ -236,11 +236,20 @@ class DefaultOrchestratorService(OrchestratorService):
 
         ws_int = _parse_topology_workspace_id(wid)
         name = _sanitize_container_name(wid)
+        # ``launch_mode=None`` is treated as permissive (create-if-missing) for callers that omit the
+        # flag (tests, internal helpers). Production jobs pass explicit ``"new"`` or ``"resume"``.
+        if launch_mode is None:
+            mode = "resume"
+            allow_create = True
+        else:
+            mode = (launch_mode or "").strip().lower() or "resume"
+            allow_create = mode == "new"
         try:
             workspace_host_path = self._ensure_workspace_project_dir(
                 self._workspace_projects_base,
                 wid,
                 project_storage_key,
+                allow_create=allow_create,
             )
         except ValueError as e:
             raise WorkspaceBringUpError(str(e)) from e
@@ -258,8 +267,8 @@ class DefaultOrchestratorService(OrchestratorService):
                 "workspace_id": wid,
                 "project_storage_key": (project_storage_key or "").strip() or None,
                 "workspace_host_path": workspace_host_path,
-                "launch_mode": (launch_mode or "").strip() or "resume",
-                "is_resumed_workspace": ((launch_mode or "").strip().lower() != "new"),
+                "launch_mode": mode,
+                "is_resumed_workspace": (mode != "new"),
             },
         )
 
@@ -269,7 +278,7 @@ class DefaultOrchestratorService(OrchestratorService):
             container_name=name,
             workspace_host_path=workspace_host_path,
             project_storage_key=(project_storage_key or "").strip() or None,
-            launch_mode=(launch_mode or "").strip().lower() or "resume",
+            launch_mode=mode,
             labels=labels,
         )
 
@@ -316,10 +325,12 @@ class DefaultOrchestratorService(OrchestratorService):
         else:
             try:
                 key = (project_storage_key or "").strip() or None
+                allow_create = (launch_mode or "").strip().lower() == "new"
                 project_root = self._ensure_workspace_project_dir(
                     self._workspace_projects_base,
                     wid_clean,
                     key,
+                    allow_create=allow_create,
                 )
             except ValueError:
                 return []
@@ -1787,6 +1798,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 self._workspace_projects_base,
                 wid,
                 project_storage_key,
+                allow_create=True,
             )
         except ValueError as e:
             raise WorkspaceSnapshotError(str(e)) from e

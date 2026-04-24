@@ -371,8 +371,14 @@ def default_local_ensure_workspace_project_dir(
     projects_base: str,
     workspace_id: str,
     project_storage_key: str | None = None,
+    *,
+    allow_create: bool = True,
 ) -> str:
-    """Create the isolated workspace project directory on this machine; return absolute path."""
+    """Return the absolute workspace project directory, optionally creating it.
+
+    ``allow_create=False`` is used for resume/start flows: an existing workspace must already have
+    its host tree — DevNest must not silently mint an empty directory when persisted data is gone.
+    """
     wid = _validate_workspace_id_for_path(workspace_id)
     storage_key = _validate_workspace_storage_key_for_path(project_storage_key)
     base = (projects_base or "").strip()
@@ -380,11 +386,17 @@ def default_local_ensure_workspace_project_dir(
         base = os.path.join(tempfile.gettempdir(), "devnest-workspaces")
     dir_name = workspace_project_dir_name(wid, storage_key)
     p = Path(os.path.realpath(os.path.expanduser(str(Path(base) / dir_name))))
-    existed_before = p.exists()
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise ValueError(f"cannot create workspace project directory {p}: {e}") from e
+    directory_preexisted = p.is_dir()
+    if not directory_preexisted:
+        if not allow_create:
+            raise ValueError(
+                f"workspace project directory missing for resume (expected data at {p}); "
+                "restore from snapshot or recreate the directory before starting.",
+            )
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise ValueError(f"cannot create workspace project directory {p}: {e}") from e
     p_str = str(p)
     uid, gid = workspace_container_uid_gid()
     try:
@@ -402,7 +414,7 @@ def default_local_ensure_workspace_project_dir(
             "project_storage_key": storage_key,
             "host_dir_name": dir_name,
             "path_mode": "legacy_workspace_id" if not storage_key else "workspace_id_plus_storage_key",
-            "directory_preexisted": existed_before,
+            "directory_preexisted": directory_preexisted,
             "uid": uid,
             "gid": gid,
             "chown_strict": _strict_chown,
@@ -469,6 +481,8 @@ def ssh_remote_ensure_workspace_project_dir(
     projects_base: str,
     workspace_id: str,
     project_storage_key: str | None = None,
+    *,
+    allow_create: bool = True,
 ) -> str:
     """
     Create the isolated workspace project directory on the SSH target using POSIX paths.
@@ -489,7 +503,13 @@ def ssh_remote_ensure_workspace_project_dir(
         existed_before = True
     except RuntimeError:
         existed_before = False
-    runner.run(["mkdir", "-p", remote_path])
+    if not existed_before:
+        if not allow_create:
+            raise ValueError(
+                f"workspace project directory missing on execution host for resume "
+                f"(expected {remote_path!r}); restore from snapshot or recreate before starting.",
+            )
+        runner.run(["mkdir", "-p", remote_path])
     uid, gid = workspace_container_uid_gid()
     runner.run(["chown", "-R", f"{uid}:{gid}", remote_path])
     logger.info(

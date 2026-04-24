@@ -230,3 +230,8 @@ class WorkspaceDetailResponse(BaseModel):
         default_factory=list,
         description="Control-plane checks (host/path drift vs current settings) that block a safe reopen.",
     )
+    restorable_snapshot_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of AVAILABLE snapshots for this workspace (restore path when project data is missing).",
+    )
