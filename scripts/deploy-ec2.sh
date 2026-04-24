@@ -5,7 +5,7 @@
 #   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it (via DEVNEST_COMPOSE_DATABASE_URL)
 #     instead of local compose Postgres
 #   ${REPO_DIR}/.env.integration — optional; when present, sourced into this shell before validation and passed to
-#     ``docker compose --env-file`` so RDS + S3 vars survive non-interactive SSH reliably.
+#     ``docker compose --env-file`` so RDS, S3, and OAuth vars survive non-interactive SSH reliably.
 #   DEVNEST_DEPLOY_DIR — repo path (default: ~/Devnest)
 #   DEVNEST_DEPLOY_REPO_URL — git remote (default: upstream Devnest URL)
 #   DEVNEST_DEPLOY_GIT_REF — when set (e.g. CI ``github.sha``), check out this commit/tag after fetch instead of
@@ -50,6 +50,13 @@ _devnest_deploy_env_presence() {
   if [[ -n "${DEVNEST_S3_SNAPSHOT_BUCKET:-}" ]]; then echo "DEVNEST_S3_SNAPSHOT_BUCKET: set"; else echo "DEVNEST_S3_SNAPSHOT_BUCKET: missing"; fi
   if [[ -n "${AWS_REGION:-}" ]]; then echo "AWS_REGION: set"; else echo "AWS_REGION: missing"; fi
   if [[ -n "${DEVNEST_S3_SNAPSHOT_PREFIX:-}" ]]; then echo "DEVNEST_S3_SNAPSHOT_PREFIX: set"; else echo "DEVNEST_S3_SNAPSHOT_PREFIX: missing"; fi
+  if [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL: set"; else echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL: missing"; fi
+  if [[ -n "${GITHUB_OAUTH_PUBLIC_BASE_URL:-}" ]]; then echo "GITHUB_OAUTH_PUBLIC_BASE_URL: set"; else echo "GITHUB_OAUTH_PUBLIC_BASE_URL: missing"; fi
+  if [[ -n "${GCLOUD_OAUTH_PUBLIC_BASE_URL:-}" ]]; then echo "GCLOUD_OAUTH_PUBLIC_BASE_URL: set"; else echo "GCLOUD_OAUTH_PUBLIC_BASE_URL: missing"; fi
+  if [[ -n "${OAUTH_GITHUB_CLIENT_ID:-}" ]]; then echo "OAUTH_GITHUB_CLIENT_ID: set"; else echo "OAUTH_GITHUB_CLIENT_ID: missing"; fi
+  if [[ -n "${OAUTH_GITHUB_CLIENT_SECRET:-}" ]]; then echo "OAUTH_GITHUB_CLIENT_SECRET: set"; else echo "OAUTH_GITHUB_CLIENT_SECRET: missing"; fi
+  if [[ -n "${OAUTH_GOOGLE_CLIENT_ID:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_ID: set"; else echo "OAUTH_GOOGLE_CLIENT_ID: missing"; fi
+  if [[ -n "${OAUTH_GOOGLE_CLIENT_SECRET:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_SECRET: set"; else echo "OAUTH_GOOGLE_CLIENT_SECRET: missing"; fi
   echo "---"
 }
 

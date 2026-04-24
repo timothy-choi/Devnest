@@ -304,7 +304,7 @@ Workflow **`.github/workflows/tests.yml`** runs on **all branch pushes**, **all 
 
 1. **Path-based `detect`** still skips jobs when a change only touches unrelated areas (same as before).
 2. After required jobs succeed, **linux-full-stack-integration** brings up **`docker-compose.integration.yml`**, waits for **`http://localhost:8000/health`** and **`http://localhost:3000/`**, then tears the stack down.
-3. **Deploy** (only if secrets are set) uses **`appleboy/ssh-action@v1.2.3`**, writes **`~/Devnest/.env.integration`** (mode **0600**) via **`scripts/write-integration-deploy-env.sh`**, then runs **`scripts/deploy-ec2.sh`**. The deploy script **sources** that file (values never printed) and runs **`docker compose --env-file .env.integration`** so RDS + S3 variables reach Compose reliably. OAuth/SMTP stay on the SSH shell via **`export`**. **Pull requests never deploy.** **Push to non-`main`** → **deploy-staging**; **push to `main`** → **deploy-production**. **`workflow_dispatch`** follows the same rule using the selected ref.
+3. **Deploy** (only if secrets are set) uses **`appleboy/ssh-action@v1.2.3`**, writes **`~/Devnest/.env.integration`** (mode **0600**) via **`scripts/write-integration-deploy-env.sh`**, then runs **`scripts/deploy-ec2.sh`**. The deploy script **sources** that file (values never printed) and runs **`docker compose --env-file`** against that file when it exists, so RDS, S3, and **OAuth** reach Compose reliably. **SMTP** remains on the SSH shell via **`export`**. **Pull requests never deploy.** **Push to non-`main`** → **deploy-staging**; **push to `main`** → **deploy-production**. **`workflow_dispatch`** follows the same rule using the selected ref.
 
 | Secret | Purpose |
 |--------|---------|
@@ -316,6 +316,10 @@ Workflow **`.github/workflows/tests.yml`** runs on **all branch pushes**, **all 
 | `DEVNEST_S3_SNAPSHOT_BUCKET` | S3 bucket for workspace snapshots (required when using external Postgres; enforced in **`scripts/deploy-ec2.sh`**) |
 | `AWS_REGION` | Region written into `.env.integration` (secret preferred; **`vars.AWS_REGION`** used when the secret is empty) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Optional; included in `.env.integration` only when set. Omit when the EC2 instance uses an **IAM instance profile** with S3 permissions |
+| `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET` | GitHub OAuth app (written into `.env.integration`). If unset, the workflow falls back to **`GH_CLIENT_ID`** / **`GH_CLIENT_SECRET`**, then **`GITHUB_CLIENT_ID`** / **`GITHUB_CLIENT_SECRET`**. |
+| `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET` | Google OAuth web client (same file). If unset, falls back to **`GOOGLE_CLIENT_ID`** / **`GOOGLE_CLIENT_SECRET`**. |
+
+Public UI / OAuth redirect bases (**not** secrets) are derived on the EC2 shell from **`EC2_HOST`**: `http://<dashed-ip>.sslip.io:3000` when the host is an IPv4 address, otherwise `http://<EC2_HOST>:3000`. Those values are written as **`DEVNEST_FRONTEND_PUBLIC_BASE_URL`**, **`GITHUB_OAUTH_PUBLIC_BASE_URL`**, and **`GCLOUD_OAUTH_PUBLIC_BASE_URL`** in `.env.integration` (callbacks: `/auth/oauth/github/callback` and `/auth/oauth/google/callback` under that origin).
 
 | Variable (repo **Settings → Secrets and variables → Actions → Variables**) | Purpose |
 |---|---|
