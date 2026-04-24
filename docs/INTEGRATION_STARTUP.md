@@ -217,6 +217,17 @@ For `provider=local`, the same log line shape applies: `bucket`, `prefix`, and `
 
 If `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` is set without `DEVNEST_S3_SNAPSHOT_BUCKET` or `AWS_REGION`, process startup fails immediately with a clear `RuntimeError`. If either `DEVNEST_EXPECT_EXTERNAL_POSTGRES` or `DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` is `true` but the provider is not `s3`, startup also fails with an explicit `RuntimeError`.
 
+### Verify backend and worker see the same snapshot fields (no secrets)
+
+After `up`, both containers should print identical `provider` / `bucket` / `prefix` / `region` / `root` from `snapshot_storage_log_fields()` (values come from the same compose anchor + `.env`):
+
+```bash
+docker compose -f docker-compose.integration.yml exec -T backend \
+  python -c "from app.services.storage.factory import snapshot_storage_log_fields; print(snapshot_storage_log_fields())"
+docker compose -f docker-compose.integration.yml exec -T workspace-worker \
+  python -c "from app.services.storage.factory import snapshot_storage_log_fields; print(snapshot_storage_log_fields())"
+```
+
 ### Manual verification commands
 
 Set a token and base URL once:

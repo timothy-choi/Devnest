@@ -629,8 +629,12 @@ class Settings(BaseSettings):
             return 1.5
         return max(0.05, min(n, 30.0))
 
-    # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
-    aws_region: str = ""
+    # AWS (EC2 node registry, S3 snapshots; optional — uses default credential chain when keys empty).
+    aws_region: str = Field(
+        default="",
+        validation_alias=AliasChoices("AWS_REGION", "aws_region"),
+        description="Region for AWS APIs (S3 snapshots, EC2 helpers). Required when snapshot provider is s3.",
+    )
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     # Placement filter: ``all`` (default) = local + EC2 nodes; ``local`` / ``ec2`` = restrict pool.

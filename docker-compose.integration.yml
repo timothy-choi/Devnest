@@ -59,15 +59,14 @@
 #
 # Snapshot/archive storage (workspace files stay on host bind mounts):
 #   Live workspace project data remains under ``WORKSPACE_PROJECTS_BASE`` on the host. Only snapshot archives
-#   are routed through the snapshot storage provider. For EC2 / multi-node restore flows set:
-#     DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3
-#     DEVNEST_S3_SNAPSHOT_BUCKET=<bucket>
-#     DEVNEST_S3_SNAPSHOT_PREFIX=<prefix>      # optional; default devnest-snapshots
-#     AWS_REGION=<region>
-#   Compose injects the same snapshot + workspace image keys via ``x-workspace-snapshot-env`` for ``backend``
-#   and ``workspace-worker`` so snapshot create/restore/delete/existence checks use the same provider and paths.
-#   When ``DEVNEST_EXPECT_*`` RDS/remote flags are true, Settings requires ``DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3``
-#   plus bucket and ``AWS_REGION`` (see ``backend/app/libs/common/config.py``).
+#   use the snapshot storage provider. Local default: ``DEVNEST_SNAPSHOT_STORAGE_PROVIDER=local`` (omit S3 vars).
+#   EC2 / RDS: set ``DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3``, ``DEVNEST_S3_SNAPSHOT_BUCKET``, ``AWS_REGION``,
+#   optional ``DEVNEST_S3_SNAPSHOT_PREFIX`` (default ``devnest-snapshots``), optional keys in ``AWS_*``.
+#   ``x-workspace-snapshot-env`` injects the **same** snapshot + workspace image keys into ``backend`` and
+#   ``workspace-worker`` (API and worker never diverge on compose-derived snapshot env).
+#   When ``DEVNEST_EXPECT_EXTERNAL_POSTGRES`` or ``DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`` is true, Settings
+#   requires ``s3`` plus bucket and region — no silent local fallback (see ``config.py`` + ``deploy-ec2.sh``).
+#   Startup logs print provider/bucket/prefix/region/root only; credentials are never logged.
 #
 # Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
