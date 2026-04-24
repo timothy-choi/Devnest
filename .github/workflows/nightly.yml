@@ -418,6 +418,18 @@ jobs:
             export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_COMPOSE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_REQUIRE_EXTERNAL_DB="1"
+            # RDS + snapshots: deploy-ec2.sh requires S3 when DATABASE_URL is set (never echo these).
+            export DEVNEST_SNAPSHOT_STORAGE_PROVIDER="${{ secrets.DEVNEST_SNAPSHOT_STORAGE_PROVIDER }}"
+            export DEVNEST_SNAPSHOT_STORAGE_PROVIDER="${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-s3}"
+            export DEVNEST_S3_SNAPSHOT_BUCKET="${{ secrets.DEVNEST_S3_SNAPSHOT_BUCKET }}"
+            export AWS_REGION="${{ secrets.AWS_REGION }}"
+            if [ -z "${AWS_REGION}" ]; then export AWS_REGION="${{ vars.AWS_REGION }}"; fi
+            _snap_prefix="${{ vars.DEVNEST_S3_SNAPSHOT_PREFIX }}"
+            if [ -n "${_snap_prefix}" ]; then export DEVNEST_S3_SNAPSHOT_PREFIX="${_snap_prefix}"; fi
+            _ak="${{ secrets.AWS_ACCESS_KEY_ID }}"
+            _sk="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            if [ -n "${_ak}" ]; then export AWS_ACCESS_KEY_ID="${_ak}"; fi
+            if [ -n "${_sk}" ]; then export AWS_SECRET_ACCESS_KEY="${_sk}"; fi
             export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
             export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
             export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"

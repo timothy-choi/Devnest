@@ -311,8 +311,19 @@ Workflow **`.github/workflows/tests.yml`** runs on **all branch pushes**, **all 
 | `EC2_HOST` | Public DNS or IPv4 |
 | `EC2_USER` | SSH user |
 | `EC2_SSH_KEY` | Private key (full multiline PEM/OpenSSH) |
+| `DEVNEST_DATABASE_URL` | RDS-style Postgres URL passed to the EC2 shell as `DATABASE_URL` / `DEVNEST_COMPOSE_DATABASE_URL` |
+| `DEVNEST_S3_SNAPSHOT_BUCKET` | S3 bucket for workspace snapshots (required when `DEVNEST_DATABASE_URL` is set; `scripts/deploy-ec2.sh` enforces this together with region) |
+| `AWS_REGION` | Repository or environment **secret**; exported on the EC2 shell for boto3 / app settings. If you store the region only as a non-secret **variable**, add **`AWS_REGION`** under **Variables** as well (the script falls back when the secret is empty). |
+| `DEVNEST_SNAPSHOT_STORAGE_PROVIDER` | Optional; if unset, deploy defaults to **`s3`** in the SSH script |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Optional; omit when the EC2 instance uses an **IAM instance profile** with S3 permissions |
 
-Missing secrets → deploy jobs skip; tests can still pass. Job `if` conditions use `env.*` mapped from secrets (GitHub does not allow `secrets.*` in all `if:` contexts).
+| Variable (repo **Settings → Secrets and variables → Actions → Variables**) | Purpose |
+|---|---|
+| `DEVNEST_S3_SNAPSHOT_PREFIX` | Optional S3 key prefix; only exported when non-empty (otherwise Compose defaults apply) |
+
+**Why deploy failed with secrets “already set”:** the workflow only forwarded `DEVNEST_DATABASE_URL` into the `appleboy/ssh-action` remote shell. S3-related values must use the **names above** (or the workflow must be updated to read different names). Values stored only under unrelated names, or only under a GitHub **Environment** while the deploy job has no `environment:` key, are invisible to `deploy-ec2.sh`.
+
+Missing EC2 SSH secrets → deploy jobs skip; tests can still pass. Job `if` conditions use `env.*` mapped from secrets (GitHub does not allow `secrets.*` in all `if:` contexts).
 
 **Verify a deploy:** open `http://<EC2_HOST>:3000` and `http://<EC2_HOST>:8000/health` after the workflow completes; check the **Deploy to EC2** job log for `git rev-parse HEAD` and `docker compose ps` output from the script.
 
