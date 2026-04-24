@@ -7,12 +7,15 @@ import { browserApi } from "@/lib/api/browser-client";
 import { ApiError } from "@/lib/api/error";
 import { WorkspaceFormValues } from "@/lib/validators";
 import { toWorkspace } from "@/lib/workspace-mappers";
-import { Workspace } from "@/types/workspace";
+import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
+
+export type DashboardWorkspaceSection = "active" | "restore_required" | "unrecoverable";
 
 export function useWorkspaces() {
   const queryClient = useQueryClient();
   const openInFlight = useRef<Set<number>>(new Set());
   const [query, setQuery] = useState("");
+  const [dashboardSection, setDashboardSection] = useState<DashboardWorkspaceSection>("active");
   const [isCreateDialogOpen, setCreateDialogOpen] = useState(false);
   const [optimisticWorkspaces, setOptimisticWorkspaces] = useState<Workspace[]>([]);
   const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
@@ -30,10 +33,18 @@ export function useWorkspaces() {
                 isBusy: false,
                 canOpen:
                   workspace.rawStatus === "RUNNING" &&
-                  !(workspace.reopenIssues && workspace.reopenIssues.length > 0),
-                canStart: workspace.rawStatus === "STOPPED",
+                  !(workspace.reopenIssues && workspace.reopenIssues.length > 0) &&
+                  workspace.projectDataLifecycle !== "restore_required" &&
+                  workspace.projectDataLifecycle !== "unrecoverable",
+                canStart:
+                  workspace.rawStatus === "STOPPED" &&
+                  workspace.projectDataLifecycle !== "restore_required" &&
+                  workspace.projectDataLifecycle !== "unrecoverable",
                 canStop: workspace.rawStatus === "RUNNING",
-                canRestart: workspace.rawStatus === "RUNNING" || workspace.rawStatus === "STOPPED",
+                canRestart:
+                  (workspace.rawStatus === "RUNNING" || workspace.rawStatus === "STOPPED") &&
+                  workspace.projectDataLifecycle !== "restore_required" &&
+                  workspace.projectDataLifecycle !== "unrecoverable",
                 canDelete:
                   workspace.rawStatus === "RUNNING" ||
                   workspace.rawStatus === "STOPPED" ||
@@ -190,20 +201,49 @@ export function useWorkspaces() {
     );
   }, [hiddenDeletedIds, optimisticWorkspaces, workspacesQuery.data]);
 
+  const lifecycleOf = (w: Workspace): ProjectDataLifecycle => w.projectDataLifecycle ?? "ok";
+
+  const activeDashboardWorkspaces = useMemo(() => {
+    return workspaces.filter((w) => {
+      const life = lifecycleOf(w);
+      return life !== "restore_required" && life !== "unrecoverable";
+    });
+  }, [workspaces]);
+
+  const restoreRequiredList = useMemo(
+    () => workspaces.filter((w) => lifecycleOf(w) === "restore_required"),
+    [workspaces],
+  );
+
+  const unrecoverableList = useMemo(
+    () => workspaces.filter((w) => lifecycleOf(w) === "unrecoverable"),
+    [workspaces],
+  );
+
+  const sectionWorkspaces = useMemo(() => {
+    if (dashboardSection === "restore_required") {
+      return restoreRequiredList;
+    }
+    if (dashboardSection === "unrecoverable") {
+      return unrecoverableList;
+    }
+    return activeDashboardWorkspaces;
+  }, [activeDashboardWorkspaces, dashboardSection, restoreRequiredList, unrecoverableList]);
+
   const filteredWorkspaces = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
     if (!normalizedQuery) {
-      return workspaces;
+      return sectionWorkspaces;
     }
 
-    return workspaces.filter((workspace) => {
+    return sectionWorkspaces.filter((workspace) => {
       return (
         workspace.name.toLowerCase().includes(normalizedQuery) ||
         workspace.description.toLowerCase().includes(normalizedQuery)
       );
     });
-  }, [query, workspaces]);
+  }, [query, sectionWorkspaces]);
 
   const openWorkspace = async (id: string) => {
     const workspaceId = Number(id);
@@ -242,6 +282,14 @@ export function useWorkspaces() {
         throw new ApiError(
           409,
           "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
+        );
+      }
+      const diskLife = detail.project_data_lifecycle ?? "ok";
+      if (diskLife === "restore_required" || diskLife === "unrecoverable") {
+        throw new ApiError(
+          409,
+          detail.project_data_user_message ||
+            "Workspace project data is not available on the execution host.",
         );
       }
       const reopenBlockers = detail.reopen_issues?.length
@@ -309,6 +357,11 @@ export function useWorkspaces() {
   return {
     workspaces,
     filteredWorkspaces,
+    dashboardSection,
+    setDashboardSection,
+    activeDashboardWorkspaces,
+    restoreRequiredList,
+    unrecoverableList,
     query,
     setQuery,
     isCreateDialogOpen,

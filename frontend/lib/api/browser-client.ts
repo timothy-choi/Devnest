@@ -40,6 +40,8 @@ export type WorkspaceRecord = {
   /** Present when the control plane detected host/path drift vs current settings. */
   reopenIssues?: string[];
   restorableSnapshotCount?: number;
+  projectDataLifecycle?: "ok" | "unknown" | "restore_required" | "unrecoverable";
+  projectDataUserMessage?: string | null;
 };
 
 export type WorkspaceDetail = {
@@ -60,6 +62,8 @@ export type WorkspaceDetail = {
   reopen_issues?: string[];
   reopenIssues?: string[];
   restorable_snapshot_count?: number;
+  project_data_lifecycle?: "ok" | "unknown" | "restore_required" | "unrecoverable";
+  project_data_user_message?: string | null;
 };
 
 export type WorkspaceAttachResponse = {

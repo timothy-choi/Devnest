@@ -1,5 +1,5 @@
 import { WorkspaceRecord } from "@/lib/api/browser-client";
-import { Workspace } from "@/types/workspace";
+import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
 
 const BUSY_STATUSES = new Set([
   "CREATING",
@@ -111,19 +111,34 @@ function getStatusDetail(record: WorkspaceRecord) {
   }
 }
 
+function normalizeLifecycle(raw: string | undefined): ProjectDataLifecycle {
+  if (raw === "restore_required" || raw === "unrecoverable" || raw === "unknown") {
+    return raw;
+  }
+  return "ok";
+}
+
 export function toWorkspace(record: WorkspaceRecord): Workspace {
   const isBusy = BUSY_STATUSES.has(record.status);
   const reopenIssues = record.reopenIssues ?? [];
   const hasReopenBlockers = reopenIssues.length > 0;
-  const projectDirectoryMissing = reopenIssues.some((issue) =>
-    /project directory is missing/i.test(issue),
-  );
-  const canOpen = record.status === "RUNNING" && !hasReopenBlockers;
-  const canStart = record.status === "STOPPED" && !hasReopenBlockers;
+  const lifecycle = normalizeLifecycle(record.projectDataLifecycle);
+  const dataStorageIssue = lifecycle === "restore_required" || lifecycle === "unrecoverable";
+  const projectDirectoryMissing = dataStorageIssue;
 
-  const baseDetail = getStatusDetail(record);
-  const reopenDetail = hasReopenBlockers ? `Reopen blocked: ${reopenIssues.join("; ")}` : null;
-  const statusDetail = [reopenDetail, baseDetail].filter(Boolean).join(" — ") || null;
+  const canOpen = record.status === "RUNNING" && !hasReopenBlockers && !dataStorageIssue;
+  const canStart = record.status === "STOPPED" && !hasReopenBlockers && !dataStorageIssue;
+
+  const baseDetail = dataStorageIssue ? null : getStatusDetail(record);
+  let reopenDetail: string | null = null;
+  if (hasReopenBlockers) {
+    if (dataStorageIssue) {
+      reopenDetail = record.projectDataUserMessage ?? null;
+    } else {
+      reopenDetail = reopenIssues.join(" ");
+    }
+  }
+  const statusDetail = [reopenDetail, baseDetail].filter(Boolean).join(" ") || null;
 
   return {
     id: record.id,
@@ -145,10 +160,15 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
     canStart,
     canStop: record.status === "RUNNING",
     canRestart:
-      (record.status === "RUNNING" || record.status === "STOPPED") && !hasReopenBlockers,
+      (record.status === "RUNNING" || record.status === "STOPPED") &&
+      !hasReopenBlockers &&
+      !dataStorageIssue,
     canDelete: record.status === "RUNNING" || record.status === "STOPPED" || record.status === "ERROR",
     reopenIssues: hasReopenBlockers ? reopenIssues : undefined,
     restorableSnapshotCount: record.restorableSnapshotCount,
     projectDirectoryMissing: projectDirectoryMissing || undefined,
+    projectDataLifecycle:
+      lifecycle === "restore_required" || lifecycle === "unrecoverable" ? lifecycle : undefined,
+    projectDataUserMessage: record.projectDataUserMessage ?? null,
   };
 }

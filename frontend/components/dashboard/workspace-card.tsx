@@ -44,16 +44,22 @@ export function WorkspaceCard({
   const [recoverOpen, setRecoverOpen] = useState(false);
   const isPending = workspace.pendingAction !== null;
   const isDeleting = workspace.pendingAction === "Deleting";
-  const primaryActionDisabled = isPending || (!workspace.canOpen && !workspace.canStart);
+  const isRestore = workspace.projectDataLifecycle === "restore_required";
+  const isUnrecoverable = workspace.projectDataLifecycle === "unrecoverable";
+  const primaryActionDisabled = isPending || (isUnrecoverable ? false : !workspace.canOpen && !workspace.canStart);
   const primaryActionLabel = workspace.pendingAction
     ? `${workspace.pendingAction}...`
-    : workspace.projectDirectoryMissing
-      ? "Project data missing"
-      : workspace.canOpen
-        ? "Open workspace"
-        : workspace.canStart
-          ? "Start workspace"
-          : workspace.statusLabel;
+    : isRestore
+      ? "Restore required"
+      : isUnrecoverable
+        ? "Data unavailable"
+        : workspace.projectDirectoryMissing
+          ? "Project data missing"
+          : workspace.canOpen
+            ? "Open workspace"
+            : workspace.canStart
+              ? "Start workspace"
+              : workspace.statusLabel;
   const snapshots = workspace.restorableSnapshotCount ?? 0;
 
   return (
@@ -64,7 +70,15 @@ export function WorkspaceCard({
     >
       <CardHeader className="flex flex-row items-start justify-between gap-4 pb-4">
         <div className="space-y-3">
-          <DetailedStatusBadge workspace={workspace} />
+          <div className="space-y-2">
+            <DetailedStatusBadge workspace={workspace} />
+            {isRestore ? (
+              <p className="text-xs font-medium uppercase tracking-wide text-amber-800">Restore required</p>
+            ) : null}
+            {isUnrecoverable ? (
+              <p className="text-xs font-medium uppercase tracking-wide text-rose-800">Data not recoverable</p>
+            ) : null}
+          </div>
           <div>
             <h3 className="text-lg font-semibold text-slate-950">{workspace.name}</h3>
             <p className="mt-1 text-sm leading-6 text-slate-500">{workspace.description}</p>
@@ -100,10 +114,10 @@ export function WorkspaceCard({
               <PlayCircle className="h-4 w-4" />
               Run CI/CD Workflow
             </DropdownMenuItem>
-            {workspace.projectDirectoryMissing ? (
+            {isRestore ? (
               <DropdownMenuItem onClick={() => setRecoverOpen(true)}>
                 <ArchiveRestore className="h-4 w-4" />
-                Recover project files…
+                How to restore from snapshot…
               </DropdownMenuItem>
             ) : null}
             <DropdownMenuSeparator />
@@ -136,12 +150,26 @@ export function WorkspaceCard({
           className={`flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3 text-sm font-medium text-white transition ${
             primaryActionDisabled
               ? "cursor-not-allowed bg-slate-400"
-              : workspace.canOpen
-                ? "bg-slate-950 hover:bg-slate-800"
-                : "bg-sky-700 hover:bg-sky-600"
+              : isUnrecoverable
+                ? "bg-rose-700 hover:bg-rose-600"
+                : workspace.canOpen
+                  ? "bg-slate-950 hover:bg-slate-800"
+                  : "bg-sky-700 hover:bg-sky-600"
           }`}
           disabled={primaryActionDisabled}
           onClick={() => {
+            if (isUnrecoverable) {
+              if (
+                typeof window !== "undefined" &&
+                !window.confirm(
+                  `Permanently remove workspace "${workspace.name}"? This enqueues deletion of the workspace record and runtime cleanup.`,
+                )
+              ) {
+                return;
+              }
+              onDelete(String(workspace.id));
+              return;
+            }
             if (workspace.canOpen) {
               onOpen(String(workspace.id));
               return;
@@ -159,7 +187,7 @@ export function WorkspaceCard({
       <Dialog open={recoverOpen} onOpenChange={setRecoverOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Project directory missing</DialogTitle>
+            <DialogTitle>Restore from snapshot</DialogTitle>
             <DialogDescription asChild>
               <div className="space-y-3 text-sm leading-6 text-slate-600">
                 <p>

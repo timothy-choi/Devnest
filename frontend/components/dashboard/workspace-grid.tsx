@@ -5,6 +5,8 @@ type WorkspaceGridProps = {
   workspaces: Workspace[];
   isLoading?: boolean;
   errorMessage?: string | null;
+  emptyTitle?: string;
+  emptyDescription?: string;
   onOpen: (id: string) => void;
   onStop: (id: string) => void;
   onRestart: (id: string) => void;
@@ -17,6 +19,8 @@ export function WorkspaceGrid({
   workspaces,
   isLoading = false,
   errorMessage = null,
+  emptyTitle = "No workspaces found",
+  emptyDescription = "Try a different search or create a fresh workspace to populate the grid.",
   onOpen,
   onStop,
   onRestart,
@@ -45,8 +49,8 @@ export function WorkspaceGrid({
   if (workspaces.length === 0) {
     return (
       <div className="rounded-[28px] border border-dashed border-slate-300 bg-white/70 px-6 py-14 text-center shadow-[0_20px_50px_-40px_rgba(15,23,42,0.45)]">
-        <h2 className="text-xl font-semibold text-slate-900">No workspaces found</h2>
-        <p className="mt-2 text-sm text-slate-600">Try a different search or create a fresh workspace to populate the grid.</p>
+        <h2 className="text-xl font-semibold text-slate-900">{emptyTitle}</h2>
+        <p className="mt-2 text-sm text-slate-600">{emptyDescription}</p>
       </div>
     );
   }

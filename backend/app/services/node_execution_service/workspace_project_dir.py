@@ -369,6 +369,16 @@ def workspace_bundle_has_legacy_root_level_files(bundle_root: Path) -> bool:
     return False
 
 
+def workspace_bundle_project_data_present(bundle_root: Path) -> bool:
+    """True when persisted IDE project data exists (v2 ``project/`` or v1 files at bundle root)."""
+    if not bundle_root.is_dir():
+        return False
+    project_child = bundle_root / WORKSPACE_USER_PROJECT_SUBDIR
+    if project_child.is_dir():
+        return True
+    return workspace_bundle_has_legacy_root_level_files(bundle_root)
+
+
 def resolve_workspace_ide_bind_host_path(
     bundle_host_path: str,
     *,

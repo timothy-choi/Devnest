@@ -84,10 +84,53 @@ export function DashboardShell() {
             </div>
           ) : null}
 
+          <div className="flex flex-wrap gap-2 rounded-[20px] border border-slate-200/80 bg-white/70 p-2 shadow-sm">
+            {(
+              [
+                { id: "active" as const, label: "Workspaces" },
+                {
+                  id: "restore_required" as const,
+                  label: `Restore required${workspaceState.restoreRequiredList.length ? ` (${workspaceState.restoreRequiredList.length})` : ""}`,
+                },
+                {
+                  id: "unrecoverable" as const,
+                  label: `Data lost${workspaceState.unrecoverableList.length ? ` (${workspaceState.unrecoverableList.length})` : ""}`,
+                },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => workspaceState.setDashboardSection(tab.id)}
+                className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+                  workspaceState.dashboardSection === tab.id
+                    ? "bg-slate-900 text-white shadow"
+                    : "text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
           <WorkspaceGrid
             workspaces={workspaceState.filteredWorkspaces}
             isLoading={workspaceState.isLoading}
             errorMessage={workspaceState.errorMessage}
+            emptyTitle={
+              workspaceState.dashboardSection === "restore_required"
+                ? "Nothing needs a snapshot restore"
+                : workspaceState.dashboardSection === "unrecoverable"
+                  ? "No unrecoverable workspaces"
+                  : "No workspaces found"
+            }
+            emptyDescription={
+              workspaceState.dashboardSection === "restore_required"
+                ? "Workspaces missing on disk but with an AVAILABLE snapshot appear here."
+                : workspaceState.dashboardSection === "unrecoverable"
+                  ? "Workspaces whose project data is gone and have no snapshot appear here so you can remove them without cluttering the main list."
+                  : "Try a different search or create a fresh workspace to populate the grid."
+            }
             onOpen={workspaceState.openWorkspace}
             onDelete={workspaceState.deleteWorkspace}
             onRestart={workspaceState.restartWorkspace}

@@ -1,5 +1,8 @@
 export type WorkspaceStatus = "setting-up" | "running" | "stopped" | "restarting" | "error";
 
+/** Control-plane assessment of on-disk project layout vs snapshots (GET /workspaces/{id}). */
+export type ProjectDataLifecycle = "ok" | "unknown" | "restore_required" | "unrecoverable";
+
 export type Workspace = {
   id: number;
   name: string;
@@ -21,6 +24,9 @@ export type Workspace = {
   reopenIssues?: string[];
   /** AVAILABLE snapshots count from GET /workspaces/{id} (restore when project data is missing). */
   restorableSnapshotCount?: number;
-  /** True when reopen issues indicate the persisted project directory is absent. */
+  /** True when persisted project data is missing (restore or remove). */
   projectDirectoryMissing?: boolean;
+  projectDataLifecycle?: ProjectDataLifecycle;
+  /** Short hint from the API; avoid showing raw reopen_issues on cards. */
+  projectDataUserMessage?: string | null;
 };

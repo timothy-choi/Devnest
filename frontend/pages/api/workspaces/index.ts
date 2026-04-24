@@ -30,6 +30,8 @@ type BackendWorkspaceDetail = {
   last_stopped: string | null;
   reopen_issues?: string[];
   restorable_snapshot_count?: number;
+  project_data_lifecycle?: "ok" | "unknown" | "restore_required" | "unrecoverable";
+  project_data_user_message?: string | null;
 };
 
 function mapDetail(detail: BackendWorkspaceDetail) {
@@ -49,6 +51,8 @@ function mapDetail(detail: BackendWorkspaceDetail) {
     lastErrorMessage: detail.last_error_message,
     reopenIssues: detail.reopen_issues ?? [],
     restorableSnapshotCount: detail.restorable_snapshot_count ?? 0,
+    projectDataLifecycle: detail.project_data_lifecycle ?? "ok",
+    projectDataUserMessage: detail.project_data_user_message ?? null,
   };
 }
 

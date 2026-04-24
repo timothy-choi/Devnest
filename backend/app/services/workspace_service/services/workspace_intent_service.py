@@ -57,7 +57,10 @@ from app.services.workspace_service.services.workspace_session_service import (
 )
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
-from app.services.node_execution_service.workspace_project_dir import workspace_project_dir_name
+from app.services.node_execution_service.workspace_project_dir import (
+    workspace_bundle_project_data_present,
+    workspace_project_dir_name,
+)
 from app.services.reconcile_service.decisions import gateway_route_needs_repair, route_row_for_workspace
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
@@ -146,6 +149,9 @@ class WorkspaceAttachResult:
     issues: tuple[str, ...] = field(default_factory=tuple)
 
 
+# User-visible reopen blocker when host project bundle or ``project/`` subtree is absent (no paths).
+_PROJECT_DATA_MISSING_SHORT_ISSUE = "Persisted project data is missing on the execution host."
+
 _BUSY_STATUSES: frozenset[str] = frozenset(
     {
         WorkspaceStatus.CREATING.value,
@@ -180,27 +186,27 @@ def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int
     return ws
 
 
-def _compute_workspace_reopen_issues(
+def _workspace_project_storage_reopen_assessment(
     ws: Workspace,
     *,
-    rt: WorkspaceRuntime | None = None,
-) -> list[str]:
-    """Detect stale gateway hosts or missing/legacy project dirs vs current Settings (best-effort, local FS).
+    _rt: WorkspaceRuntime | None = None,
+) -> tuple[list[str], bool | None]:
+    """Return ``(reopen_issue_messages, project_data_missing)``.
 
-    Project-directory checks run only when ``WORKSPACE_PROJECTS_BASE`` resolves to a directory **on this
-    process's filesystem** so the control plane does not block remote-only deployments with false
-    positives. When that path is visible, missing persisted project data is a reopen blocker even if a
-    container row still exists (stale placement vs empty bind).
+    ``project_data_missing`` is ``True`` when the expected bundle path is missing or has no usable
+    project subtree, ``False`` when data is present, and ``None`` when no filesystem check ran
+    (remote control plane, transitional status, or ``WORKSPACE_PROJECTS_BASE`` unset / not on disk).
     """
     issues: list[str] = []
+    project_data_missing: bool | None = None
     if ws.status == WorkspaceStatus.DELETED.value:
-        return issues
+        return issues, project_data_missing
     from app.libs.common.config import get_settings  # noqa: PLC0415
 
     settings = get_settings()
     wid = ws.workspace_id
     if wid is None:
-        return issues
+        return issues, project_data_missing
     wid_s = str(int(wid))
     key = (ws.project_storage_key or "").strip() or None
 
@@ -223,7 +229,6 @@ def _compute_workspace_reopen_issues(
         if root.is_dir():
             dir_name = workspace_project_dir_name(wid_s, key)
             canon = root / dir_name
-            canon_ok = canon.is_dir()
             legacy_candidates = [
                 Path(f"/tmp/devnest-workspaces/ws-{wid_s}"),
                 Path(f"/tmp/devnest-workspaces/{wid_s}"),
@@ -232,19 +237,46 @@ def _compute_workspace_reopen_issues(
                 legacy_candidates.append(Path(f"/tmp/devnest-workspaces/{wid_s}-{key}"))
             legacy_hits = [str(p) for p in legacy_candidates if p.is_dir()]
 
-            if not canon_ok:
-                msg = (
-                    f"Project directory is missing at {canon}; restore from snapshot if available. "
-                    "(DevNest will not create an empty tree for an existing workspace.)"
+            if not canon.is_dir():
+                project_data_missing = True
+                issues.append(_PROJECT_DATA_MISSING_SHORT_ISSUE)
+                logger.info(
+                    "workspace_project_bundle_missing",
+                    extra={
+                        "workspace_id": wid_s,
+                        "expected_bundle_path": str(canon),
+                        "legacy_candidate_hits": legacy_hits,
+                    },
                 )
                 if legacy_hits:
-                    msg += f" Legacy data exists under {legacy_hits[0]}; migrate into WORKSPACE_PROJECTS_BASE."
-                issues.append(msg)
-            elif legacy_hits:
-                issues.append(
-                    f"Legacy project directories still exist ({', '.join(legacy_hits)}); remove or migrate to avoid confusion.",
+                    issues.append(
+                        "Legacy workspace data may exist outside WORKSPACE_PROJECTS_BASE; see server logs for paths.",
+                    )
+            elif not workspace_bundle_project_data_present(canon):
+                project_data_missing = True
+                issues.append(_PROJECT_DATA_MISSING_SHORT_ISSUE)
+                logger.info(
+                    "workspace_project_data_incomplete",
+                    extra={"workspace_id": wid_s, "bundle_path": str(canon)},
                 )
+            else:
+                project_data_missing = False
+                if legacy_hits:
+                    issues.append(
+                        "Legacy workspace directories still exist under temporary paths; "
+                        "remove or migrate them to avoid confusion.",
+                    )
 
+    return issues, project_data_missing
+
+
+def _compute_workspace_reopen_issues(
+    ws: Workspace,
+    *,
+    rt: WorkspaceRuntime | None = None,
+) -> list[str]:
+    """Detect stale gateway hosts or missing project dirs vs current Settings (best-effort, local FS)."""
+    issues, _missing = _workspace_project_storage_reopen_assessment(ws, _rt=rt)
     return issues
 
 
@@ -1464,12 +1496,27 @@ def get_workspace(
     )
     latest = _latest_config_version(session, workspace_id)
     base = WorkspaceDetailResponse.model_validate(ws)
-    reopen = _compute_workspace_reopen_issues(ws, rt=rt)
+    reopen, data_missing = _workspace_project_storage_reopen_assessment(ws, _rt=rt)
     snaps = _restorable_snapshot_count(session, workspace_id)
+
+    lifecycle: str = "ok"
+    user_msg: str | None = None
+    if data_missing is True:
+        lifecycle = "restore_required" if snaps > 0 else "unrecoverable"
+        user_msg = (
+            "Restore an available snapshot, then start the workspace again."
+            if snaps > 0
+            else "No snapshot is available; you can permanently remove this workspace."
+        )
+    elif data_missing is None:
+        lifecycle = "unknown"
+
     return base.model_copy(
         update={
             "latest_config_version": latest,
             "reopen_issues": reopen,
             "restorable_snapshot_count": snaps,
+            "project_data_lifecycle": lifecycle,
+            "project_data_user_message": user_msg,
         },
     )
