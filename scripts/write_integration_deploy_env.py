@@ -8,16 +8,18 @@ URLs with & ? = are not mangled by the shell.
 
 Requires SQLAlchemy-style Postgres DSN:
   postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
-Rejects libpq keyword-style DSNs (host=... port=... dbname=...).
+Also accepts libpq keyword-style DSNs (host=... port=... dbname=...) and normalizes them
+to the same SQLAlchemy form (common for RDS / GitHub DATABASE_URL secrets).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 # Keys merged from os.environ in sync-from-env (after deploy-ec2.sh normalizes the shell).
 SYNC_FROM_ENV_KEYS = (
@@ -46,23 +48,122 @@ def _is_libpq_keyword_dsn(s: str) -> bool:
     return False
 
 
-def validate_postgresql_psycopg_url(name: str, url: str) -> None:
-    raw = url or ""
-    if "\n" in raw or "\r" in raw:
-        raise ValueError(f"{name} must be a single line (no embedded newlines); check GitHub secret / CI quoting")
-    url = raw.strip()
-    if not url:
+_LIBPQ_NETLOC_KEYS = frozenset(
+    {"host", "hostaddr", "port", "dbname", "database", "user", "username", "password"}
+)
+
+
+def parse_libpq_keyword_conninfo(conninfo: str) -> dict[str, str]:
+    """Parse a libpq keyword connection string into lowercase keys (libpq rules for quoted values)."""
+    s = conninfo.strip()
+    if not s:
+        return {}
+    i = 0
+    n = len(s)
+    out: dict[str, str] = {}
+    while i < n:
+        while i < n and s[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        j = i
+        while j < n and s[j] != "=":
+            j += 1
+        if j >= n or s[j] != "=":
+            raise ValueError(f"malformed libpq token near {s[i : i + 32]!r}")
+        key = s[i:j].strip().lower()
+        i = j + 1
+        if i >= n:
+            out[key] = ""
+            break
+        if s[i] == "'":
+            i += 1
+            parts: list[str] = []
+            while i < n:
+                if s[i] == "'":
+                    if i + 1 < n and s[i + 1] == "'":
+                        parts.append("'")
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                parts.append(s[i])
+                i += 1
+            out[key] = "".join(parts)
+        else:
+            j = i
+            while j < n and not s[j].isspace():
+                j += 1
+            out[key] = s[i:j]
+            i = j
+    return out
+
+
+def _ipv4_host(host: str) -> bool:
+    return bool(re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host))
+
+
+def _format_host_for_url(host: str) -> str:
+    if ":" in host and not _ipv4_host(host):
+        return f"[{host}]"
+    return host
+
+
+def _quote_userinfo(part: str) -> str:
+    return quote(part, safe="")
+
+
+def _libpq_keyword_dsn_to_psycopg_url(conninfo: str) -> str:
+    d = parse_libpq_keyword_conninfo(conninfo)
+    host = (d.get("host") or d.get("hostaddr") or "").strip()
+    if not host:
+        raise ValueError("libpq DSN: missing host (or hostaddr)")
+    port = (d.get("port") or "5432").strip() or "5432"
+    dbname = (d.get("dbname") or d.get("database") or "").strip()
+    if not dbname:
+        raise ValueError("libpq DSN: missing dbname (or database)")
+    user = (d.get("user") or d.get("username") or "").strip()
+    password = d.get("password") or ""
+
+    host_f = _format_host_for_url(host)
+    path_db = quote(dbname, safe="")
+
+    if user or password:
+        if password:
+            auth = f"{_quote_userinfo(user)}:{_quote_userinfo(password)}@"
+        else:
+            auth = f"{_quote_userinfo(user)}@"
+    else:
+        auth = ""
+    netloc = f"{auth}{host_f}:{port}"
+    base = f"postgresql+psycopg://{netloc}/{path_db}"
+
+    extra = {k: v for k, v in d.items() if k not in _LIBPQ_NETLOC_KEYS and v != ""}
+    if not extra:
+        return base
+    q = urlencode(sorted(extra.items()))
+    return f"{base}?{q}"
+
+
+def normalize_database_url_for_deploy(name: str, url: str) -> str:
+    """Return a validated postgresql+psycopg:// URL (accepts libpq keyword DSN)."""
+    raw = (url or "").strip()
+    if not raw:
         raise ValueError(f"{name} is empty")
-    if _is_libpq_keyword_dsn(url):
+    if "\n" in raw or "\r" in raw:
         raise ValueError(
-            f"{name} looks like libpq keyword format. Use a single-line SQLAlchemy URL, e.g. "
-            "postgresql+psycopg://USER:PASSWORD@HOST:5432/DB?sslmode=require"
+            f"{name} must be a single line (no embedded newlines); check GitHub secret / CI quoting"
         )
-    if not url.startswith("postgresql+psycopg://"):
+    if _is_libpq_keyword_dsn(raw):
+        try:
+            raw = _libpq_keyword_dsn_to_psycopg_url(raw)
+        except ValueError as exc:
+            raise ValueError(f"{name}: cannot convert libpq keyword DSN ({exc})") from exc
+    if not raw.startswith("postgresql+psycopg://"):
         raise ValueError(
-            f"{name} must start with postgresql+psycopg:// (SQLAlchemy driver); got {url[:48]!r}..."
+            f"{name} must start with postgresql+psycopg:// (SQLAlchemy driver); got {raw[:48]!r}..."
         )
-    parsed = urlparse(url)
+    parsed = urlparse(raw)
     if parsed.scheme != "postgresql+psycopg":
         raise ValueError(f"{name}: invalid scheme {parsed.scheme!r}")
     if not parsed.hostname:
@@ -70,6 +171,11 @@ def validate_postgresql_psycopg_url(name: str, url: str) -> None:
     dbname = (parsed.path or "").strip("/")
     if not dbname:
         raise ValueError(f"{name}: missing database name in path (expected …/DBNAME?…)")
+    return raw
+
+
+def validate_postgresql_psycopg_url(name: str, url: str) -> None:
+    normalize_database_url_for_deploy(name, url)
 
 
 def _nonempty(name: str, val: str | None) -> str:
@@ -167,11 +273,11 @@ def cmd_write(args: argparse.Namespace) -> int:
 
 
 def _cmd_write_body() -> int:
-    db = os.environ.get("DEVNEST_CI_WRITE_DATABASE_URL", "").strip()
-    if not db:
+    db_raw = os.environ.get("DEVNEST_CI_WRITE_DATABASE_URL", "").strip()
+    if not db_raw:
         print("ERROR: DEVNEST_CI_WRITE_DATABASE_URL is required.", file=sys.stderr)
         return 1
-    validate_postgresql_psycopg_url("DEVNEST_CI_WRITE_DATABASE_URL", db)
+    db = normalize_database_url_for_deploy("DEVNEST_CI_WRITE_DATABASE_URL", db_raw)
 
     bucket = _nonempty("DEVNEST_CI_WRITE_S3_BUCKET", os.environ.get("DEVNEST_CI_WRITE_S3_BUCKET"))
     region = _nonempty("DEVNEST_CI_WRITE_AWS_REGION", os.environ.get("DEVNEST_CI_WRITE_AWS_REGION"))
@@ -261,12 +367,16 @@ def _is_bundled_compose_postgres(url: str) -> bool:
 
 
 def validate_parsed(data: dict[str, str]) -> None:
-    db = (data.get("DATABASE_URL") or "").strip()
-    if not db:
+    raw_db = (data.get("DATABASE_URL") or "").strip()
+    if not raw_db:
         raise ValueError("DATABASE_URL missing in file")
-    validate_postgresql_psycopg_url("DATABASE_URL", db)
-    d2 = (data.get("DEVNEST_COMPOSE_DATABASE_URL") or "").strip()
-    d3 = (data.get("DEVNEST_DATABASE_URL") or "").strip()
+    db = normalize_database_url_for_deploy("DATABASE_URL", raw_db)
+    d2 = normalize_database_url_for_deploy(
+        "DEVNEST_COMPOSE_DATABASE_URL", (data.get("DEVNEST_COMPOSE_DATABASE_URL") or "").strip()
+    )
+    d3 = normalize_database_url_for_deploy(
+        "DEVNEST_DATABASE_URL", (data.get("DEVNEST_DATABASE_URL") or "").strip()
+    )
     if d2 != db or d3 != db:
         raise ValueError("DATABASE_URL, DEVNEST_COMPOSE_DATABASE_URL, and DEVNEST_DATABASE_URL must match")
 
