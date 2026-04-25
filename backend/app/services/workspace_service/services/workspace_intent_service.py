@@ -1362,7 +1362,13 @@ def create_workspace(
     if schedule_result.invalid_request:
         raise WorkspaceSchedulingInvalidError(schedule_result.message)
     if schedule_result.execution_node is None or schedule_result.insufficient_capacity:
-        raise WorkspaceSchedulingCapacityError(schedule_result.message)
+        # Full placement diagnostics are already logged by ``schedule_workspace``; API clients get a
+        # short, stable message (internal ``NoSchedulableNodeError`` strings are operator-oriented).
+        raise WorkspaceSchedulingCapacityError(
+            "No execution capacity is available to create a workspace. The node may be at its limit "
+            "for CPU, memory, disk, or concurrent workspaces. Stop or delete unused workspaces, or "
+            "ask an operator to raise execution node limits, then try again.",
+        )
     chosen = schedule_result.execution_node
     assert chosen.id is not None
 

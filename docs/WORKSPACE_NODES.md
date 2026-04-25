@@ -48,7 +48,7 @@ Workspace **create** selects an execution node via ``schedule_workspace`` → ``
 - **FK claims:** ``Workspace.execution_node_id`` with a non-terminal status (includes ``CREATING`` before runtime exists).
 - **Runtime pins:** ``WorkspaceRuntime.node_key`` with the same non-terminal cohort (covers legacy rows without an FK).
 
-Both counts must stay **below** ``execution_node.max_workspaces``. If no node qualifies, the API returns **503** with ``WorkspaceSchedulingCapacityError`` and **does not** insert a workspace row.
+Both counts must stay **below** ``execution_node.max_workspaces``. If no node qualifies, the API returns **503** with a **short, user-facing** ``detail`` string and **does not** insert a workspace row. Verbose placement diagnostics remain in application logs (``placement.no_schedulable_node`` / scheduler events), not in the HTTP body.
 
 ## Later phases
 
