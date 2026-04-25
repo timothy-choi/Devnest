@@ -30,11 +30,16 @@ _devnest_load_integration_env_file() {
 }
 
 _devnest_compose() {
-  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
-    docker compose --env-file "${INTEGRATION_ENV_FILE}" -f "${COMPOSE}" "$@"
-  else
-    docker compose -f "${COMPOSE}" "$@"
+  # Cwd is ${REPO_DIR} for all invocations; use the repo-relative name requested in deploy docs.
+  if [[ -f ".env.integration" ]]; then
+    docker compose --env-file .env.integration -f "${COMPOSE}" "$@"
+    return
   fi
+  if [[ -n "${DATABASE_URL:-}" ]]; then
+    echo "ERROR: ${INTEGRATION_ENV_FILE} is missing but DATABASE_URL is set (RDS deploy requires a generated integration env file)." >&2
+    exit 1
+  fi
+  docker compose -f "${COMPOSE}" "$@"
 }
 
 _devnest_deploy_env_presence() {
@@ -57,6 +62,9 @@ _devnest_deploy_env_presence() {
   if [[ -n "${OAUTH_GITHUB_CLIENT_SECRET:-}" ]]; then echo "OAUTH_GITHUB_CLIENT_SECRET: set"; else echo "OAUTH_GITHUB_CLIENT_SECRET: missing"; fi
   if [[ -n "${OAUTH_GOOGLE_CLIENT_ID:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_ID: set"; else echo "OAUTH_GOOGLE_CLIENT_ID: missing"; fi
   if [[ -n "${OAUTH_GOOGLE_CLIENT_SECRET:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_SECRET: set"; else echo "OAUTH_GOOGLE_CLIENT_SECRET: missing"; fi
+  if [[ -n "${DEVNEST_BASE_DOMAIN:-}" ]]; then echo "DEVNEST_BASE_DOMAIN: set"; else echo "DEVNEST_BASE_DOMAIN: missing"; fi
+  if [[ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_API_BASE_URL: set"; else echo "NEXT_PUBLIC_API_BASE_URL: missing"; fi
+  if [[ -n "${NEXT_PUBLIC_APP_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_APP_BASE_URL: set"; else echo "NEXT_PUBLIC_APP_BASE_URL: missing"; fi
   echo "---"
 }
 
@@ -125,7 +133,7 @@ if [[ -z "${DEVNEST_BASE_DOMAIN:-}" ]]; then
   fi
   if [[ -n "${_pub_ip:-}" ]] && [[ "${_pub_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     export DEVNEST_BASE_DOMAIN="${_pub_ip//./-}.sslip.io"
-    echo "DEVNEST_BASE_DOMAIN unset: using ${DEVNEST_BASE_DOMAIN} (EC2 public-ipv4 → sslip.io)."
+    echo "DEVNEST_BASE_DOMAIN unset: derived from EC2 metadata → sslip.io (value not printed)."
   fi
   unset _meta_token _pub_ip || true
 fi
@@ -148,7 +156,7 @@ if [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
     if [[ "${GCLOUD_OAUTH_PUBLIC_BASE_URL:-}" == "${_fe_before}" ]]; then
       export GCLOUD_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
     fi
-    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL raw IPv4 normalized to ${DEVNEST_FRONTEND_PUBLIC_BASE_URL} for OAuth callbacks."
+    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL raw IPv4 normalized to sslip.io form for OAuth (value not printed)."
     unset _fe_before || true
   fi
   unset _frontend_host _frontend_name _frontend_port || true
@@ -166,7 +174,7 @@ elif [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
     export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${_pub_ip//./-}.sslip.io:3000"
     export GITHUB_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
     export GCLOUD_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
-    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL unset: using ${DEVNEST_FRONTEND_PUBLIC_BASE_URL} for OAuth callbacks."
+    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL unset: derived from EC2 metadata (value not printed)."
   fi
   unset _meta_token _pub_ip || true
 fi
@@ -181,8 +189,12 @@ if [[ -z "${NEXT_PUBLIC_API_BASE_URL:-}" ]] && [[ -n "${DEVNEST_FRONTEND_PUBLIC_
   else
     export NEXT_PUBLIC_API_BASE_URL="${_fe}:8000"
   fi
-  echo "NEXT_PUBLIC_API_BASE_URL unset: derived ${NEXT_PUBLIC_API_BASE_URL} from DEVNEST_FRONTEND_PUBLIC_BASE_URL."
+  echo "NEXT_PUBLIC_API_BASE_URL unset: derived from DEVNEST_FRONTEND_PUBLIC_BASE_URL (value not printed)."
   unset _fe || true
+fi
+# Keep browser app origin aligned with the (possibly sslip-normalized) frontend base for compose --env-file sync.
+if [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
+  export NEXT_PUBLIC_APP_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
 fi
 
 if [[ -n "${DEVNEST_DEPLOY_GIT_REF:-}" ]]; then
@@ -195,6 +207,26 @@ elif [ "${BRANCH}" = "main" ]; then
 else
   git checkout "${BRANCH}" 2>/dev/null || git checkout -b "${BRANCH}" "origin/${BRANCH}"
   git reset --hard "origin/${BRANCH}"
+fi
+
+_writer_py="${REPO_DIR}/scripts/write_integration_deploy_env.py"
+if [[ -n "${DATABASE_URL:-}" ]] && [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+  if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "${_writer_py}" ]]; then
+    echo "ERROR: RDS deploy requires python3 and ${_writer_py} to validate .env.integration." >&2
+    exit 1
+  fi
+fi
+if [[ -f "${INTEGRATION_ENV_FILE}" ]] && [[ -f "${_writer_py}" ]] && command -v python3 >/dev/null 2>&1; then
+  python3 "${_writer_py}" sync-from-env --path "${INTEGRATION_ENV_FILE}" || exit 1
+  set -a
+  # shellcheck disable=SC1091
+  source "${INTEGRATION_ENV_FILE}"
+  set +a
+  python3 "${_writer_py}" validate --path "${INTEGRATION_ENV_FILE}" || exit 1
+fi
+if [[ -n "${DATABASE_URL:-}" ]] && [[ ! -f "${INTEGRATION_ENV_FILE}" ]]; then
+  echo "ERROR: DATABASE_URL is set but ${INTEGRATION_ENV_FILE} is missing (generate it before deploy-ec2.sh)." >&2
+  exit 1
 fi
 
 _devnest_deploy_env_presence
