@@ -86,6 +86,41 @@ export type NotificationRecord = {
   createdAt: string;
 };
 
+export type SystemStatusPayload = {
+  backendOk: boolean;
+  databaseConnected: boolean;
+  databaseHost: string;
+  databaseName: string;
+  snapshotStorage: {
+    provider: string;
+    bucket: string;
+    prefix: string;
+    region: string;
+    root: string;
+  };
+  gateway: {
+    enabled: boolean;
+    baseDomain: string;
+    publicScheme: string;
+    publicPort: number;
+    authEnabled: boolean;
+    routeAdminHost: string;
+  };
+  worker: {
+    deploymentModel: string;
+    inProcessEnabled: boolean;
+    inProcessTaskRunning: boolean | null;
+    jobsQueued: number;
+    jobsRunning: number;
+  };
+  application: {
+    devnestEnv: string;
+    version: string | null;
+    gitCommit: string | null;
+  };
+  generatedAt: string;
+};
+
 export type NotificationPreferenceRecord = {
   preferenceId: number;
   notificationType: string;
@@ -157,6 +192,13 @@ export type SignupSuccess = {
 };
 
 export const browserApi = {
+  system: {
+    async status() {
+      return request<SystemStatusPayload>("/api/system/status", {
+        method: "GET",
+      });
+    },
+  },
   auth: {
     async me() {
       return request<{ user: AuthUser | null }>("/api/auth/me", { method: "GET" });

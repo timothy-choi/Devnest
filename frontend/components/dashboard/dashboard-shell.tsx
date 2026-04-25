@@ -9,6 +9,7 @@ import { DashboardSidebar } from "@/components/dashboard/dashboard-sidebar";
 import { NotificationCenterDialog } from "@/components/dashboard/notification-center-dialog";
 import { NotificationToastStack } from "@/components/dashboard/notification-toast-stack";
 import { DashboardTopNav } from "@/components/dashboard/dashboard-top-nav";
+import { SystemStatusSummaryCard } from "@/components/dashboard/system-status-summary-card";
 import { WorkspaceGrid } from "@/components/dashboard/workspace-grid";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +49,7 @@ export function DashboardShell() {
         <DashboardSidebar onCreateWorkspace={workspaceState.openCreateDialog} />
 
         <section className="flex-1 space-y-6">
+          <SystemStatusSummaryCard />
           <div className="rounded-[28px] border border-white/70 bg-white/80 p-5 shadow-[0_22px_60px_-42px_rgba(15,23,42,0.45)] backdrop-blur sm:p-6">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>

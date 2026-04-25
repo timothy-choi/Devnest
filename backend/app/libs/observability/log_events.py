@@ -64,6 +64,10 @@ class LogEvent:
     """Stable event names (log record message = event name)."""
 
     WORKSPACE_INTENT_CREATED = "workspace.intent.created"
+    WORKSPACE_INTENT_START_QUEUED = "workspace.intent.start_queued"
+    WORKSPACE_OPEN_ATTACH_ACCEPTED = "workspace.open.attach_accepted"
+    WORKSPACE_STATUS_ERROR = "workspace.status.error"
+    WORKSPACE_RECOVERY_RECONCILE = "workspace.recovery.reconcile"
     WORKSPACE_JOB_QUEUED = "workspace.job.queued"
     WORKSPACE_JOB_STARTED = "workspace.job.started"
     WORKSPACE_JOB_SUCCEEDED = "workspace.job.succeeded"
@@ -83,6 +87,9 @@ class LogEvent:
     ORCHESTRATOR_SNAPSHOT_IMPORT_SUCCEEDED = "orchestrator.snapshot.import_succeeded"
 
     WORKSPACE_SNAPSHOT_CREATED = "workspace.snapshot.created"
+    WORKSPACE_SNAPSHOT_REQUESTED = "workspace.snapshot.requested"
+    WORKSPACE_SNAPSHOT_COMPLETED = "workspace.snapshot.completed"
+    WORKSPACE_SNAPSHOT_DOWNLOAD_REQUESTED = "workspace.snapshot.download_requested"
     WORKSPACE_SNAPSHOT_FAILED = "workspace.snapshot.failed"
     WORKSPACE_SNAPSHOT_RESTORED = "workspace.snapshot.restored"
     WORKSPACE_SNAPSHOT_DELETED = "workspace.snapshot.deleted"

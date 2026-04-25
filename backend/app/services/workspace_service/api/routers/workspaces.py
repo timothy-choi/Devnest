@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 
 from typing import Annotated
@@ -13,6 +14,7 @@ from sqlmodel import Session
 from app.libs.common.config import get_settings
 
 from app.libs.db.database import get_db, get_engine
+from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.security.rate_limit import sse_rate_limit
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
@@ -55,6 +57,7 @@ from app.services.workspace_service.services.workspace_session_service import (
 )
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+_attach_logger = logging.getLogger(__name__)
 
 
 def _correlation_id_from_request(request: Request) -> str | None:
@@ -409,6 +412,16 @@ def post_workspace_attach(
     except WorkspaceServiceError as exc:
         _raise_workspace_http(exc)
     payload = _attach_response(out)
+    if out.accepted:
+        log_event(
+            _attach_logger,
+            LogEvent.WORKSPACE_OPEN_ATTACH_ACCEPTED,
+            correlation_id=_correlation_id_from_request(request),
+            workspace_id=workspace_id,
+            user_id=uid,
+            gateway_url_present=bool((out.gateway_url or "").strip()),
+            public_host_present=bool((out.public_host or "").strip()),
+        )
     resp = JSONResponse(status_code=status.HTTP_200_OK, content=payload.model_dump(mode="json"))
     settings = get_settings()
     if (

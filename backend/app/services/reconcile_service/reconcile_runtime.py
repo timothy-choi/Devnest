@@ -681,6 +681,14 @@ def _reconcile_running(
             workspace_id=wid,
             workspace_job_id=job.workspace_job_id,
         )
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_RECOVERY_RECONCILE,
+            correlation_id=job.correlation_id,
+            workspace_id=wid,
+            workspace_job_id=job.workspace_job_id,
+            recovery_kind="runtime",
+        )
         record_workspace_event(
             session,
             workspace_id=wid,
@@ -720,6 +728,14 @@ def _reconcile_running(
                 correlation_id=job.correlation_id,
                 workspace_id=wid,
                 workspace_job_id=job.workspace_job_id,
+            )
+            log_event(
+                logger,
+                LogEvent.WORKSPACE_RECOVERY_RECONCILE,
+                correlation_id=job.correlation_id,
+                workspace_id=wid,
+                workspace_job_id=job.workspace_job_id,
+                recovery_kind="gateway_route",
             )
             record_workspace_event(
                 session,

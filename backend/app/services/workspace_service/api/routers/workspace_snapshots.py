@@ -133,6 +133,7 @@ def get_workspace_snapshots(
     response_class=FileResponse,
 )
 def get_workspace_snapshot_archive(
+    request: Request,
     workspace_id: int,
     snapshot_id: int | None = Query(
         default=None,
@@ -148,6 +149,7 @@ def get_workspace_snapshot_archive(
             workspace_id=workspace_id,
             owner_user_id=current.user_auth_id,
             snapshot_id=snapshot_id,
+            correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as e:
         _raise_snapshot_http(e)

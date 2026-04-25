@@ -868,6 +868,15 @@ def _persist_intent(
         workspace_job_id=job.workspace_job_id,
         job_type=job_type,
     )
+    if job_type in _START_JOB_TYPES:
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_INTENT_START_QUEUED,
+            correlation_id=cid,
+            workspace_id=ws.workspace_id,
+            workspace_job_id=job.workspace_job_id,
+            job_type=job_type,
+        )
 
     record_workspace_event(
         session,
