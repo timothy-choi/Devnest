@@ -1,6 +1,7 @@
 # Production-style Next.js image for CI / docker-compose.integration.yml / EC2.
 # Build with NEXT_PUBLIC_API_BASE_URL pointing at the reachable API (e.g. http://HOST:8000).
-FROM node:20-alpine AS deps
+# Base from AWS Public ECR mirror of docker.io/library/node (same bits; avoids Docker Hub 503/504 in CI).
+FROM public.ecr.aws/docker/library/node:20-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 # CI/registry flakiness (ECONNRESET): bump retries and re-run npm ci a few times before failing.
@@ -14,7 +15,7 @@ RUN npm config set fetch-retries 10 \
        done; \
        exit 1
 
-FROM node:20-alpine AS builder
+FROM public.ecr.aws/docker/library/node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -24,7 +25,7 @@ ARG NEXT_PUBLIC_APP_BASE_URL=http://localhost:3000
 ENV NEXT_PUBLIC_APP_BASE_URL=$NEXT_PUBLIC_APP_BASE_URL
 RUN npm run build
 
-FROM node:20-alpine AS runner
+FROM public.ecr.aws/docker/library/node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 # Defaults for ``next start`` in Compose (override via compose ``environment:`` as needed).
