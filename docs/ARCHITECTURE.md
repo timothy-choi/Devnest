@@ -1,5 +1,65 @@
 # DevNest Architecture
 
+## Reader's guide: control plane, runtime, and storage
+
+This section orients **demos and code reading** before the deeper component sections below.
+
+### Control plane
+
+The **control plane** is everything that decides *what* should run, persists intent in PostgreSQL, and drives side effects asynchronously:
+
+- **FastAPI** (`backend/app`) — HTTP API for auth, workspaces, snapshots, internal gateway auth, and health (`GET /ready`).
+- **Job queue** — Mutations enqueue rows in `WorkspaceJob`; a **worker** (`workspace-worker` service or in-process worker) claims jobs with `FOR UPDATE SKIP LOCKED`, runs Docker/topology/storage steps, and updates workspace and snapshot state.
+- **Gateway client** — Registers per-workspace routes with **route-admin**, which Traefik consumes so `ws-<id>.<base>` reaches the right upstream.
+
+The API and worker share the **same** database URL and snapshot storage settings in integration compose so they never disagree on RDS vs bundled Postgres or S3 vs local archives.
+
+### Workspace runtime
+
+Each **workspace** is a Docker container based on the workspace image (`Dockerfile.workspace`), running **code-server** with project files under a host **bind mount** (`WORKSPACE_PROJECTS_BASE` / `DEVNEST_WORKSPACE_PROJECTS_BASE` in config). The orchestrator:
+
+- Creates/starts/stops/removes containers and optional **Linux topology** (bridge/veth, IP lease) on nodes that run Docker.
+- Runs **health probes** (TCP and optional HTTP to the IDE) before marking bring-up complete.
+
+Live edits are on disk; a **snapshot** is an explicit export to a `.tar.gz` archive (then uploaded to S3 when that provider is selected).
+
+### Traefik routing
+
+**Traefik** terminates HTTP(S) on the edge and routes by hostname:
+
+- Pattern: `{DEVNEST_GATEWAY_PUBLIC_SCHEME}://ws-<workspace_id>.<DEVNEST_BASE_DOMAIN>[:port]/`
+- **route-admin** pushes dynamic configuration so each workspace hostname maps to the workspace container’s code-server port on the Docker network.
+- Optional **ForwardAuth** (`GET /internal/gateway/auth`): Traefik asks the API to validate the short-lived workspace session before proxying; enable with `DEVNEST_GATEWAY_AUTH_ENABLED=true` when both backend and route-admin are configured for it.
+
+Public demos require DNS (or sslip.io-style names) where `*.base` resolves to the Traefik host from the **viewer’s** browser—not loopback-only names for remote clients.
+
+### RDS metadata
+
+**Amazon RDS** (or any managed Postgres) holds relational data: users, workspaces, runtimes, jobs, snapshots *metadata*, audit, usage, etc. The application uses **SQLAlchemy** URLs (`postgresql+psycopg://…`); Alembic runs migrations on startup in the integration image command.
+
+When `DEVNEST_EXPECT_EXTERNAL_POSTGRES=true`, Settings refuse a DSN that still points at the bundled compose service name `postgres`, to avoid silent misconfiguration.
+
+### S3 snapshots
+
+Snapshot **archives** (not live files) go to S3 when `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3`:
+
+- Object key shape: `{prefix}/ws-{workspace_id}/snapshot-{snapshot_id}.tar.gz` under the configured bucket (see `S3SnapshotStorageProvider`).
+- The worker exports to a **local staging path**, then **uploads**; download/restore paths **download** from S3 to staging first.
+- Non-404 S3 errors surface as failures so “missing snapshot” is not confused with **storage outages**.
+
+With external Postgres or remote-gateway expect flags, **S3 is required**—there is no silent fallback to local disk in that posture.
+
+### Failure handling
+
+Major mechanisms (expanded later in this document):
+
+- **Bring-up rollback** — If container or topology steps fail after partial progress, or aggregate health is unhealthy, the orchestrator stops the engine, detaches topology, and releases IP leases where possible; the worker may mark `CLEANUP_REQUIRED` if rollback cannot finish.
+- **Stuck jobs** — Jobs in `RUNNING` too long are reclaimed (retry or terminal fail) per `WORKSPACE_JOB_STUCK_TIMEOUT_SECONDS`.
+- **Reconcile** — Optional background loop re-enqueues `RECONCILE_RUNTIME` for RUNNING/ERROR workspaces; PostgreSQL advisory locks reduce duplicate repairs; **topology janitor** cleans stale attachments and orphan leases before reconcile work.
+- **Durable cleanup tasks** — Failed operations enqueue cleanup rows processed by reconcile and worker ticks so detach/release work is not “only best effort in memory.”
+
+---
+
 ## Overview
 
 DevNest is a cloud-hosted coding environment platform — a "Google Drive for coding." It provisions isolated workspace containers per user, manages their lifecycle, and exposes them through a reverse proxy gateway.
