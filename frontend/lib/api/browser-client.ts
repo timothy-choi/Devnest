@@ -115,6 +115,32 @@ export type CreateWorkspaceInput = {
   aiModel?: string;
 };
 
+export type CreateSnapshotInput = {
+  name: string;
+  description?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type CreateSnapshotAccepted = {
+  workspace_id: number;
+  snapshot_id: number;
+  job_id: number;
+  status: string;
+};
+
+/** GET /workspaces/{id}/snapshots — snake_case from FastAPI. */
+export type SnapshotListItem = {
+  workspace_snapshot_id: number;
+  workspace_id: number;
+  name: string;
+  description: string | null;
+  status: string;
+  size_bytes: number | null;
+  storage_backend: "s3" | "local" | "pending" | "unknown";
+  created_at: string;
+  metadata: Record<string, unknown> | null;
+};
+
 export type SaveNotificationPreferencesInput = {
   preferences: Array<{
     notificationType: string;
@@ -187,6 +213,17 @@ export const browserApi = {
     async remove(id: number) {
       return request<{ message: string }>(`/api/workspaces/${id}`, {
         method: "DELETE",
+      });
+    },
+    async createSnapshot(id: number, payload: CreateSnapshotInput) {
+      return request<CreateSnapshotAccepted>(`/api/workspaces/${id}/snapshots`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    async listSnapshots(id: number) {
+      return request<SnapshotListItem[]>(`/api/workspaces/${id}/snapshots`, {
+        method: "GET",
       });
     },
   },

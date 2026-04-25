@@ -12,7 +12,9 @@ type WorkspaceGridProps = {
   onRestart: (id: string) => void;
   onDelete: (id: string) => void;
   onDownload: (id: string) => void;
+  onSaveWorkspace: (id: string) => void;
   onRunWorkflow: (id: string) => void;
+  snapshotBusyWorkspaceId: number | null;
 };
 
 export function WorkspaceGrid({
@@ -26,7 +28,9 @@ export function WorkspaceGrid({
   onRestart,
   onDelete,
   onDownload,
+  onSaveWorkspace,
   onRunWorkflow,
+  snapshotBusyWorkspaceId,
 }: WorkspaceGridProps) {
   if (isLoading) {
     return (
@@ -64,9 +68,11 @@ export function WorkspaceGrid({
           onOpen={onOpen}
           onDelete={onDelete}
           onDownload={onDownload}
+          onSaveWorkspace={onSaveWorkspace}
           onRestart={onRestart}
           onRunWorkflow={onRunWorkflow}
           onStop={onStop}
+          snapshotBusyWorkspaceId={snapshotBusyWorkspaceId}
         />
       ))}
     </div>

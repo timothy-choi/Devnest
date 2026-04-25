@@ -18,6 +18,8 @@ type BackendOptions = {
   retryOnUnauthorized?: boolean;
   accessTokenOverride?: string;
   refreshTokenOverride?: string;
+  /** Optional Accept header override (e.g. wildcard) for non-JSON responses. */
+  accept?: string;
 };
 
 let _serverBackendResolutionLogged = false;
@@ -44,6 +46,7 @@ export async function backendRequest({
   retryOnUnauthorized = true,
   accessTokenOverride,
   refreshTokenOverride,
+  accept,
 }: BackendOptions) {
   logServerBackendResolutionOnce();
 
@@ -55,6 +58,7 @@ export async function backendRequest({
     method,
     body,
     accessToken: authenticated ? accessToken : undefined,
+    accept,
   });
 
   if (response.status !== 401 || !authenticated || !retryOnUnauthorized || !refreshToken) {
@@ -78,6 +82,7 @@ export async function backendRequest({
     method,
     body,
     accessToken: refreshedAccessToken,
+    accept,
   });
 }
 
@@ -185,14 +190,16 @@ async function sendBackendRequest({
   method,
   body,
   accessToken,
+  accept,
 }: {
   path: string;
   method: string;
   body?: unknown;
   accessToken?: string;
+  accept?: string;
 }) {
   const headers: Record<string, string> = {
-    Accept: "application/json",
+    Accept: accept ?? "application/json",
   };
 
   if (body !== undefined) {

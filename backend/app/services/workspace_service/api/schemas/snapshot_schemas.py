@@ -3,8 +3,23 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+SnapshotStorageBackend = Literal["s3", "local", "pending", "unknown"]
+
+
+def storage_backend_label(storage_uri: str) -> SnapshotStorageBackend:
+    """Map persisted ``storage_uri`` to a coarse label for API responses (no bucket paths or keys)."""
+    u = (storage_uri or "").strip().lower()
+    if u.startswith("s3://"):
+        return "s3"
+    if u.startswith("file://"):
+        return "local"
+    if u in ("", "pending"):
+        return "pending"
+    return "unknown"
 
 
 class CreateSnapshotRequest(BaseModel):
@@ -27,7 +42,9 @@ class SnapshotSummaryResponse(BaseModel):
     description: str | None
     status: str
     size_bytes: int | None
-    storage_uri: str
+    storage_backend: SnapshotStorageBackend = Field(
+        description="Where the archive is stored: s3, local filesystem, pending placement, or unknown.",
+    )
     created_at: datetime
     metadata: dict | None = None
 

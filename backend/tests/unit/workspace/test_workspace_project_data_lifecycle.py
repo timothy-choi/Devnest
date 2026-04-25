@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from sqlmodel import Session
 
+from app.services.storage.factory import get_snapshot_storage_root
 from app.services.workspace_service.models import (
     Workspace,
     WorkspaceConfig,
@@ -141,6 +142,13 @@ def test_get_workspace_project_data_restore_required_when_snapshot_exists(
         )
         session.add(snap)
         session.commit()
+        session.refresh(snap)
+        sid = snap.workspace_snapshot_id
+        assert sid is not None
+        snap_root = Path(get_snapshot_storage_root())
+        archive = snap_root / f"ws-{wid}" / f"snapshot-{sid}.tar.gz"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        archive.write_bytes(b"x")
 
     with Session(workspace_unit_engine) as session:
         detail = workspace_intent_service.get_workspace(

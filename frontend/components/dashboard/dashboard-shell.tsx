@@ -1,6 +1,7 @@
 "use client";
 
 import { Plus, Search } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { CreateWorkspaceDialog } from "@/components/dashboard/create-workspace-dialog";
@@ -15,6 +16,7 @@ import { useNotifications } from "@/hooks/use-notifications";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 
 export function DashboardShell() {
+  const queryClient = useQueryClient();
   const workspaceState = useWorkspaces();
   const notificationState = useNotifications();
   const [isNotificationCenterOpen, setNotificationCenterOpen] = useState(false);
@@ -32,7 +34,9 @@ export function DashboardShell() {
     }
 
     window.history.replaceState(window.history.state, "", "/dashboard");
-  }, []);
+    void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+    void queryClient.refetchQueries({ queryKey: ["workspaces"] });
+  }, [queryClient]);
 
   return (
     <main className="min-h-screen bg-[linear-gradient(180deg,_#f8fafc_0%,_#eef2ff_100%)] text-slate-900">
@@ -74,6 +78,12 @@ export function DashboardShell() {
           {workspaceState.actionError ? (
             <div className="rounded-[24px] border border-amber-200 bg-amber-50 px-5 py-4 text-sm text-amber-800 shadow-[0_18px_45px_-40px_rgba(15,23,42,0.45)]">
               {workspaceState.actionError}
+            </div>
+          ) : null}
+
+          {workspaceState.snapshotNotice ? (
+            <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm text-emerald-900 shadow-[0_18px_45px_-40px_rgba(15,23,42,0.45)]">
+              {workspaceState.snapshotNotice}
             </div>
           ) : null}
 
@@ -137,6 +147,8 @@ export function DashboardShell() {
             onStop={workspaceState.stopWorkspace}
             onRunWorkflow={workspaceState.runWorkflow}
             onDownload={workspaceState.downloadWorkspace}
+            onSaveWorkspace={workspaceState.saveWorkspace}
+            snapshotBusyWorkspaceId={workspaceState.snapshotBusyWorkspaceId}
           />
         </section>
       </div>

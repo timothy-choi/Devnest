@@ -1,7 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { ArchiveRestore, Download, Loader2, MoreVertical, PlayCircle, RotateCcw, Square, Trash2 } from "lucide-react";
+import {
+  ArchiveRestore,
+  Download,
+  Loader2,
+  MoreVertical,
+  PlayCircle,
+  RotateCcw,
+  Save,
+  Square,
+  Trash2,
+} from "lucide-react";
 
 import { DetailedStatusBadge } from "@/components/dashboard/workspace-status-badge";
 import {
@@ -22,6 +32,27 @@ import {
 } from "@/components/ui/dialog";
 import { Workspace } from "@/types/workspace";
 
+function saveWorkspaceDisabledReason(workspace: Workspace): string | null {
+  const isPending = workspace.pendingAction !== null;
+  const isRestore = workspace.projectDataLifecycle === "restore_required";
+  const isUnrecoverable = workspace.projectDataLifecycle === "unrecoverable";
+  const eligible = workspace.rawStatus === "RUNNING" || workspace.rawStatus === "STOPPED";
+
+  if (isPending) {
+    return "Finish the current workspace action first.";
+  }
+  if (isRestore) {
+    return "Restore project files from a snapshot before saving from the dashboard.";
+  }
+  if (isUnrecoverable) {
+    return "Disk-backed project files are not available for this workspace.";
+  }
+  if (!eligible) {
+    return "Saving is available when the workspace is running or stopped.";
+  }
+  return null;
+}
+
 type WorkspaceCardProps = {
   workspace: Workspace;
   onOpen: (id: string) => void;
@@ -29,7 +60,9 @@ type WorkspaceCardProps = {
   onRestart: (id: string) => void;
   onDelete: (id: string) => void;
   onDownload: (id: string) => void;
+  onSaveWorkspace: (id: string) => void;
   onRunWorkflow: (id: string) => void;
+  snapshotBusyWorkspaceId: number | null;
 };
 
 export function WorkspaceCard({
@@ -39,7 +72,9 @@ export function WorkspaceCard({
   onRestart,
   onDelete,
   onDownload,
+  onSaveWorkspace,
   onRunWorkflow,
+  snapshotBusyWorkspaceId,
 }: WorkspaceCardProps) {
   const [recoverOpen, setRecoverOpen] = useState(false);
   const isPending = workspace.pendingAction !== null;
@@ -61,6 +96,10 @@ export function WorkspaceCard({
               ? "Start workspace"
               : workspace.statusLabel;
   const snapshots = workspace.restorableSnapshotCount ?? 0;
+  const snapshotBusyHere = snapshotBusyWorkspaceId === workspace.id;
+  const saveDisabledReason = saveWorkspaceDisabledReason(workspace);
+  const canSaveSnapshot = saveDisabledReason === null;
+  const canDownloadSnapshot = !isPending && snapshots > 0;
 
   return (
     <Card
@@ -106,9 +145,27 @@ export function WorkspaceCard({
               <RotateCcw className="h-4 w-4" />
               {workspace.canStart ? "Start" : "Restart"}
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onDownload(String(workspace.id))} disabled>
+            <DropdownMenuItem
+              onClick={() => onSaveWorkspace(String(workspace.id))}
+              disabled={!canSaveSnapshot || snapshotBusyHere}
+              title={!snapshotBusyHere && saveDisabledReason ? saveDisabledReason : undefined}
+            >
+              <div className="flex w-full flex-col gap-0.5">
+                <span className="flex items-center gap-2">
+                  {snapshotBusyHere ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Save className="h-4 w-4 shrink-0" />}
+                  {snapshotBusyHere ? "Saving workspace…" : "Save workspace"}
+                </span>
+                {!snapshotBusyHere && saveDisabledReason ? (
+                  <span className="pl-6 text-xs font-normal leading-snug text-slate-500">{saveDisabledReason}</span>
+                ) : null}
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => onDownload(String(workspace.id))}
+              disabled={!canDownloadSnapshot || snapshotBusyHere}
+            >
               <Download className="h-4 w-4" />
-              Download Project
+              Download workspace files
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onRunWorkflow(String(workspace.id))} disabled>
               <PlayCircle className="h-4 w-4" />

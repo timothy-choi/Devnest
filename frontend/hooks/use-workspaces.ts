@@ -21,9 +21,14 @@ export function useWorkspaces() {
   const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [snapshotNotice, setSnapshotNotice] = useState<string | null>(null);
+  const [snapshotBusyWorkspaceId, setSnapshotBusyWorkspaceId] = useState<number | null>(null);
+  const [snapshotPollingWorkspaceIds, setSnapshotPollingWorkspaceIds] = useState<number[]>([]);
+  const snapshotPollingWorkspaceIdsRef = useRef<number[]>([]);
+  snapshotPollingWorkspaceIdsRef.current = snapshotPollingWorkspaceIds;
 
   useEffect(() => {
-    const clearStaleOpeningState = () => {
+    const refreshWorkspacesAfterIdeReturn = () => {
       queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
         current.map((workspace) =>
           workspace.pendingAction === "Opening"
@@ -58,16 +63,17 @@ export function useWorkspaces() {
         ),
       );
       void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      void queryClient.refetchQueries({ queryKey: ["workspaces"] });
     };
 
-    clearStaleOpeningState();
+    refreshWorkspacesAfterIdeReturn();
     if (typeof window === "undefined") {
       return;
     }
 
-    window.addEventListener("pageshow", clearStaleOpeningState);
+    window.addEventListener("pageshow", refreshWorkspacesAfterIdeReturn);
     return () => {
-      window.removeEventListener("pageshow", clearStaleOpeningState);
+      window.removeEventListener("pageshow", refreshWorkspacesAfterIdeReturn);
     };
   }, [queryClient]);
 
@@ -84,7 +90,8 @@ export function useWorkspaces() {
     retry: false,
     refetchInterval: (data) => {
       const hasBusyWorkspace = Boolean(data?.some((workspace) => workspace.isBusy));
-      return hasBusyWorkspace || hasBusyOptimisticWorkspace ? 5000 : false;
+      const snapshotPolling = snapshotPollingWorkspaceIdsRef.current.length > 0;
+      return hasBusyWorkspace || hasBusyOptimisticWorkspace || snapshotPolling ? 3000 : false;
     },
   });
 
@@ -95,6 +102,7 @@ export function useWorkspaces() {
     onMutate: async (values) => {
       setCreateError(null);
       setActionError(null);
+      setSnapshotNotice(null);
 
       const optimisticWorkspace: Workspace = {
         id: Date.now(),
@@ -145,6 +153,7 @@ export function useWorkspaces() {
     },
     onMutate: async ({ id, action }) => {
       setActionError(null);
+      setSnapshotNotice(null);
       const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
       queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
         current.map((workspace) =>
@@ -257,6 +266,7 @@ export function useWorkspaces() {
     openInFlight.current.add(workspaceId);
 
     setActionError(null);
+    setSnapshotNotice(null);
     const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
     queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
       current.map((workspace) =>
@@ -354,6 +364,120 @@ export function useWorkspaces() {
     }
   };
 
+  const saveWorkspace = async (id: string) => {
+    const workspaceId = Number(id);
+    if (!Number.isFinite(workspaceId)) {
+      setActionError("Invalid workspace id.");
+      return;
+    }
+    setActionError(null);
+    setSnapshotNotice(null);
+    setSnapshotBusyWorkspaceId(workspaceId);
+    setSnapshotPollingWorkspaceIds((current) =>
+      current.includes(workspaceId) ? current : [...current, workspaceId],
+    );
+    setSnapshotNotice("Saving workspace…");
+
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+    try {
+      const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+      const accepted = await browserApi.workspaces.createSnapshot(workspaceId, {
+        name: `Dashboard save ${stamp}`,
+        description: "Saved from DevNest dashboard",
+      });
+      const snapshotId = accepted.snapshot_id;
+
+      const maxAttempts = 90;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) {
+          await sleep(2000);
+        }
+        const rows = await browserApi.workspaces.listSnapshots(workspaceId);
+        const row = rows.find((r) => r.workspace_snapshot_id === snapshotId);
+        const st = (row?.status || "").toUpperCase();
+        if (st === "AVAILABLE") {
+          queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+            current.map((workspace) =>
+              workspace.id === workspaceId
+                ? {
+                    ...workspace,
+                    restorableSnapshotCount: Math.max(workspace.restorableSnapshotCount ?? 0, 1),
+                  }
+                : workspace,
+            ),
+          );
+          await queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+          setSnapshotNotice("Workspace saved.");
+          return;
+        }
+        if (st === "FAILED") {
+          throw new ApiError(500, "Snapshot job failed. Check workspace worker logs or try again.");
+        }
+      }
+      throw new ApiError(
+        504,
+        "Snapshot is taking longer than expected. Refresh the dashboard in a moment; the job may still complete.",
+      );
+    } catch (error) {
+      setSnapshotNotice(null);
+      setActionError(error instanceof ApiError ? error.detail : "Could not start snapshot.");
+    } finally {
+      setSnapshotPollingWorkspaceIds((current) => current.filter((wid) => wid !== workspaceId));
+      setSnapshotBusyWorkspaceId(null);
+    }
+  };
+
+  const downloadWorkspace = async (id: string) => {
+    const workspaceId = Number(id);
+    if (!Number.isFinite(workspaceId)) {
+      setActionError("Invalid workspace id.");
+      return;
+    }
+    setActionError(null);
+    setSnapshotNotice(null);
+    setSnapshotBusyWorkspaceId(workspaceId);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/snapshot-archive`, {
+        method: "GET",
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const errBody = (await res.json()) as { detail?: string };
+          if (typeof errBody.detail === "string") {
+            detail = errBody.detail;
+          }
+        } catch {
+          // ignore
+        }
+        throw new ApiError(res.status, detail);
+      }
+      const cd = res.headers.get("Content-Disposition");
+      let filename = `workspace-${workspaceId}-snapshot.tar.gz`;
+      const m = cd && /filename\*?=(?:UTF-8''|)([^;\s]+)|filename="([^"]+)"/i.exec(cd);
+      if (m) {
+        filename = decodeURIComponent((m[1] || m[2] || filename).replace(/^"|"$/g, ""));
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.rel = "noopener";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setSnapshotNotice(null);
+      setActionError(error instanceof ApiError ? error.detail : "Could not download the snapshot archive.");
+    } finally {
+      setSnapshotBusyWorkspaceId(null);
+    }
+  };
+
   return {
     workspaces,
     filteredWorkspaces,
@@ -371,6 +495,8 @@ export function useWorkspaces() {
     isCreating: createMutation.isLoading,
     createError,
     actionError,
+    snapshotNotice,
+    snapshotBusyWorkspaceId,
     hasBusyWorkspace: workspaces.some((workspace) => workspace.isBusy),
     openCreateDialog: () => setCreateDialogOpen(true),
     createWorkspace: async (values: WorkspaceFormValues) => {
@@ -386,7 +512,8 @@ export function useWorkspaces() {
     deleteWorkspace: async (id: string) => {
       await actionMutation.mutateAsync({ id: Number(id), action: "delete" });
     },
-    downloadWorkspace: async () => undefined,
+    downloadWorkspace,
+    saveWorkspace,
     runWorkflow: async () => undefined,
   };
 }
