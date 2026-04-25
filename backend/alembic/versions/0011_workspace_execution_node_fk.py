@@ -1,7 +1,7 @@
 """workspace.execution_node_id — Phase 1 node registry FK
 
 Revision ID: 0011_workspace_execution_node_fk
-Revises: 0010
+Revises: 0010_exec_node_capacity
 Create Date: 2026-04-25
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision = "0011_workspace_execution_node_fk"
-down_revision = "0010"
+down_revision = "0010_exec_node_capacity"
 branch_labels = None
 depends_on = None
 
