@@ -47,3 +47,15 @@ class SnapshotConflictError(WorkspaceServiceError):
     """Snapshot operation conflicts with current state or an in-flight job."""
 
     pass
+
+
+class WorkspaceSchedulingCapacityError(WorkspaceServiceError):
+    """No READY schedulable execution node can accept this workspace (capacity or resources)."""
+
+    pass
+
+
+class WorkspaceSchedulingInvalidError(WorkspaceServiceError):
+    """Placement parameters are invalid for scheduling (e.g. non-positive resource request)."""
+
+    pass

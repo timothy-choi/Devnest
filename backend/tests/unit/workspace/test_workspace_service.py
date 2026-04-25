@@ -25,6 +25,8 @@ from app.services.workspace_service.models import (
     WorkspaceSecret,
     WorkspaceStatus,
 )
+from app.services.placement_service.bootstrap import ensure_default_local_execution_node
+from app.services.workspace_service.errors import WorkspaceSchedulingCapacityError
 from app.services.workspace_service.services.workspace_secret_service import resolve_workspace_runtime_secret_env
 from app.services.workspace_service.services import workspace_intent_service
 from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
@@ -73,6 +75,38 @@ def test_create_workspace_request_rejects_non_positive_cpu() -> None:
         )
 
 
+def test_create_workspace_rejects_when_execution_node_at_max_slots(
+    workspace_unit_engine: Engine,
+    owner_user_id: int,
+) -> None:
+    from datetime import datetime, timezone
+
+    with Session(workspace_unit_engine) as session:
+        node = ensure_default_local_execution_node(session)
+        node.max_workspaces = 1
+        session.add(node)
+        session.flush()
+        ws = Workspace(
+            name="occupies-slot",
+            owner_user_id=owner_user_id,
+            status=WorkspaceStatus.CREATING.value,
+            is_private=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            execution_node_id=int(node.id),
+        )
+        session.add(ws)
+        session.commit()
+
+    with Session(workspace_unit_engine) as session:
+        with pytest.raises(WorkspaceSchedulingCapacityError):
+            workspace_intent_service.create_workspace(
+                session,
+                owner_user_id=owner_user_id,
+                body=_sample_create_body(),
+            )
+
+
 def test_create_workspace_happy_path_persists_rows_and_result_shape(
     workspace_unit_engine: Engine,
     owner_user_id: int,
@@ -99,6 +133,7 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
         assert ws.status == WorkspaceStatus.CREATING.value
         assert ws.is_private is False
         assert ws.project_storage_key
+        assert ws.execution_node_id is not None
 
         cfg = session.exec(
             select(WorkspaceConfig).where(WorkspaceConfig.workspace_id == out.workspace_id),

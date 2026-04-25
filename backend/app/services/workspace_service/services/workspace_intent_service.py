@@ -31,6 +31,8 @@ from app.services.workspace_service.errors import (
     WorkspaceGatewayUnavailableError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
+    WorkspaceSchedulingCapacityError,
+    WorkspaceSchedulingInvalidError,
 )
 from app.services.workspace_service.models import (
     Workspace,
@@ -69,8 +71,10 @@ from app.services.usage_service.service import record_usage
 from app.services.placement_service.bootstrap import ensure_default_local_execution_node
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
+from app.services.scheduler_service.service import schedule_workspace
 from app.services.policy_service.service import (
     evaluate_session_creation,
     evaluate_workspace_creation,
@@ -1347,8 +1351,26 @@ def create_workspace(
     now = datetime.now(timezone.utc)
     config_json = body.runtime.to_config_dict()
 
-    default_node = ensure_default_local_execution_node(session)
-    assert default_node.id is not None
+    ensure_default_local_execution_node(session)
+    schedule_result = schedule_workspace(
+        session,
+        workspace_id=0,
+        requested_cpu=rt_cpu,
+        requested_memory_mb=rt_mem,
+        requested_disk_mb=int(DEFAULT_WORKSPACE_REQUEST_DISK_MB),
+    )
+    if schedule_result.invalid_request:
+        raise WorkspaceSchedulingInvalidError(schedule_result.message)
+    if schedule_result.execution_node is None or schedule_result.insufficient_capacity:
+        # Full placement diagnostics are already logged by ``schedule_workspace``; API clients get a
+        # short, stable message (internal ``NoSchedulableNodeError`` strings are operator-oriented).
+        raise WorkspaceSchedulingCapacityError(
+            "No execution capacity is available to create a workspace. The node may be at its limit "
+            "for CPU, memory, disk, or concurrent workspaces. Stop or delete unused workspaces, or "
+            "ask an operator to raise execution node limits, then try again.",
+        )
+    chosen = schedule_result.execution_node
+    assert chosen.id is not None
 
     ws = Workspace(
         name=body.name,
@@ -1359,7 +1381,7 @@ def create_workspace(
         is_private=body.is_private,
         created_at=now,
         updated_at=now,
-        execution_node_id=int(default_node.id),
+        execution_node_id=int(chosen.id),
     )
     session.add(ws)
     session.flush()

@@ -52,6 +52,7 @@ def schedule_workspace(
             logger,
             LogEvent.SCHEDULER_NODE_SELECTED,
             workspace_id=workspace_id,
+            execution_node_id=node.id,
             node_key=node.node_key,
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,

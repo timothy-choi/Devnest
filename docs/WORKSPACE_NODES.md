@@ -41,6 +41,15 @@ Revision **`0011_workspace_execution_node_fk`**:
 
 `GET /internal/execution-nodes/` (scoped `X-Internal-API-Key` for **infrastructure**) returns each node plus **`active_workspace_slots`** and **`available_workspace_slots**`, using the same capacity cohort as placement (`count_active_workloads_on_node_key`). Responses intentionally **omit** `metadata_json` and SSH-related columns so operator JSON does not carry opaque config blobs or connection secrets.
 
+## Phase 2 (single-node scheduling)
+
+Workspace **create** selects an execution node via ``schedule_workspace`` → ``reserve_node_for_workspace`` (same policy as bring-up jobs): **READY**, **schedulable**, CPU/memory/disk headroom, and **slot limits**. Slots use both:
+
+- **FK claims:** ``Workspace.execution_node_id`` with a non-terminal status (includes ``CREATING`` before runtime exists).
+- **Runtime pins:** ``WorkspaceRuntime.node_key`` with the same non-terminal cohort (covers legacy rows without an FK).
+
+Both counts must stay **below** ``execution_node.max_workspaces``. If no node qualifies, the API returns **503** with a **short, user-facing** ``detail`` string and **does not** insert a workspace row. Verbose placement diagnostics remain in application logs (``placement.no_schedulable_node`` / scheduler events), not in the HTTP body.
+
 ## Later phases
 
-Phase 2+ will introduce real multi-node scheduling, routing by node, and optional shared storage. Phase 1 only adds **durable registry semantics** and observability so those features can build on stable FKs and APIs.
+Phase 3+ will add multiple machines, routing by node, ECS, and optional shared storage. Phases 1–2 keep Docker and Traefik behavior unchanged.
