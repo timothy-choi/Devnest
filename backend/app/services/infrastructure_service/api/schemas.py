@@ -12,7 +12,11 @@ from app.services.placement_service.models import ExecutionNode
 
 
 class ExecutionNodeSummaryResponse(BaseModel):
-    """JSON-safe view of an :class:`~app.services.placement_service.models.ExecutionNode`."""
+    """JSON-safe view of an :class:`~app.services.placement_service.models.ExecutionNode`.
+
+    Excludes ``metadata_json`` and SSH/SSM connection fields so internal listings are not a
+    secret/config dump.
+    """
 
     id: int | None
     node_key: str

@@ -22,6 +22,14 @@ def _column_names(bind: sa.engine.Connection, table_name: str) -> set[str]:
     return {str(col["name"]) for col in inspector.get_columns(table_name)}
 
 
+def _workspace_execution_node_id_nullable(bind: sa.engine.Connection) -> bool:
+    inspector = sa.inspect(bind)
+    for col in inspector.get_columns("workspace"):
+        if str(col["name"]) == "execution_node_id":
+            return bool(col.get("nullable", True))
+    return True
+
+
 def upgrade() -> None:
     bind = op.get_bind()
 
@@ -31,8 +39,11 @@ def upgrade() -> None:
     from app.services.placement_service.bootstrap import ensure_default_local_execution_node
 
     with Session(bind) as session:
-        ensure_default_local_execution_node(session)
+        default_node = ensure_default_local_execution_node(session)
+        default_node_id = default_node.id
         session.commit()
+    if default_node_id is None:
+        raise RuntimeError("ensure_default_local_execution_node returned a row without id")
 
     workspace_cols = _column_names(bind, "workspace")
 
@@ -64,20 +75,17 @@ def upgrade() -> None:
         """,
     )
 
-    # Remaining rows (no runtime / unknown node_key): first execution_node by id (bootstrap default).
+    # Remaining rows (no runtime / unknown node_key): same default as bootstrap (not arbitrary MIN(id)).
     op.execute(
-        """
-        UPDATE workspace
-        SET execution_node_id = (SELECT id FROM execution_node ORDER BY id ASC LIMIT 1)
-        WHERE execution_node_id IS NULL
-          AND EXISTS (SELECT 1 FROM execution_node)
-        """,
+        sa.text("UPDATE workspace SET execution_node_id = :nid WHERE execution_node_id IS NULL").bindparams(
+            nid=int(default_node_id),
+        ),
     )
 
-    # Enforce NOT NULL after backfill (requires at least one execution_node row).
+    # Enforce NOT NULL after backfill (idempotent if a previous partial run already set NOT NULL).
     bind2 = op.get_bind()
     workspace_cols2 = _column_names(bind2, "workspace")
-    if "execution_node_id" in workspace_cols2:
+    if "execution_node_id" in workspace_cols2 and _workspace_execution_node_id_nullable(bind2):
         op.alter_column("workspace", "execution_node_id", nullable=False)
 
 

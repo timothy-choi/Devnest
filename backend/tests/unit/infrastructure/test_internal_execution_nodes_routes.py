@@ -75,6 +75,9 @@ def test_list_execution_nodes_with_capacity(internal_api_client: TestClient) -> 
     assert "available_workspace_slots" in row0
     assert row0["active_workspace_slots"] >= 0
     assert row0["available_workspace_slots"] >= 0
+    assert "metadata_json" not in row0
+    assert "ssh_host" not in row0
+    assert "ssh_user" not in row0
 
 
 def test_internal_execution_nodes_requires_api_key(internal_api_client: TestClient) -> None:

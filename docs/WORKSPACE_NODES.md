@@ -25,15 +25,21 @@ Mapping to informal “healthy / draining / unavailable”: **`READY` + `schedul
 
 ## Bootstrap
 
-On API/worker startup, `ensure_default_local_execution_node()` ensures one local row exists whose `node_key` defaults from `DEVNEST_NODE_ID` (or `node-1`). This is the **default node** for single-host Compose / one EC2 today.
+On API/worker startup, `ensure_default_local_execution_node()` **idempotently** ensures exactly **one registry row per configured `node_key`** (from `DEVNEST_NODE_ID`, default `node-1`). Re-running startup or migrations updates that row in place; it does not create duplicate rows for the same key. This is the **default node** for single-host Compose / one EC2 today.
 
 ## Migrations
 
-Revision **`0011_workspace_execution_node_fk`** adds `workspace.execution_node_id`, backfills from `workspace_runtime` + `execution_node.node_key`, then fills any remainder from the lowest `execution_node.id`, and sets **NOT NULL** (requires at least one execution node row).
+Revision **`0011_workspace_execution_node_fk`**:
+
+1. Calls the same `ensure_default_local_execution_node()` logic used at runtime so a fresh `alembic upgrade` database always has the default row **before** workspace FK backfill (even if `init_db` has not run yet).
+2. Adds `workspace.execution_node_id` (nullable), index, and FK to `execution_node.id`.
+3. Backfills from `workspace_runtime.node_id` = `execution_node.node_key` where a match exists.
+4. Sets any remaining NULLs to the **bootstrap default node’s id** (same row as step 1), not an arbitrary `MIN(id)`, so multi-node RDS clusters do not mis-assign orphans to the wrong node.
+5. Sets **NOT NULL** (skipped if the column is already NOT NULL from a retried migration).
 
 ## Internal API (capacity listing)
 
-`GET /internal/execution-nodes/` (scoped `X-Internal-API-Key` for **infrastructure**) returns each node plus **`active_workspace_slots`** and **`available_workspace_slots**`, using the same capacity cohort as placement (`count_active_workloads_on_node_key`).
+`GET /internal/execution-nodes/` (scoped `X-Internal-API-Key` for **infrastructure**) returns each node plus **`active_workspace_slots`** and **`available_workspace_slots**`, using the same capacity cohort as placement (`count_active_workloads_on_node_key`). Responses intentionally **omit** `metadata_json` and SSH-related columns so operator JSON does not carry opaque config blobs or connection secrets.
 
 ## Later phases
 
