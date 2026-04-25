@@ -23,9 +23,12 @@ export function useWorkspaces() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [snapshotNotice, setSnapshotNotice] = useState<string | null>(null);
   const [snapshotBusyWorkspaceId, setSnapshotBusyWorkspaceId] = useState<number | null>(null);
+  const [snapshotPollingWorkspaceIds, setSnapshotPollingWorkspaceIds] = useState<number[]>([]);
+  const snapshotPollingWorkspaceIdsRef = useRef<number[]>([]);
+  snapshotPollingWorkspaceIdsRef.current = snapshotPollingWorkspaceIds;
 
   useEffect(() => {
-    const clearStaleOpeningState = () => {
+    const refreshWorkspacesAfterIdeReturn = () => {
       queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
         current.map((workspace) =>
           workspace.pendingAction === "Opening"
@@ -60,16 +63,17 @@ export function useWorkspaces() {
         ),
       );
       void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      void queryClient.refetchQueries({ queryKey: ["workspaces"] });
     };
 
-    clearStaleOpeningState();
+    refreshWorkspacesAfterIdeReturn();
     if (typeof window === "undefined") {
       return;
     }
 
-    window.addEventListener("pageshow", clearStaleOpeningState);
+    window.addEventListener("pageshow", refreshWorkspacesAfterIdeReturn);
     return () => {
-      window.removeEventListener("pageshow", clearStaleOpeningState);
+      window.removeEventListener("pageshow", refreshWorkspacesAfterIdeReturn);
     };
   }, [queryClient]);
 
@@ -86,7 +90,8 @@ export function useWorkspaces() {
     retry: false,
     refetchInterval: (data) => {
       const hasBusyWorkspace = Boolean(data?.some((workspace) => workspace.isBusy));
-      return hasBusyWorkspace || hasBusyOptimisticWorkspace ? 5000 : false;
+      const snapshotPolling = snapshotPollingWorkspaceIdsRef.current.length > 0;
+      return hasBusyWorkspace || hasBusyOptimisticWorkspace || snapshotPolling ? 3000 : false;
     },
   });
 
@@ -368,18 +373,57 @@ export function useWorkspaces() {
     setActionError(null);
     setSnapshotNotice(null);
     setSnapshotBusyWorkspaceId(workspaceId);
+    setSnapshotPollingWorkspaceIds((current) =>
+      current.includes(workspaceId) ? current : [...current, workspaceId],
+    );
+    setSnapshotNotice("Saving workspace…");
+
+    const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
     try {
       const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
-      await browserApi.workspaces.createSnapshot(workspaceId, {
+      const accepted = await browserApi.workspaces.createSnapshot(workspaceId, {
         name: `Dashboard save ${stamp}`,
         description: "Saved from DevNest dashboard",
       });
-      setSnapshotNotice("Snapshot queued. It becomes downloadable when status is AVAILABLE and the worker finishes.");
-      await queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      const snapshotId = accepted.snapshot_id;
+
+      const maxAttempts = 90;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (attempt > 0) {
+          await sleep(2000);
+        }
+        const rows = await browserApi.workspaces.listSnapshots(workspaceId);
+        const row = rows.find((r) => r.workspace_snapshot_id === snapshotId);
+        const st = (row?.status || "").toUpperCase();
+        if (st === "AVAILABLE") {
+          queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+            current.map((workspace) =>
+              workspace.id === workspaceId
+                ? {
+                    ...workspace,
+                    restorableSnapshotCount: Math.max(workspace.restorableSnapshotCount ?? 0, 1),
+                  }
+                : workspace,
+            ),
+          );
+          await queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+          setSnapshotNotice("Workspace saved.");
+          return;
+        }
+        if (st === "FAILED") {
+          throw new ApiError(500, "Snapshot job failed. Check workspace worker logs or try again.");
+        }
+      }
+      throw new ApiError(
+        504,
+        "Snapshot is taking longer than expected. Refresh the dashboard in a moment; the job may still complete.",
+      );
     } catch (error) {
       setSnapshotNotice(null);
       setActionError(error instanceof ApiError ? error.detail : "Could not start snapshot.");
     } finally {
+      setSnapshotPollingWorkspaceIds((current) => current.filter((wid) => wid !== workspaceId));
       setSnapshotBusyWorkspaceId(null);
     }
   };
@@ -426,7 +470,6 @@ export function useWorkspaces() {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-      setSnapshotNotice("Download started.");
     } catch (error) {
       setSnapshotNotice(null);
       setActionError(error instanceof ApiError ? error.detail : "Could not download the snapshot archive.");

@@ -1,6 +1,7 @@
 "use client";
 
 import { Plus, Search } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { CreateWorkspaceDialog } from "@/components/dashboard/create-workspace-dialog";
@@ -15,6 +16,7 @@ import { useNotifications } from "@/hooks/use-notifications";
 import { useWorkspaces } from "@/hooks/use-workspaces";
 
 export function DashboardShell() {
+  const queryClient = useQueryClient();
   const workspaceState = useWorkspaces();
   const notificationState = useNotifications();
   const [isNotificationCenterOpen, setNotificationCenterOpen] = useState(false);
@@ -32,7 +34,9 @@ export function DashboardShell() {
     }
 
     window.history.replaceState(window.history.state, "", "/dashboard");
-  }, []);
+    void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+    void queryClient.refetchQueries({ queryKey: ["workspaces"] });
+  }, [queryClient]);
 
   return (
     <main className="min-h-screen bg-[linear-gradient(180deg,_#f8fafc_0%,_#eef2ff_100%)] text-slate-900">
