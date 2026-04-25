@@ -1,4 +1,8 @@
-"""Registry row for a DevNest execution node (Docker host today, EC2 later)."""
+"""Registry row for a DevNest execution node (Docker host today, EC2 later).
+
+Product docs may refer to this catalog as the **workspace node registry**; the SQL table name
+remains ``execution_node`` for backwards compatibility (Phase 1 multi-node preparation).
+"""
 
 from datetime import datetime, timezone
 

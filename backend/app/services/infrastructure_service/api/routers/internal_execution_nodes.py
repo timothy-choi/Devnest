@@ -11,7 +11,7 @@ import logging
 from dataclasses import replace
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.libs.db.database import get_db
 from app.libs.observability.log_events import LogEvent, log_event
@@ -20,6 +20,7 @@ from app.libs.security.internal_auth import InternalApiScope
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
 from app.services.placement_service.errors import ExecutionNodeNotFoundError
+from app.services.placement_service.models import ExecutionNode
 from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
 
 from ...errors import Ec2ProvisionConfigurationError, NodeLifecycleError
@@ -33,6 +34,7 @@ from ...lifecycle import (
 )
 from ...models import Ec2ProvisionRequest
 from ..schemas import (
+    ExecutionNodeCapacityResponse,
     ExecutionNodeSummaryResponse,
     NodeKeyOrIdBody,
     ProvisionExecutionNodeRequest,
@@ -57,6 +59,16 @@ def _select_kwargs(body: NodeKeyOrIdBody) -> dict:
     if body.node_id is not None:
         return {"node_id": body.node_id}
     return {"node_key": str(body.node_key).strip()}
+
+
+@router.get(
+    "/",
+    response_model=list[ExecutionNodeCapacityResponse],
+    summary="List execution nodes with workspace slot capacity (debug / ops)",
+)
+def get_execution_nodes_with_capacity(session: Session = Depends(get_db)) -> list[ExecutionNodeCapacityResponse]:
+    rows = list(session.exec(select(ExecutionNode).order_by(ExecutionNode.id.asc())).all())
+    return [ExecutionNodeCapacityResponse.from_row_with_capacity(session, row) for row in rows]
 
 
 def _merge_provision_request(body: ProvisionExecutionNodeRequest) -> Ec2ProvisionRequest:

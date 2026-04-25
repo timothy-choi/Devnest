@@ -13,6 +13,14 @@ class Workspace(SQLModel, table=True):
     __tablename__ = "workspace"
 
     workspace_id: int | None = Field(default=None, primary_key=True)
+    # FK to placement_service.ExecutionNode.id (canonical workspace node registry for multi-node).
+    # V1: always the default local bootstrap node; WorkspaceRuntime.node_key remains the runtime wire.
+    execution_node_id: int | None = Field(
+        default=None,
+        foreign_key="execution_node.id",
+        index=True,
+        description="Execution node registry PK; Phase 1 defaults to local bootstrap node.",
+    )
     project_storage_key: str | None = Field(
         default_factory=lambda: uuid4().hex,
         index=True,

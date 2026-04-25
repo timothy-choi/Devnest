@@ -60,6 +60,7 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
 from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
+from app.services.placement_service.models import ExecutionNode
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
@@ -689,6 +690,20 @@ def _resolve_orchestrator_result_failure(
     _finalize_job_failed_workspace_error(session, ws, job, message=message, failure_stage=stage)
 
 
+def _sync_workspace_execution_node_id(session: Session, ws: Workspace, node_id: str | None) -> None:
+    """Align ``Workspace.execution_node_id`` with the registry row for ``node_key`` (Phase 1)."""
+    key = (node_id or "").strip()
+    if not key:
+        return
+    row = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+    if row is None or row.id is None:
+        return
+    nid = int(row.id)
+    if ws.execution_node_id != nid:
+        ws.execution_node_id = nid
+        session.add(ws)
+
+
 def _finalize_runtime_running_success(
     session: Session,
     ws: Workspace,
@@ -725,6 +740,7 @@ def _finalize_runtime_running_success(
         reserved_memory_mb=reserved_memory_mb,
         reserved_disk_mb=reserved_disk_mb,
     )
+    _sync_workspace_execution_node_id(session, ws, node_id)
     _mark_job_succeeded(session, job)
     ws.status = WorkspaceStatus.RUNNING.value
     _workspace_clear_errors(ws)

@@ -66,6 +66,7 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
+from app.services.placement_service.bootstrap import ensure_default_local_execution_node
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
@@ -1346,6 +1347,9 @@ def create_workspace(
     now = datetime.now(timezone.utc)
     config_json = body.runtime.to_config_dict()
 
+    default_node = ensure_default_local_execution_node(session)
+    assert default_node.id is not None
+
     ws = Workspace(
         name=body.name,
         description=body.description,
@@ -1355,6 +1359,7 @@ def create_workspace(
         is_private=body.is_private,
         created_at=now,
         updated_at=now,
+        execution_node_id=int(default_node.id),
     )
     session.add(ws)
     session.flush()
