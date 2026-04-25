@@ -11,10 +11,18 @@ This runbook covers `docker-compose.integration.yml`: local smoke with bundled P
 For `backend` / `workspace-worker`, Docker Compose **`environment:` overrides `env_file: backend/.env`** for the same variable names. The stack uses `DATABASE_URL` and `DEVNEST_DATABASE_URL` from compose first, so integration containers do not silently pick a different DSN from `backend/.env` when compose injects RDS URLs.
 
 1. Repo root: optional `.env` from `.env.integration.example` (defaults work for local).
-2. Run:
+2. Run (one command — validates env, starts compose, runs health checks):
 
    ```bash
-   docker compose -f docker-compose.integration.yml up -d --build
+   ./scripts/deploy_integration.sh
+   ```
+
+   GitHub Actions (`linux-full-stack-integration` in `tests.yml` / `nightly.yml`) runs the same script with an empty temp `--env-file` so compose uses bundled Postgres defaults.
+
+   Equivalent manual command:
+
+   ```bash
+   docker compose --env-file .env.integration -f docker-compose.integration.yml up -d --build
    ```
 
 3. Wait for `backend` health (uses `GET /ready`, which checks database connectivity after Alembic migrations).
