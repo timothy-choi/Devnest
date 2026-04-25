@@ -62,6 +62,21 @@ def test_drain_local_node_via_internal_api(internal_api_client: TestClient, infr
         assert row.status == ExecutionNodeStatus.DRAINING.value
 
 
+def test_list_execution_nodes_with_capacity(internal_api_client: TestClient) -> None:
+    r = internal_api_client.get("/internal/execution-nodes/", headers=INTERNAL_HEADERS)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    row0 = data[0]
+    assert "node_key" in row0
+    assert "max_workspaces" in row0
+    assert "active_workspace_slots" in row0
+    assert "available_workspace_slots" in row0
+    assert row0["active_workspace_slots"] >= 0
+    assert row0["available_workspace_slots"] >= 0
+
+
 def test_internal_execution_nodes_requires_api_key(internal_api_client: TestClient) -> None:
     key = default_local_node_key()
     r = internal_api_client.post("/internal/execution-nodes/drain", json={"node_key": key})

@@ -39,6 +39,8 @@ Public demos require DNS (or sslip.io-style names) where `*.base` resolves to th
 
 When `DEVNEST_EXPECT_EXTERNAL_POSTGRES=true`, Settings refuse a DSN that still points at the bundled compose service name `postgres`, to avoid silent misconfiguration.
 
+Workspace rows store **`execution_node_id`** (FK to `execution_node.id`) as part of Phase 1 multi-node preparation; see [WORKSPACE_NODES.md](./WORKSPACE_NODES.md) for semantics, bootstrap, and the internal nodes listing API.
+
 ### S3 snapshots
 
 Snapshot **archives** (not live files) go to S3 when `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3`:

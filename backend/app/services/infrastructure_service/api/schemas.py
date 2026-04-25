@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from datetime import datetime
 
+from pydantic import BaseModel, Field, model_validator
+from sqlmodel import Session
+
+from app.services.placement_service.capacity import count_active_workloads_on_node_key
 from app.services.placement_service.models import ExecutionNode
 
 
@@ -24,6 +28,8 @@ class ExecutionNodeSummaryResponse(BaseModel):
     instance_type: str | None = None
     private_ip: str | None = None
     public_ip: str | None = None
+    hostname: str | None = None
+    last_heartbeat_at: datetime | None = None
     last_error_code: str | None = None
     last_error_message: str | None = None
 
@@ -44,8 +50,34 @@ class ExecutionNodeSummaryResponse(BaseModel):
             instance_type=row.instance_type,
             private_ip=row.private_ip,
             public_ip=row.public_ip,
+            hostname=row.hostname,
+            last_heartbeat_at=row.last_heartbeat_at,
             last_error_code=row.last_error_code,
             last_error_message=row.last_error_message,
+        )
+
+
+class ExecutionNodeCapacityResponse(ExecutionNodeSummaryResponse):
+    """Execution node summary plus slot accounting (same cohort as placement capacity)."""
+
+    active_workspace_slots: int = Field(
+        ...,
+        ge=0,
+        description="RUNNING (etc.) workspaces pinned to this node_key that consume a schedulable slot.",
+    )
+    available_workspace_slots: int = Field(..., ge=0, description="max(0, max_workspaces - active).")
+
+    @classmethod
+    def from_row_with_capacity(cls, session: Session, row: ExecutionNode) -> ExecutionNodeCapacityResponse:
+        base = ExecutionNodeSummaryResponse.from_row(row)
+        key = (row.node_key or "").strip()
+        active = count_active_workloads_on_node_key(session, key)
+        max_w = int(row.max_workspaces or 0)
+        avail = max(0, max_w - active)
+        return cls(
+            **base.model_dump(),
+            active_workspace_slots=active,
+            available_workspace_slots=avail,
         )
 
 
