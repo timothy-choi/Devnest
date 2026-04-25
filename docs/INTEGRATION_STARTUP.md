@@ -77,13 +77,60 @@ Prefer the deploy script (git sync, env normalization, compose ordering for RDS)
 scripts/deploy-ec2.sh <branch>
 ```
 
-Manual equivalent (simplified): export the variables above, then from repo root:
+Manual equivalent (simplified): export the variables above, then from repo root. When you use a generated
+**`.env.integration`** file (recommended for RDS), pass it explicitly so substitution and container env stay
+aligned after restarts:
 
 ```bash
-docker compose -f docker-compose.integration.yml up -d --build
+docker compose --env-file .env.integration -f docker-compose.integration.yml up -d --build
 ```
 
-When using **external** Postgres, the deploy script skips the local `postgres` service and brings up `route-admin`, then backend/worker/frontend without pulling in the bundled DB.
+Without that file, `docker compose -f docker-compose.integration.yml …` still works for local bundled Postgres
+when variables are only in the shell or repo-root `.env`.
+
+When using **external** Postgres, `scripts/deploy-ec2.sh` skips the local `postgres` service and brings up
+`route-admin`, then backend/worker/frontend without pulling in the bundled DB. The script always uses
+`docker compose --env-file "${REPO_DIR}/.env.integration" …` when that file exists.
+
+### `.env.integration` shape (secrets redacted)
+
+After `write` / `validate`, the file is mode `0600` and values are double-quoted. Typical keys (values shown as placeholders only):
+
+| Key | Example shape |
+|-----|----------------|
+| `DATABASE_URL` | `postgresql+psycopg://USER:***@HOST:5432/DBNAME?sslmode=require` |
+| `DEVNEST_COMPOSE_DATABASE_URL` | Same as `DATABASE_URL` |
+| `DEVNEST_DATABASE_URL` | Same as `DATABASE_URL` |
+| `DEVNEST_EXPECT_EXTERNAL_POSTGRES` | `true` (written by `write`; required by `validate` for RDS) |
+| `DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` | `true` (same) |
+| `DEVNEST_BASE_DOMAIN` | `98-92-163-201.sslip.io` (no scheme) |
+| `DEVNEST_GATEWAY_PUBLIC_SCHEME` / `DEVNEST_GATEWAY_PUBLIC_PORT` | `http` / `9081` |
+| `DEVNEST_FRONTEND_PUBLIC_BASE_URL` | `http://…:3000` |
+| `NEXT_PUBLIC_APP_BASE_URL` / `NEXT_PUBLIC_API_BASE_URL` | `http://…:3000` and `http://…:8000` |
+| `GITHUB_OAUTH_PUBLIC_BASE_URL` / `GCLOUD_OAUTH_PUBLIC_BASE_URL` | Same origin as UI for callbacks |
+| `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET` | Set in CI from GitHub secrets |
+| `OAUTH_GOOGLE_*` | Optional; omitted when both empty |
+| `DEVNEST_SNAPSHOT_STORAGE_PROVIDER` | `s3` for RDS |
+| `DEVNEST_S3_SNAPSHOT_BUCKET` / `DEVNEST_S3_SNAPSHOT_PREFIX` / `AWS_REGION` | Bucket, prefix, region |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Optional when using an IAM instance profile |
+
+Safe summary (no secrets):
+
+```bash
+python3 scripts/write_integration_deploy_env.py diagnostics --path .env.integration
+```
+
+### Post-deploy verification (EC2)
+
+From the repo root on the instance (after `scripts/deploy-ec2.sh`):
+
+```bash
+python3 scripts/write_integration_deploy_env.py validate --path .env.integration
+python3 scripts/write_integration_deploy_env.py diagnostics --path .env.integration
+curl -fsS "http://127.0.0.1:8000/ready"
+curl -fsS "http://127.0.0.1:3000/" >/dev/null   # or open :3000 in a browser
+docker compose --env-file .env.integration -f docker-compose.integration.yml ps
+```
 
 ## Frontend → backend (Next server routes)
 
@@ -174,8 +221,10 @@ COMPOSE=(docker compose -f docker-compose.integration.yml)
 ### One command: verify backend DB target (no secrets)
 
 ```bash
-docker compose -f docker-compose.integration.yml exec -T backend python -c "from app.libs.common.config import format_database_url_for_log, get_settings; print(format_database_url_for_log(get_settings().database_url))"
+docker compose --env-file .env.integration -f docker-compose.integration.yml exec -T backend python -c "from app.libs.common.config import format_database_url_for_log, get_settings; print(format_database_url_for_log(get_settings().database_url))"
 ```
+
+(If you do not use `.env.integration`, omit `--env-file .env.integration`.)
 
 Expect `driver=… host=<your RDS endpoint> database=…` (no password in output).
 

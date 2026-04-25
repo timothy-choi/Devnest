@@ -6,6 +6,9 @@ Write mode reads DEVNEST_CI_WRITE_* from the process environment (CI SSH interpo
 into the remote shell before invoking this script). Values are written with safe quoting so
 URLs with & ? = are not mangled by the shell.
 
+``diagnostics`` prints DB host/name, snapshot keys, OAuth configured flags, and public URLs
+(no secrets, no credential substrings).
+
 Requires SQLAlchemy-style Postgres DSN:
   postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
 Also accepts libpq keyword-style DSNs (host=... port=... dbname=...) and normalizes them
@@ -32,6 +35,24 @@ SYNC_FROM_ENV_KEYS = (
     "DEVNEST_GATEWAY_PUBLIC_SCHEME",
     "DEVNEST_GATEWAY_PUBLIC_PORT",
 )
+
+
+def _safe_url_snippet_for_error(url: str) -> str:
+    """Short hint for error messages — never includes userinfo (password)."""
+    t = (url or "").strip()
+    if not t:
+        return "<empty>"
+    if _is_libpq_keyword_dsn(t):
+        return "<libpq-keyword-dsn>"
+    if "://" in t:
+        scheme, _, rest = t.partition("://")
+        if "@" in rest:
+            _, _, tail = rest.rpartition("@")
+            tail = tail.split("?", 1)[0]
+            return f"{scheme}://…@{tail[:96]}"
+        hostish = rest.split("?", 1)[0]
+        return f"{scheme}://{hostish[:96]}"
+    return "<non-url>"
 
 
 def _is_libpq_keyword_dsn(s: str) -> bool:
@@ -70,7 +91,7 @@ def parse_libpq_keyword_conninfo(conninfo: str) -> dict[str, str]:
         while j < n and s[j] != "=":
             j += 1
         if j >= n or s[j] != "=":
-            raise ValueError(f"malformed libpq token near {s[i : i + 32]!r}")
+            raise ValueError("malformed libpq keyword connection string (syntax error near a token)")
         key = s[i:j].strip().lower()
         i = j + 1
         if i >= n:
@@ -161,7 +182,8 @@ def normalize_database_url_for_deploy(name: str, url: str) -> str:
             raise ValueError(f"{name}: cannot convert libpq keyword DSN ({exc})") from exc
     if not raw.startswith("postgresql+psycopg://"):
         raise ValueError(
-            f"{name} must start with postgresql+psycopg:// (SQLAlchemy driver); got {raw[:48]!r}..."
+            f"{name} must start with postgresql+psycopg:// (SQLAlchemy driver); value looks like "
+            f"{_safe_url_snippet_for_error(raw)}"
         )
     parsed = urlparse(raw)
     if parsed.scheme != "postgresql+psycopg":
@@ -238,6 +260,8 @@ def write_dict(path: Path, data: dict[str, str]) -> None:
         "DATABASE_URL",
         "DEVNEST_COMPOSE_DATABASE_URL",
         "DEVNEST_DATABASE_URL",
+        "DEVNEST_EXPECT_EXTERNAL_POSTGRES",
+        "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS",
         "DEVNEST_BASE_DOMAIN",
         "DEVNEST_GATEWAY_PUBLIC_SCHEME",
         "DEVNEST_GATEWAY_PUBLIC_PORT",
@@ -327,6 +351,8 @@ def _cmd_write_body() -> int:
         "DATABASE_URL": db,
         "DEVNEST_COMPOSE_DATABASE_URL": db,
         "DEVNEST_DATABASE_URL": db,
+        "DEVNEST_EXPECT_EXTERNAL_POSTGRES": "true",
+        "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS": "true",
         "DEVNEST_BASE_DOMAIN": base_domain,
         "DEVNEST_GATEWAY_PUBLIC_SCHEME": gw_scheme,
         "DEVNEST_GATEWAY_PUBLIC_PORT": gw_port,
@@ -383,6 +409,19 @@ def validate_parsed(data: dict[str, str]) -> None:
     if _is_bundled_compose_postgres(db):
         return
 
+    def _expect_flag_true(flag: str, raw: str | None) -> None:
+        v = (raw or "").strip().lower()
+        if v not in ("1", "true", "yes", "on"):
+            raise ValueError(
+                f"{flag} must be true for external Postgres / RDS (write emits this; got {v!r}). "
+                "Regenerate with: python3 scripts/write_integration_deploy_env.py write"
+            )
+
+    _expect_flag_true("DEVNEST_EXPECT_EXTERNAL_POSTGRES", data.get("DEVNEST_EXPECT_EXTERNAL_POSTGRES"))
+    _expect_flag_true(
+        "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS", data.get("DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS")
+    )
+
     _nonempty("DEVNEST_SNAPSHOT_STORAGE_PROVIDER", data.get("DEVNEST_SNAPSHOT_STORAGE_PROVIDER"))
     if (data.get("DEVNEST_SNAPSHOT_STORAGE_PROVIDER") or "").strip() != "s3":
         raise ValueError("DEVNEST_SNAPSHOT_STORAGE_PROVIDER must be s3 for external Postgres")
@@ -411,6 +450,89 @@ def validate_parsed(data: dict[str, str]) -> None:
     if gid or gsec:
         _nonempty("OAUTH_GOOGLE_CLIENT_ID", gid)
         _nonempty("OAUTH_GOOGLE_CLIENT_SECRET", gsec)
+
+
+def print_integration_deploy_diagnostics(data: dict[str, str]) -> None:
+    """One line per key group; safe for CI logs (no passwords or API keys)."""
+    prefix = "[devnest-deploy]"
+    raw_db = (data.get("DATABASE_URL") or "").strip()
+    if raw_db:
+        norm = normalize_database_url_for_deploy("DATABASE_URL", raw_db)
+        parsed = urlparse(norm)
+        dbn = (parsed.path or "").strip("/") or "<none>"
+        print(
+            f"{prefix} database_host={parsed.hostname or '<none>'} "
+            f"database_name={dbn} url_scheme={parsed.scheme}"
+        )
+    else:
+        print(f"{prefix} database_host=<unset> database_name=<unset>")
+
+    prov = (data.get("DEVNEST_SNAPSHOT_STORAGE_PROVIDER") or "").strip() or "-"
+    bucket = (data.get("DEVNEST_S3_SNAPSHOT_BUCKET") or "").strip()
+    prefix_s3 = (data.get("DEVNEST_S3_SNAPSHOT_PREFIX") or "").strip() or "-"
+    region = (data.get("AWS_REGION") or "").strip()
+    print(
+        f"{prefix} snapshot_provider={prov} s3_bucket={'set' if bucket else 'missing'} "
+        f"s3_prefix={prefix_s3} aws_region={'set' if region else 'missing'}"
+    )
+
+    fe = (data.get("DEVNEST_FRONTEND_PUBLIC_BASE_URL") or "").strip()
+    next_api = (data.get("NEXT_PUBLIC_API_BASE_URL") or "").strip()
+    next_app = (data.get("NEXT_PUBLIC_APP_BASE_URL") or "").strip()
+    gh_pub = (data.get("GITHUB_OAUTH_PUBLIC_BASE_URL") or "").strip()
+    gc_pub = (data.get("GCLOUD_OAUTH_PUBLIC_BASE_URL") or "").strip()
+    print(
+        f"{prefix} frontend_public_base_url={fe or '-'} "
+        f"next_public_api_base_url={next_api or '-'} next_public_app_base_url={next_app or '-'}"
+    )
+
+    gh_id = (data.get("OAUTH_GITHUB_CLIENT_ID") or "").strip()
+    gh_sec = (data.get("OAUTH_GITHUB_CLIENT_SECRET") or "").strip()
+    gh_ok = bool(gh_id and gh_sec and gh_pub)
+    go_id = (data.get("OAUTH_GOOGLE_CLIENT_ID") or "").strip()
+    go_sec = (data.get("OAUTH_GOOGLE_CLIENT_SECRET") or "").strip()
+    go_ok = bool(go_id and go_sec and gc_pub)
+    print(
+        f"{prefix} oauth_github_configured={gh_ok} oauth_google_configured={go_ok} "
+        f"github_oauth_public_base_url={gh_pub or '-'} gcloud_oauth_public_base_url={gc_pub or '-'}"
+    )
+
+    base_dom = (data.get("DEVNEST_BASE_DOMAIN") or "").strip()
+    gw_s = (data.get("DEVNEST_GATEWAY_PUBLIC_SCHEME") or "").strip()
+    gw_p = (data.get("DEVNEST_GATEWAY_PUBLIC_PORT") or "").strip()
+    ex_pg = (data.get("DEVNEST_EXPECT_EXTERNAL_POSTGRES") or "").strip().lower() in ("1", "true", "yes", "on")
+    ex_remote = (data.get("DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    print(
+        f"{prefix} devnest_base_domain={base_dom or '-'} gateway_public_scheme={gw_s or '-'} "
+        f"gateway_public_port={gw_p or '-'} expect_external_postgres={ex_pg} "
+        f"expect_remote_gateway_clients={ex_remote}"
+    )
+
+
+def cmd_diagnostics(args: argparse.Namespace) -> int:
+    path = Path(args.path).resolve()
+    if not path.is_file():
+        print(f"ERROR: {path} does not exist.", file=sys.stderr)
+        return 1
+    data = parse_env_file(path)
+    raw_db = (data.get("DATABASE_URL") or "").strip()
+    if raw_db:
+        try:
+            normalize_database_url_for_deploy("DATABASE_URL", raw_db)
+        except ValueError:
+            print(
+                "ERROR: DATABASE_URL in file is invalid (details omitted from logs); "
+                "run: python3 scripts/write_integration_deploy_env.py validate --path …",
+                file=sys.stderr,
+            )
+            return 1
+    print_integration_deploy_diagnostics(data)
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -463,6 +585,13 @@ def main() -> int:
     )
     s.add_argument("--path", required=True)
     s.set_defaults(func=cmd_sync_from_env)
+
+    d = sub.add_parser(
+        "diagnostics",
+        help="Print safe integration-env summary (DB host/name, S3 flags, OAuth configured, public URLs)",
+    )
+    d.add_argument("--path", required=True)
+    d.set_defaults(func=cmd_diagnostics)
 
     args = p.parse_args()
     return int(args.func(args))

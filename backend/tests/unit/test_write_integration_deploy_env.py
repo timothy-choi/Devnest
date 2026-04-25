@@ -64,3 +64,68 @@ def test_normalize_rejects_plain_postgres_url(w):
         w.normalize_database_url_for_deploy(
             "DATABASE_URL", "postgresql://u:p@localhost:5432/db"
         )
+
+
+def test_validate_parsed_external_requires_expect_flags(w):
+    base = {
+        "DATABASE_URL": "postgresql+psycopg://u:p@db.example.com:5432/mydb",
+        "DEVNEST_COMPOSE_DATABASE_URL": "postgresql+psycopg://u:p@db.example.com:5432/mydb",
+        "DEVNEST_DATABASE_URL": "postgresql+psycopg://u:p@db.example.com:5432/mydb",
+        "DEVNEST_SNAPSHOT_STORAGE_PROVIDER": "s3",
+        "DEVNEST_S3_SNAPSHOT_BUCKET": "b",
+        "DEVNEST_S3_SNAPSHOT_PREFIX": "pfx",
+        "AWS_REGION": "us-east-1",
+        "DEVNEST_BASE_DOMAIN": "example.sslip.io",
+        "DEVNEST_GATEWAY_PUBLIC_SCHEME": "http",
+        "DEVNEST_GATEWAY_PUBLIC_PORT": "9081",
+        "DEVNEST_FRONTEND_PUBLIC_BASE_URL": "http://example.sslip.io:3000",
+        "NEXT_PUBLIC_APP_BASE_URL": "http://example.sslip.io:3000",
+        "NEXT_PUBLIC_API_BASE_URL": "http://example.sslip.io:8000",
+        "GITHUB_OAUTH_PUBLIC_BASE_URL": "http://example.sslip.io:3000",
+        "GCLOUD_OAUTH_PUBLIC_BASE_URL": "http://example.sslip.io:3000",
+        "OAUTH_GITHUB_CLIENT_ID": "id",
+        "OAUTH_GITHUB_CLIENT_SECRET": "sec",
+    }
+    with pytest.raises(ValueError, match="DEVNEST_EXPECT_EXTERNAL_POSTGRES"):
+        w.validate_parsed(base)
+    base["DEVNEST_EXPECT_EXTERNAL_POSTGRES"] = "true"
+    with pytest.raises(ValueError, match="DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS"):
+        w.validate_parsed(base)
+    base["DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS"] = "true"
+    w.validate_parsed(base)
+
+
+def test_print_integration_deploy_diagnostics_smoke(capsys, w):
+    w.print_integration_deploy_diagnostics(
+        {
+            "DATABASE_URL": "postgresql+psycopg://u:p@db.example.com:5432/mydb",
+            "DEVNEST_SNAPSHOT_STORAGE_PROVIDER": "s3",
+            "DEVNEST_S3_SNAPSHOT_BUCKET": "my-bucket",
+            "DEVNEST_S3_SNAPSHOT_PREFIX": "pfx",
+            "AWS_REGION": "us-east-1",
+            "DEVNEST_FRONTEND_PUBLIC_BASE_URL": "http://example.sslip.io:3000",
+            "NEXT_PUBLIC_API_BASE_URL": "http://example.sslip.io:8000",
+            "NEXT_PUBLIC_APP_BASE_URL": "http://example.sslip.io:3000",
+            "GITHUB_OAUTH_PUBLIC_BASE_URL": "http://example.sslip.io:3000",
+            "GCLOUD_OAUTH_PUBLIC_BASE_URL": "http://example.sslip.io:3000",
+            "OAUTH_GITHUB_CLIENT_ID": "id",
+            "OAUTH_GITHUB_CLIENT_SECRET": "sec",
+            "OAUTH_GOOGLE_CLIENT_ID": "",
+            "OAUTH_GOOGLE_CLIENT_SECRET": "",
+            "DEVNEST_BASE_DOMAIN": "example.sslip.io",
+            "DEVNEST_GATEWAY_PUBLIC_SCHEME": "http",
+            "DEVNEST_GATEWAY_PUBLIC_PORT": "9081",
+            "DEVNEST_EXPECT_EXTERNAL_POSTGRES": "true",
+            "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS": "true",
+        }
+    )
+    out = capsys.readouterr().out
+    assert "database_host=db.example.com" in out
+    assert "database_name=mydb" in out
+    assert "snapshot_provider=s3" in out
+    assert "s3_bucket=set" in out
+    assert "oauth_github_configured=True" in out
+    assert "oauth_google_configured=False" in out
+    assert "devnest_base_domain=example.sslip.io" in out
+    assert "expect_external_postgres=True" in out
+    assert "expect_remote_gateway_clients=True" in out

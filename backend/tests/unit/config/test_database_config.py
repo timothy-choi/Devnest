@@ -164,3 +164,68 @@ class TestDatabaseConfig:
                 devnest_base_domain="app.lvh.me",
                 devnest_expect_remote_gateway_clients=True,
             )
+
+    def test_expect_remote_gateway_rejects_empty_base_domain(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        with pytest.raises(RuntimeError, match="DEVNEST_BASE_DOMAIN is empty"):
+            Settings(
+                database_url="postgresql+psycopg://u:p@db.example.com:5432/db",
+                devnest_base_domain="",
+                devnest_expect_remote_gateway_clients=True,
+            )
+
+    def test_expect_remote_gateway_rejects_partial_github_oauth(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        with pytest.raises(RuntimeError, match="Incomplete GitHub OAuth"):
+            Settings(
+                database_url="postgresql+psycopg://u:p@db.example.com:5432/db",
+                devnest_expect_remote_gateway_clients=True,
+                devnest_base_domain="203-0-113-10.sslip.io",
+                devnest_frontend_public_base_url="http://203-0-113-10.sslip.io:3000",
+                devnest_snapshot_storage_provider="s3",
+                devnest_s3_snapshot_bucket="snap-bucket",
+                aws_region="us-east-1",
+                oauth_github_client_id="only-id",
+                oauth_github_client_secret="",
+            )
+
+    def test_malformed_database_url_rejected(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        with pytest.raises(RuntimeError, match="Malformed database"):
+            Settings(database_url="not-a-sqlalchemy-url-at-all")
+
+    def test_incomplete_libpq_keyword_dsn_rejected(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        with pytest.raises(RuntimeError, match="libpq keyword"):
+            Settings(database_url="host=only.example.com")
+
+    def test_cloud_posture_requires_psycopg_driver_in_url(self, monkeypatch) -> None:
+        from app.libs.common.config import Settings  # noqa: PLC0415
+
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DEVNEST_DATABASE_URL", raising=False)
+        monkeypatch.setattr(Settings, "_repo_env_fallbacks", staticmethod(lambda: {}))
+        with pytest.raises(RuntimeError, match="postgresql\\+psycopg"):
+            Settings(
+                database_url="postgresql://u:p@db.example.com:5432/devnest",
+                devnest_expect_external_postgres=True,
+                devnest_snapshot_storage_provider="s3",
+                devnest_s3_snapshot_bucket="b",
+                aws_region="us-east-1",
+            )

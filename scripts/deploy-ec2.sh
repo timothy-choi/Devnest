@@ -30,9 +30,9 @@ _devnest_load_integration_env_file() {
 }
 
 _devnest_compose() {
-  # Cwd is ${REPO_DIR} for all invocations; use the repo-relative name requested in deploy docs.
-  if [[ -f ".env.integration" ]]; then
-    docker compose --env-file .env.integration -f "${COMPOSE}" "$@"
+  # Cwd is ${REPO_DIR}; use an absolute --env-file so compose never misses integration env after chdir/cron.
+  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+    docker compose --env-file "${INTEGRATION_ENV_FILE}" -f "${COMPOSE}" "$@"
     return
   fi
   if [[ -n "${DATABASE_URL:-}" ]]; then
@@ -223,6 +223,7 @@ if [[ -f "${INTEGRATION_ENV_FILE}" ]] && [[ -f "${_writer_py}" ]] && command -v 
   source "${INTEGRATION_ENV_FILE}"
   set +a
   python3 "${_writer_py}" validate --path "${INTEGRATION_ENV_FILE}" || exit 1
+  python3 "${_writer_py}" diagnostics --path "${INTEGRATION_ENV_FILE}" || exit 1
 fi
 if [[ -n "${DATABASE_URL:-}" ]] && [[ ! -f "${INTEGRATION_ENV_FILE}" ]]; then
   echo "ERROR: DATABASE_URL is set but ${INTEGRATION_ENV_FILE} is missing (generate it before deploy-ec2.sh)." >&2

@@ -1026,6 +1026,49 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_resolved_database_url(self) -> Self:
+        """Reject malformed DSNs; require psycopg URL form when cloud/RDS posture flags are on."""
+        url = (self.database_url or "").strip()
+        if not url:
+            return self
+        if "://" not in url and "=" in url and ("host=" in url.lower() or "dbname=" in url.lower()):
+            raise RuntimeError(
+                "DATABASE_URL / DEVNEST_DATABASE_URL looks like a libpq keyword DSN but was not converted "
+                "to a URL (missing host, dbname, or user?). Use a single-line "
+                "postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME?... URL, or a complete libpq keyword string."
+            )
+        try:
+            from sqlalchemy.engine.url import make_url
+
+            u = make_url(url)
+        except Exception as exc:
+            raise RuntimeError(
+                "Malformed database connection URL (DATABASE_URL / DEVNEST_DATABASE_URL): "
+                f"could not parse as SQLAlchemy URL ({type(exc).__name__}: {exc}). "
+                "Use a single-line postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME?... value."
+            ) from exc
+        cloud = self.devnest_expect_external_postgres or self.devnest_expect_remote_gateway_clients
+        if cloud and (u.drivername or "") != "postgresql+psycopg":
+            raise RuntimeError(
+                "RDS / remote integration posture requires SQLAlchemy psycopg v3 URLs "
+                f"(postgresql+psycopg://…); got driver {u.drivername!r}. "
+                "Fix DATABASE_URL / DEVNEST_DATABASE_URL or generate .env.integration via "
+                "scripts/write_integration_deploy_env.py write."
+            )
+        dbn = (u.database or "").strip() if u.database is not None else ""
+        if not dbn:
+            raise RuntimeError(
+                "DATABASE_URL must include a database name in the path "
+                "(postgresql+psycopg://…@HOST:PORT/DBNAME)."
+            )
+        if not (u.host or "").strip():
+            raise RuntimeError(
+                "DATABASE_URL must include a non-empty database host "
+                "(postgresql+psycopg://…@HOST:PORT/DBNAME)."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_integration_startup_expectations(self) -> Self:
         """Fail fast when EC2/RDS-style expectations contradict bundled or lab-only defaults."""
         if self.devnest_expect_external_postgres:
@@ -1046,11 +1089,33 @@ class Settings(BaseSettings):
                 )
         if self.devnest_expect_remote_gateway_clients:
             domain = (self.devnest_base_domain or "").strip().lower()
+            if not domain:
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_BASE_DOMAIN is empty. "
+                    "Set DEVNEST_BASE_DOMAIN to a hostname remote browsers resolve for ws-<id>.<domain>, "
+                    "or rely on deploy-ec2.sh to derive <public-ip>.sslip.io on EC2."
+                )
             if domain in ("app.lvh.me", "app.devnest.local"):
                 raise RuntimeError(
                     "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_BASE_DOMAIN is set to a "
                     f"hostname that does not resolve for remote browsers ({domain!r}). Use sslip.io, "
                     "a wildcard DNS zone pointing at this host, or similar; see docs/INTEGRATION_STARTUP.md."
+                )
+            gh_id = (self.oauth_github_client_id or "").strip()
+            gh_sec = (self.oauth_github_client_secret or "").strip()
+            if bool(gh_id) ^ bool(gh_sec):
+                raise RuntimeError(
+                    "Incomplete GitHub OAuth: set both OAUTH_GITHUB_CLIENT_ID and OAUTH_GITHUB_CLIENT_SECRET "
+                    "(or legacy GH_/GITHUB_ aliases), or clear both to disable GitHub OAuth "
+                    "(DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true)."
+                )
+            go_id = (self.oauth_google_client_id or "").strip()
+            go_sec = (self.oauth_google_client_secret or "").strip()
+            if bool(go_id) ^ bool(go_sec):
+                raise RuntimeError(
+                    "Incomplete Google OAuth: set both OAUTH_GOOGLE_CLIENT_ID and OAUTH_GOOGLE_CLIENT_SECRET "
+                    "(or legacy GOOGLE_ aliases), or clear both to disable Google OAuth "
+                    "(DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true)."
                 )
             if is_loopback_public_base(self.devnest_frontend_public_base_url):
                 raise RuntimeError(
