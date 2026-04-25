@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import FileResponse
 from sqlmodel import Session
+from starlette.background import BackgroundTask
 
 from app.libs.db.database import get_db
 from app.services.auth_service.api.dependencies import get_current_user
@@ -13,6 +17,7 @@ from app.services.workspace_service.api.schemas.snapshot_schemas import (
     CreateSnapshotRequest,
     RestoreSnapshotAcceptedResponse,
     SnapshotSummaryResponse,
+    storage_backend_label,
 )
 from app.services.workspace_service.errors import (
     SnapshotConflictError,
@@ -30,6 +35,13 @@ snapshots_router = APIRouter(prefix="/snapshots", tags=["snapshots"])
 
 def _correlation_id_from_request(request: Request) -> str | None:
     return getattr(request.state, "correlation_id", None)
+
+
+def _unlink_download_staging(path: str) -> None:
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _raise_snapshot_http(exc: WorkspaceServiceError) -> None:
@@ -52,7 +64,7 @@ def _summary(row: WorkspaceSnapshot) -> SnapshotSummaryResponse:
         description=row.description,
         status=row.status,
         size_bytes=row.size_bytes,
-        storage_uri=row.storage_uri,
+        storage_backend=storage_backend_label(row.storage_uri),
         created_at=row.created_at,
         metadata=row.metadata_json,
     )
@@ -113,6 +125,39 @@ def get_workspace_snapshots(
     except WorkspaceServiceError as e:
         _raise_snapshot_http(e)
     return [_summary(r) for r in rows]
+
+
+@workspace_snapshots_router.get(
+    "/{workspace_id}/snapshots/archive",
+    summary="Download snapshot project archive (latest AVAILABLE by default)",
+    response_class=FileResponse,
+)
+def get_workspace_snapshot_archive(
+    workspace_id: int,
+    snapshot_id: int | None = Query(
+        default=None,
+        description="Specific snapshot id; omit to download the newest AVAILABLE snapshot that has an archive.",
+    ),
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> FileResponse:
+    assert current.user_auth_id is not None
+    try:
+        info = snapshot_service.prepare_snapshot_archive_download(
+            session,
+            workspace_id=workspace_id,
+            owner_user_id=current.user_auth_id,
+            snapshot_id=snapshot_id,
+        )
+    except WorkspaceServiceError as e:
+        _raise_snapshot_http(e)
+    bg = BackgroundTask(_unlink_download_staging, info.local_path) if info.cleanup_after_send else None
+    return FileResponse(
+        info.local_path,
+        filename=info.suggested_filename,
+        media_type="application/gzip",
+        background=bg,
+    )
 
 
 @snapshots_router.get(

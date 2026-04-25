@@ -1,7 +1,17 @@
 "use client";
 
 import { useState } from "react";
-import { ArchiveRestore, Download, Loader2, MoreVertical, PlayCircle, RotateCcw, Square, Trash2 } from "lucide-react";
+import {
+  ArchiveRestore,
+  Download,
+  Loader2,
+  MoreVertical,
+  PlayCircle,
+  RotateCcw,
+  Save,
+  Square,
+  Trash2,
+} from "lucide-react";
 
 import { DetailedStatusBadge } from "@/components/dashboard/workspace-status-badge";
 import {
@@ -29,7 +39,9 @@ type WorkspaceCardProps = {
   onRestart: (id: string) => void;
   onDelete: (id: string) => void;
   onDownload: (id: string) => void;
+  onSaveWorkspace: (id: string) => void;
   onRunWorkflow: (id: string) => void;
+  snapshotBusyWorkspaceId: number | null;
 };
 
 export function WorkspaceCard({
@@ -39,7 +51,9 @@ export function WorkspaceCard({
   onRestart,
   onDelete,
   onDownload,
+  onSaveWorkspace,
   onRunWorkflow,
+  snapshotBusyWorkspaceId,
 }: WorkspaceCardProps) {
   const [recoverOpen, setRecoverOpen] = useState(false);
   const isPending = workspace.pendingAction !== null;
@@ -61,6 +75,13 @@ export function WorkspaceCard({
               ? "Start workspace"
               : workspace.statusLabel;
   const snapshots = workspace.restorableSnapshotCount ?? 0;
+  const snapshotBusyHere = snapshotBusyWorkspaceId === workspace.id;
+  const canSaveSnapshot =
+    !isPending &&
+    !isRestore &&
+    !isUnrecoverable &&
+    (workspace.rawStatus === "RUNNING" || workspace.rawStatus === "STOPPED");
+  const canDownloadSnapshot = !isPending && snapshots > 0;
 
   return (
     <Card
@@ -106,9 +127,19 @@ export function WorkspaceCard({
               <RotateCcw className="h-4 w-4" />
               {workspace.canStart ? "Start" : "Restart"}
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => onDownload(String(workspace.id))} disabled>
+            <DropdownMenuItem
+              onClick={() => onSaveWorkspace(String(workspace.id))}
+              disabled={!canSaveSnapshot || snapshotBusyHere}
+            >
+              {snapshotBusyHere ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              Save workspace
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() => onDownload(String(workspace.id))}
+              disabled={!canDownloadSnapshot || snapshotBusyHere}
+            >
               <Download className="h-4 w-4" />
-              Download Project
+              Download workspace files
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => onRunWorkflow(String(workspace.id))} disabled>
               <PlayCircle className="h-4 w-4" />

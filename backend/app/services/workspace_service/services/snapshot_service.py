@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -108,6 +109,15 @@ class RestoreSnapshotResult:
     snapshot_id: int
     job_id: int
     status: str
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotArchiveDownloadInfo:
+    """Local path to a ``.tar.gz`` archive and how to serve it to the user."""
+
+    local_path: str
+    suggested_filename: str
+    cleanup_after_send: bool
 
 
 def create_snapshot(
@@ -304,6 +314,72 @@ def delete_snapshot(
     )
     session.delete(snap)
     session.commit()
+
+
+def prepare_snapshot_archive_download(
+    session: Session,
+    *,
+    workspace_id: int,
+    owner_user_id: int,
+    snapshot_id: int | None = None,
+) -> SnapshotArchiveDownloadInfo:
+    """Resolve an AVAILABLE snapshot with a non-empty archive and materialize a local file for download.
+
+    For S3-backed storage, downloads the object to the provider staging path (same as restore preflight).
+    For local storage, returns the canonical archive path under the snapshot root.
+    """
+    assert_workspace_owner(session, workspace_id, owner_user_id)
+    storage = get_snapshot_storage_provider()
+
+    snap: WorkspaceSnapshot | None
+    if snapshot_id is not None:
+        snap = _get_snapshot_for_owner(session, snapshot_id=snapshot_id, owner_user_id=owner_user_id)
+        if int(snap.workspace_id) != int(workspace_id):
+            raise SnapshotNotFoundError("Snapshot not found")
+    else:
+        snap = None
+        for row in list_snapshots(session, workspace_id=workspace_id, owner_user_id=owner_user_id):
+            if row.status != WorkspaceSnapshotStatus.AVAILABLE.value:
+                continue
+            sid = row.workspace_snapshot_id
+            assert sid is not None
+            if storage.has_nonempty_archive(workspace_id=workspace_id, snapshot_id=sid):
+                snap = row
+                break
+        if snap is None:
+            raise SnapshotNotFoundError(
+                "No snapshot with a completed archive is available yet. Save the workspace first, "
+                "wait for the snapshot job to finish, then try again."
+            )
+
+    sid_final = snap.workspace_snapshot_id
+    assert sid_final is not None
+    wid = snap.workspace_id
+    assert wid is not None
+
+    if snap.status != WorkspaceSnapshotStatus.AVAILABLE.value:
+        raise WorkspaceInvalidStateError(f"Snapshot must be AVAILABLE (current={snap.status})")
+
+    if not storage.has_nonempty_archive(workspace_id=wid, snapshot_id=sid_final):
+        raise WorkspaceInvalidStateError(
+            "Snapshot archive is missing or empty on storage; try saving again once the workspace is RUNNING or STOPPED.",
+        )
+
+    cleanup = False
+    if hasattr(storage, "download_archive"):
+        storage.download_archive(workspace_id=wid, snapshot_id=sid_final)
+        cleanup = True
+
+    local_path = storage.archive_path(workspace_id=wid, snapshot_id=sid_final)
+    if not Path(local_path).is_file() or Path(local_path).stat().st_size <= 0:
+        raise WorkspaceInvalidStateError("Snapshot archive file is missing or empty after storage sync")
+
+    name = f"workspace-{wid}-snapshot-{sid_final}.tar.gz"
+    return SnapshotArchiveDownloadInfo(
+        local_path=local_path,
+        suggested_filename=name,
+        cleanup_after_send=cleanup,
+    )
 
 
 def restore_snapshot(

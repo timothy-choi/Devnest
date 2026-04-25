@@ -21,6 +21,8 @@ export function useWorkspaces() {
   const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [snapshotNotice, setSnapshotNotice] = useState<string | null>(null);
+  const [snapshotBusyWorkspaceId, setSnapshotBusyWorkspaceId] = useState<number | null>(null);
 
   useEffect(() => {
     const clearStaleOpeningState = () => {
@@ -95,6 +97,7 @@ export function useWorkspaces() {
     onMutate: async (values) => {
       setCreateError(null);
       setActionError(null);
+      setSnapshotNotice(null);
 
       const optimisticWorkspace: Workspace = {
         id: Date.now(),
@@ -145,6 +148,7 @@ export function useWorkspaces() {
     },
     onMutate: async ({ id, action }) => {
       setActionError(null);
+      setSnapshotNotice(null);
       const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
       queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
         current.map((workspace) =>
@@ -257,6 +261,7 @@ export function useWorkspaces() {
     openInFlight.current.add(workspaceId);
 
     setActionError(null);
+    setSnapshotNotice(null);
     const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
     queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
       current.map((workspace) =>
@@ -354,6 +359,82 @@ export function useWorkspaces() {
     }
   };
 
+  const saveWorkspace = async (id: string) => {
+    const workspaceId = Number(id);
+    if (!Number.isFinite(workspaceId)) {
+      setActionError("Invalid workspace id.");
+      return;
+    }
+    setActionError(null);
+    setSnapshotNotice(null);
+    setSnapshotBusyWorkspaceId(workspaceId);
+    try {
+      const stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+      await browserApi.workspaces.createSnapshot(workspaceId, {
+        name: `Dashboard save ${stamp}`,
+        description: "Saved from DevNest dashboard",
+      });
+      setSnapshotNotice("Snapshot queued. It becomes downloadable when status is AVAILABLE and the worker finishes.");
+      await queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+    } catch (error) {
+      setSnapshotNotice(null);
+      setActionError(error instanceof ApiError ? error.detail : "Could not start snapshot.");
+    } finally {
+      setSnapshotBusyWorkspaceId(null);
+    }
+  };
+
+  const downloadWorkspace = async (id: string) => {
+    const workspaceId = Number(id);
+    if (!Number.isFinite(workspaceId)) {
+      setActionError("Invalid workspace id.");
+      return;
+    }
+    setActionError(null);
+    setSnapshotNotice(null);
+    setSnapshotBusyWorkspaceId(workspaceId);
+    try {
+      const res = await fetch(`/api/workspaces/${workspaceId}/snapshot-archive`, {
+        method: "GET",
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        let detail = res.statusText;
+        try {
+          const errBody = (await res.json()) as { detail?: string };
+          if (typeof errBody.detail === "string") {
+            detail = errBody.detail;
+          }
+        } catch {
+          // ignore
+        }
+        throw new ApiError(res.status, detail);
+      }
+      const cd = res.headers.get("Content-Disposition");
+      let filename = `workspace-${workspaceId}-snapshot.tar.gz`;
+      const m = cd && /filename\*?=(?:UTF-8''|)([^;\s]+)|filename="([^"]+)"/i.exec(cd);
+      if (m) {
+        filename = decodeURIComponent((m[1] || m[2] || filename).replace(/^"|"$/g, ""));
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.rel = "noopener";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setSnapshotNotice("Download started.");
+    } catch (error) {
+      setSnapshotNotice(null);
+      setActionError(error instanceof ApiError ? error.detail : "Could not download the snapshot archive.");
+    } finally {
+      setSnapshotBusyWorkspaceId(null);
+    }
+  };
+
   return {
     workspaces,
     filteredWorkspaces,
@@ -371,6 +452,8 @@ export function useWorkspaces() {
     isCreating: createMutation.isLoading,
     createError,
     actionError,
+    snapshotNotice,
+    snapshotBusyWorkspaceId,
     hasBusyWorkspace: workspaces.some((workspace) => workspace.isBusy),
     openCreateDialog: () => setCreateDialogOpen(true),
     createWorkspace: async (values: WorkspaceFormValues) => {
@@ -386,7 +469,8 @@ export function useWorkspaces() {
     deleteWorkspace: async (id: string) => {
       await actionMutation.mutateAsync({ id: Number(id), action: "delete" });
     },
-    downloadWorkspace: async () => undefined,
+    downloadWorkspace,
+    saveWorkspace,
     runWorkflow: async () => undefined,
   };
 }

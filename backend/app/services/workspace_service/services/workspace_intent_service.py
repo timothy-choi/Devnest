@@ -82,6 +82,7 @@ from app.services.quota_service.service import (
     check_session_quota,
     check_workspace_quota,
 )
+from app.services.storage.factory import get_snapshot_storage_provider
 
 # Stable mapping from job type to audit action name; defined at module level to avoid
 # re-creating the dict on every intent request.
@@ -287,13 +288,22 @@ def _ensure_workspace_reopen_allowed(ws: Workspace, rt: WorkspaceRuntime | None)
 
 
 def _restorable_snapshot_count(session: Session, workspace_id: int) -> int:
-    v = session.exec(
-        select(func.count())
-        .select_from(WorkspaceSnapshot)
-        .where(WorkspaceSnapshot.workspace_id == workspace_id)
-        .where(WorkspaceSnapshot.status == WorkspaceSnapshotStatus.AVAILABLE.value),
-    ).one()
-    return int(v or 0)
+    """Count AVAILABLE snapshots whose archive exists and is non-empty on the active storage provider."""
+    storage = get_snapshot_storage_provider()
+    rows = session.exec(
+        select(WorkspaceSnapshot).where(
+            WorkspaceSnapshot.workspace_id == workspace_id,
+            WorkspaceSnapshot.status == WorkspaceSnapshotStatus.AVAILABLE.value,
+        ),
+    ).all()
+    n = 0
+    for row in rows:
+        sid = row.workspace_snapshot_id
+        if sid is None:
+            continue
+        if storage.has_nonempty_archive(workspace_id=workspace_id, snapshot_id=int(sid)):
+            n += 1
+    return n
 
 
 _TRAEFIK_UPSTREAM_ERROR_STATUSES = frozenset({502, 503, 504})

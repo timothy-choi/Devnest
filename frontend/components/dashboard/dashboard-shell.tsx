@@ -77,6 +77,12 @@ export function DashboardShell() {
             </div>
           ) : null}
 
+          {workspaceState.snapshotNotice ? (
+            <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 px-5 py-4 text-sm text-emerald-900 shadow-[0_18px_45px_-40px_rgba(15,23,42,0.45)]">
+              {workspaceState.snapshotNotice}
+            </div>
+          ) : null}
+
           {workspaceState.hasBusyWorkspace ? (
             <div className="rounded-[24px] border border-sky-200 bg-sky-50/80 px-5 py-4 text-sm text-sky-900 shadow-[0_18px_45px_-40px_rgba(15,23,42,0.45)]">
               Transitional workspace states are controlled by backend jobs. If a workspace stays in
@@ -137,6 +143,8 @@ export function DashboardShell() {
             onStop={workspaceState.stopWorkspace}
             onRunWorkflow={workspaceState.runWorkflow}
             onDownload={workspaceState.downloadWorkspace}
+            onSaveWorkspace={workspaceState.saveWorkspace}
+            snapshotBusyWorkspaceId={workspaceState.snapshotBusyWorkspaceId}
           />
         </section>
       </div>

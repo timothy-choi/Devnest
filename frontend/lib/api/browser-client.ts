@@ -115,6 +115,19 @@ export type CreateWorkspaceInput = {
   aiModel?: string;
 };
 
+export type CreateSnapshotInput = {
+  name: string;
+  description?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type CreateSnapshotAccepted = {
+  workspace_id: number;
+  snapshot_id: number;
+  job_id: number;
+  status: string;
+};
+
 export type SaveNotificationPreferencesInput = {
   preferences: Array<{
     notificationType: string;
@@ -187,6 +200,12 @@ export const browserApi = {
     async remove(id: number) {
       return request<{ message: string }>(`/api/workspaces/${id}`, {
         method: "DELETE",
+      });
+    },
+    async createSnapshot(id: number, payload: CreateSnapshotInput) {
+      return request<CreateSnapshotAccepted>(`/api/workspaces/${id}/snapshots`, {
+        method: "POST",
+        body: JSON.stringify(payload),
       });
     },
   },

@@ -98,8 +98,21 @@ def test_post_and_list_snapshots_202_and_200(client, db_session) -> None:
     assert len(lst) == 1
     assert lst[0]["name"] == "api-snap"
     assert lst[0]["metadata"] == {"tier": "dev"}
+    assert lst[0]["storage_backend"] in ("local", "s3", "pending", "unknown")
+    assert "storage_uri" not in lst[0]
 
     sid = body["snapshot_id"]
     r3 = client.get(f"/snapshots/{sid}", headers=_auth(token))
     assert r3.status_code == status.HTTP_200_OK
     assert r3.json()["workspace_snapshot_id"] == sid
+
+
+def test_get_snapshot_archive_404_when_no_completed_snapshot(client, db_session) -> None:
+    uid, token = _register_and_token(
+        client,
+        username="snap_dl_user",
+        email="snap_dl_user@example.com",
+    )
+    wid = _seed_running_workspace(db_session, uid)
+    r = client.get(f"/workspaces/{wid}/snapshots/archive", headers=_auth(token))
+    assert r.status_code == status.HTTP_404_NOT_FOUND

@@ -233,7 +233,10 @@ class WorkspaceDetailResponse(BaseModel):
     restorable_snapshot_count: int = Field(
         default=0,
         ge=0,
-        description="Number of AVAILABLE snapshots for this workspace (restore path when project data is missing).",
+        description=(
+            "Number of AVAILABLE snapshots whose archive exists and is non-empty on storage "
+            "(restore/download eligibility)."
+        ),
     )
     project_data_lifecycle: Literal["ok", "unknown", "restore_required", "unrecoverable"] = Field(
         default="ok",
