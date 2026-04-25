@@ -17,6 +17,8 @@ For `backend` / `workspace-worker`, Docker Compose **`environment:` overrides `e
    ./scripts/deploy_integration.sh
    ```
 
+   GitHub Actions (`linux-full-stack-integration` in `tests.yml` / `nightly.yml`) runs the same script with an empty temp `--env-file` so compose uses bundled Postgres defaults.
+
    Equivalent manual command:
 
    ```bash

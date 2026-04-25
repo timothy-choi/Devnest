@@ -316,40 +316,16 @@ jobs:
       needs.quality-checks.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      DEVNEST_INTEGRATION_ENV_FILE: /tmp/devnest-integration-ci.env
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Start DevNest full-stack environment
-        run: docker compose -f docker-compose.integration.yml up -d --build
-
-      - name: Wait for backend readiness
         run: |
-          for i in {1..30}; do
-            if curl -fsS http://localhost:8000/health; then
-              echo "Backend is ready."
-              exit 0
-            fi
-            echo "Waiting for backend..."
-            sleep 5
-          done
-          echo "Backend failed to start."
-          docker compose -f docker-compose.integration.yml logs
-          exit 1
-
-      - name: Wait for frontend readiness
-        run: |
-          for i in {1..30}; do
-            if curl -fsS http://localhost:3000/; then
-              echo "Frontend is ready."
-              exit 0
-            fi
-            echo "Waiting for frontend..."
-            sleep 5
-          done
-          echo "Frontend failed to start."
-          docker compose -f docker-compose.integration.yml logs
-          exit 1
+          : > "${DEVNEST_INTEGRATION_ENV_FILE}"
+          ENV_FILE="${DEVNEST_INTEGRATION_ENV_FILE}" ./scripts/deploy_integration.sh
 
       - name: Print runner-local stack URLs
         run: |
@@ -360,11 +336,11 @@ jobs:
 
       - name: Dump container logs on failure
         if: failure()
-        run: docker compose -f docker-compose.integration.yml logs
+        run: docker compose --env-file "${DEVNEST_INTEGRATION_ENV_FILE}" -f docker-compose.integration.yml logs
 
       - name: Stop full-stack environment
         if: always()
-        run: docker compose -f docker-compose.integration.yml down -v
+        run: docker compose --env-file "${DEVNEST_INTEGRATION_ENV_FILE}" -f docker-compose.integration.yml down -v
 
   deploy-ec2-full-stack:
     name: Deploy full-stack to EC2

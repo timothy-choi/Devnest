@@ -200,6 +200,22 @@ if ! dc exec -T frontend node -e "fetch('http://backend:8000/ready').then(r=>pro
 fi
 info "frontend → backend connectivity OK."
 
+info "Host probe: GET http://127.0.0.1:3000/ (frontend listening)"
+wait_frontend_root() {
+  local i
+  for ((i = 0; i < 30; i++)); do
+    if curl -sfS "http://127.0.0.1:3000/" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+if ! wait_frontend_root; then
+  die "Frontend root did not respond on http://127.0.0.1:3000/ in time."
+fi
+info "Frontend root OK from host."
+
 info "workspace-worker snapshot_storage startup line (last match in recent logs):"
 snap_line="$(dc logs --no-color --tail 400 workspace-worker 2>&1 | grep -F 'workspace-worker startup snapshot_storage provider=' | tail -1)" || true
 if [[ -z "${snap_line}" ]]; then
