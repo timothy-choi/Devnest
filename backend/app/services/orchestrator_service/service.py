@@ -44,16 +44,19 @@ from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
 from app.services.node_execution_service.workspace_project_dir import (
+    WORKSPACE_USER_PROJECT_SUBDIR,
     default_local_ensure_workspace_project_dir,
     ensure_code_server_bind_auth_proxy_config,
     finalize_workspace_host_project_tree_ownership,
     log_workspace_config_bind_host_before_docker_start,
+    resolve_workspace_ide_bind_host_path,
     stat_mode_octal,
     stat_uid_gid,
     verify_workspace_runtime_can_read_write_file,
     verify_workspace_runtime_can_write_dir,
     verify_workspace_runtime_owns_path,
     workspace_container_uid_gid,
+    workspace_project_dir_name,
 )
 from app.services.placement_service.runtime_policy import authoritative_container_ref_required
 
@@ -82,7 +85,7 @@ _CONFIG_VERSION_LABEL = "devnest.config_version"
 
 logger = logging.getLogger(__name__)
 
-_EnsureWorkspaceProjectDir = Callable[[str, str], str]
+_EnsureWorkspaceProjectDir = Callable[..., str]
 
 
 def _env_skip_linux_topology_attachment() -> bool:
@@ -236,14 +239,28 @@ class DefaultOrchestratorService(OrchestratorService):
 
         ws_int = _parse_topology_workspace_id(wid)
         name = _sanitize_container_name(wid)
+        # ``launch_mode=None`` is treated as permissive (create-if-missing) for callers that omit the
+        # flag (tests, internal helpers). Production jobs pass explicit ``"new"`` or ``"resume"``.
+        if launch_mode is None:
+            mode = "resume"
+            allow_create = True
+        else:
+            mode = (launch_mode or "").strip().lower() or "resume"
+            allow_create = mode == "new"
         try:
-            workspace_host_path = self._ensure_workspace_project_dir(
+            bundle_host_path = self._ensure_workspace_project_dir(
                 self._workspace_projects_base,
                 wid,
                 project_storage_key,
+                allow_create=allow_create,
             )
         except ValueError as e:
             raise WorkspaceBringUpError(str(e)) from e
+
+        workspace_host_path = resolve_workspace_ide_bind_host_path(
+            bundle_host_path,
+            launch_mode_raw=launch_mode,
+        )
 
         labels: dict[str, str] = {
             "devnest.workspace_id": wid,
@@ -257,9 +274,10 @@ class DefaultOrchestratorService(OrchestratorService):
             extra={
                 "workspace_id": wid,
                 "project_storage_key": (project_storage_key or "").strip() or None,
+                "workspace_bundle_host_path": bundle_host_path,
                 "workspace_host_path": workspace_host_path,
-                "launch_mode": (launch_mode or "").strip() or "resume",
-                "is_resumed_workspace": ((launch_mode or "").strip().lower() != "new"),
+                "launch_mode": mode,
+                "is_resumed_workspace": (mode != "new"),
             },
         )
 
@@ -269,7 +287,7 @@ class DefaultOrchestratorService(OrchestratorService):
             container_name=name,
             workspace_host_path=workspace_host_path,
             project_storage_key=(project_storage_key or "").strip() or None,
-            launch_mode=(launch_mode or "").strip().lower() or "resume",
+            launch_mode=mode,
             labels=labels,
         )
 
@@ -296,6 +314,7 @@ class DefaultOrchestratorService(OrchestratorService):
         wid: str,
         workspace_host_path: str | None = None,
         launch_mode: str = "resume",
+        project_storage_key: str | None = None,
     ) -> list[WorkspaceExtraBindMountSpec]:
         """Build code-server persistence bind mounts for config and data.
 
@@ -311,15 +330,29 @@ class DefaultOrchestratorService(OrchestratorService):
         if not wid_clean:
             return []
         if workspace_host_path and str(workspace_host_path).strip():
-            project_root = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
+            ide_bind_host = os.path.realpath(os.path.expanduser((workspace_host_path or "").strip()))
         else:
             try:
-                project_root = self._ensure_workspace_project_dir(self._workspace_projects_base, wid_clean, None)
+                key = (project_storage_key or "").strip() or None
+                # Primary resume strictness is enforced in ``_bring_up_build_context`` (real bring-up
+                # always passes ``workspace_host_path`` here). This fallback resolves the host tree
+                # for tests and helpers; create-if-missing so code-server dirs can be prepared.
+                ide_bind_host = self._ensure_workspace_project_dir(
+                    self._workspace_projects_base,
+                    wid_clean,
+                    key,
+                    allow_create=True,
+                )
             except ValueError:
                 return []
-        if not project_root:
+        if not ide_bind_host:
             return []
-        cs_base = os.path.join(project_root, "code-server")
+        ide_path = Path(ide_bind_host)
+        if ide_path.name == WORKSPACE_USER_PROJECT_SUBDIR:
+            bundle_root_for_cs = str(ide_path.parent.resolve())
+        else:
+            bundle_root_for_cs = str(ide_path.resolve())
+        cs_base = os.path.join(bundle_root_for_cs, "code-server")
         cfg_host = os.path.join(cs_base, "config")
         data_host = os.path.join(cs_base, "data")
         cfg_file = os.path.join(cfg_host, "config.yaml")
@@ -336,7 +369,8 @@ class DefaultOrchestratorService(OrchestratorService):
                 "workspace_code_server_host_prepare_start",
                 extra={
                     "workspace_id": wid_clean,
-                    "workspace_host_path": project_root,
+                    "workspace_ide_bind_host": ide_bind_host,
+                    "workspace_bundle_host_path": bundle_root_for_cs,
                     "cs_base": cs_base,
                     "cfg_host": cfg_host,
                     "data_host": data_host,
@@ -356,9 +390,9 @@ class DefaultOrchestratorService(OrchestratorService):
             )
             # Seed/patch ``config.yaml`` first; this may create or rewrite the file as root.
             ensure_code_server_bind_auth_proxy_config(cfg_host)
-            # Chown the entire project tree (not only code-server/) so nothing under the bind root
+            # Chown the workspace bundle (``project/`` + ``code-server/``) so nothing under the tree
             # stays root-owned after mkdir/seed/rmtree steps.
-            finalize_workspace_host_project_tree_ownership(project_root, strict=_strict_chown)
+            finalize_workspace_host_project_tree_ownership(bundle_root_for_cs, strict=_strict_chown)
             for label, host in (("config", cfg_host), ("data", data_host)):
                 verify_workspace_runtime_owns_path(host)
                 verify_workspace_runtime_can_write_dir(host)
@@ -493,6 +527,7 @@ class DefaultOrchestratorService(OrchestratorService):
             ctx.wid,
             ctx.workspace_host_path,
             ctx.launch_mode,
+            ctx.project_storage_key,
         )
 
         for spec in cs_extra_mounts or []:
@@ -1402,6 +1437,19 @@ class DefaultOrchestratorService(OrchestratorService):
         )
         return result
 
+    def _workspace_project_host_dir_exists(self, workspace_id: str, project_storage_key: str | None) -> bool:
+        """True when the canonical project bind-mount host directory exists (stat only; no mkdir)."""
+        wid = (workspace_id or "").strip()
+        if not wid:
+            return False
+        base = (self._workspace_projects_base or "").strip()
+        if not base:
+            return False
+        key = (project_storage_key or "").strip() or None
+        dir_name = workspace_project_dir_name(wid, key)
+        p = Path(os.path.realpath(os.path.expanduser(str(Path(base) / dir_name))))
+        return p.is_dir()
+
     def restart_workspace_runtime(
         self,
         *,
@@ -1475,12 +1523,19 @@ class DefaultOrchestratorService(OrchestratorService):
                 issues=_issues_or_none(issues),
             )
 
+        # First successful bring-up may never have run (e.g. stop no-op on missing container). In that
+        # case the host project directory does not exist yet — use permissive ``launch_mode=None``
+        # so bring-up can create the tree; otherwise keep ``resume`` to avoid silent empty recreation
+        # when persisted data was removed after a real run.
+        bring_launch_mode: str | None = (
+            None if not self._workspace_project_host_dir_exists(wid, project_storage_key) else "resume"
+        )
         try:
             up_res = self.bring_up_workspace_runtime(
                 workspace_id=wid,
                 project_storage_key=project_storage_key,
                 requested_config_version=requested_config_version,
-                launch_mode="resume",
+                launch_mode=bring_launch_mode,
             )
         except WorkspaceBringUpError as e:
             issues.append(f"bringup:failed:{e}")
@@ -1776,13 +1831,20 @@ class DefaultOrchestratorService(OrchestratorService):
             raise WorkspaceSnapshotError("workspace_id is empty")
         _parse_topology_workspace_id(wid)
         try:
-            return self._ensure_workspace_project_dir(
-                self._workspace_projects_base,
-                wid,
-                project_storage_key,
-            )
+            bundle = Path(
+                self._ensure_workspace_project_dir(
+                    self._workspace_projects_base,
+                    wid,
+                    project_storage_key,
+                    allow_create=True,
+                )
+            ).resolve()
         except ValueError as e:
             raise WorkspaceSnapshotError(str(e)) from e
+        pr = bundle / WORKSPACE_USER_PROJECT_SUBDIR
+        if pr.is_dir():
+            return str(pr)
+        return str(bundle)
 
     @staticmethod
     def _validate_tar_members(tf: tarfile.TarFile, dest_resolved: Path) -> None:

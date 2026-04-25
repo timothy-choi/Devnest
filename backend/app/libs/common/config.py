@@ -43,6 +43,52 @@ def database_host_and_name_for_log(dsn: str) -> tuple[str, str]:
         return ("<unparseable>", "<unparseable>")
 
 
+def _normalized_public_base_for_log(raw: str) -> str:
+    value = (raw or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if "://" not in value:
+        value = f"http://{value}"
+    return value
+
+
+def _hostname_from_public_base(raw: str) -> str:
+    value = _normalized_public_base_for_log(raw)
+    if not value:
+        return ""
+    try:
+        return (urlparse(value).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def is_loopback_public_base(raw: str) -> bool:
+    return _hostname_from_public_base(raw) in ("", "localhost", "127.0.0.1", "::1")
+
+
+def oauth_startup_status_for_log(settings: "Settings") -> dict[str, object]:
+    github_base = _normalized_public_base_for_log(settings.github_oauth_public_base_url)
+    google_base = _normalized_public_base_for_log(settings.gcloud_oauth_public_base_url)
+    frontend_base = _normalized_public_base_for_log(settings.devnest_frontend_public_base_url)
+    github_configured = bool(
+        (settings.oauth_github_client_id or "").strip()
+        and (settings.oauth_github_client_secret or "").strip()
+        and github_base
+    )
+    google_configured = bool(
+        (settings.oauth_google_client_id or "").strip()
+        and (settings.oauth_google_client_secret or "").strip()
+        and google_base
+    )
+    return {
+        "frontend_public_base_url": frontend_base or "-",
+        "github_oauth_public_base_url": github_base or "-",
+        "gcloud_oauth_public_base_url": google_base or "-",
+        "github_oauth_configured": github_configured,
+        "google_oauth_configured": google_configured,
+    }
+
+
 # Database URL resolution (application + Alembic via get_settings().database_url):
 #   1. os.environ["DEVNEST_DATABASE_URL"] — highest precedence (explicit DevNest name).
 #   2. os.environ["DATABASE_URL"] — standard; must win over repo ``backend/.env`` file fallbacks.
@@ -168,7 +214,7 @@ class Settings(BaseSettings):
     devnest_snapshot_storage_root: str = ""
     # Snapshot storage backend: "local" (default) or "s3".
     devnest_snapshot_storage_provider: str = "local"
-    # S3 provider settings (only used when devnest_snapshot_storage_provider=s3).
+    # S3 provider settings (used when devnest_snapshot_storage_provider=s3).
     devnest_s3_snapshot_bucket: str = ""
     devnest_s3_snapshot_prefix: str = "devnest-snapshots"
     # Temp directory for staging S3 snapshot archives locally. Empty → system temp.
@@ -201,6 +247,9 @@ class Settings(BaseSettings):
     # When true, GET /internal/gateway/auth enforces workspace session validation for Traefik ForwardAuth.
     # Set false in local/dev mode (default) to skip session requirement during development.
     devnest_gateway_auth_enabled: bool = False
+    # Optional Traefik HTTP base (e.g. ``http://traefik:80`` on the Docker network). When set, attach/access
+    # waits until a GET with ``Host: <workspace hostname>`` is not 404 so the edge has loaded dynamic routes.
+    devnest_gateway_traefik_http_probe_base: str = ""
 
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""
@@ -580,8 +629,12 @@ class Settings(BaseSettings):
             return 1.5
         return max(0.05, min(n, 30.0))
 
-    # AWS (EC2 node registry; optional — uses default credential chain when keys empty).
-    aws_region: str = ""
+    # AWS (EC2 node registry, S3 snapshots; optional — uses default credential chain when keys empty).
+    aws_region: str = Field(
+        default="",
+        validation_alias=AliasChoices("AWS_REGION", "aws_region"),
+        description="Region for AWS APIs (S3 snapshots, EC2 helpers). Required when snapshot provider is s3.",
+    )
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     # Placement filter: ``all`` (default) = local + EC2 nodes; ``local`` / ``ec2`` = restrict pool.
@@ -973,6 +1026,55 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_resolved_database_url(self) -> Self:
+        """Reject malformed DSNs; require psycopg URL form when cloud/RDS posture flags are on."""
+        url = (self.database_url or "").strip()
+        if not url:
+            return self
+        if "://" not in url and "=" in url and ("host=" in url.lower() or "dbname=" in url.lower()):
+            raise RuntimeError(
+                "DATABASE_URL / DEVNEST_DATABASE_URL looks like a libpq keyword DSN but was not converted "
+                "to a URL (missing host, dbname, or user?). Use a single-line "
+                "postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME?... URL, or a complete libpq keyword string."
+            )
+        try:
+            from sqlalchemy.engine.url import make_url
+
+            u = make_url(url)
+        except Exception as exc:
+            raise RuntimeError(
+                "Malformed database connection URL (DATABASE_URL / DEVNEST_DATABASE_URL): "
+                f"could not parse as SQLAlchemy URL ({type(exc).__name__}: {exc}). "
+                "Use a single-line postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME?... value."
+            ) from exc
+        driver = (u.drivername or "").lower()
+        # SQLite and other non-Postgres URLs are allowed for unit tests and local tools; only
+        # enforce host/database/psycopg rules for PostgreSQL family URLs.
+        if not driver.startswith("postgresql"):
+            return self
+
+        cloud = self.devnest_expect_external_postgres or self.devnest_expect_remote_gateway_clients
+        if cloud and (u.drivername or "") != "postgresql+psycopg":
+            raise RuntimeError(
+                "RDS / remote integration posture requires SQLAlchemy psycopg v3 URLs "
+                f"(postgresql+psycopg://…); got driver {u.drivername!r}. "
+                "Fix DATABASE_URL / DEVNEST_DATABASE_URL or generate .env.integration via "
+                "scripts/write_integration_deploy_env.py write."
+            )
+        dbn = (u.database or "").strip() if u.database is not None else ""
+        if not dbn:
+            raise RuntimeError(
+                "PostgreSQL DATABASE_URL must include a database name in the path "
+                "(postgresql+psycopg://…@HOST:PORT/DBNAME)."
+            )
+        if not (u.host or "").strip():
+            raise RuntimeError(
+                "PostgreSQL DATABASE_URL must include a non-empty database host "
+                "(postgresql+psycopg://…@HOST:PORT/DBNAME)."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_integration_startup_expectations(self) -> Self:
         """Fail fast when EC2/RDS-style expectations contradict bundled or lab-only defaults."""
         if self.devnest_expect_external_postgres:
@@ -993,12 +1095,97 @@ class Settings(BaseSettings):
                 )
         if self.devnest_expect_remote_gateway_clients:
             domain = (self.devnest_base_domain or "").strip().lower()
+            if not domain:
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_BASE_DOMAIN is empty. "
+                    "Set DEVNEST_BASE_DOMAIN to a hostname remote browsers resolve for ws-<id>.<domain>, "
+                    "or rely on deploy-ec2.sh to derive <public-ip>.sslip.io on EC2."
+                )
             if domain in ("app.lvh.me", "app.devnest.local"):
                 raise RuntimeError(
                     "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_BASE_DOMAIN is set to a "
                     f"hostname that does not resolve for remote browsers ({domain!r}). Use sslip.io, "
                     "a wildcard DNS zone pointing at this host, or similar; see docs/INTEGRATION_STARTUP.md."
                 )
+            gh_id = (self.oauth_github_client_id or "").strip()
+            gh_sec = (self.oauth_github_client_secret or "").strip()
+            if bool(gh_id) ^ bool(gh_sec):
+                raise RuntimeError(
+                    "Incomplete GitHub OAuth: set both OAUTH_GITHUB_CLIENT_ID and OAUTH_GITHUB_CLIENT_SECRET "
+                    "(or legacy GH_/GITHUB_ aliases), or clear both to disable GitHub OAuth "
+                    "(DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true)."
+                )
+            go_id = (self.oauth_google_client_id or "").strip()
+            go_sec = (self.oauth_google_client_secret or "").strip()
+            if bool(go_id) ^ bool(go_sec):
+                raise RuntimeError(
+                    "Incomplete Google OAuth: set both OAUTH_GOOGLE_CLIENT_ID and OAUTH_GOOGLE_CLIENT_SECRET "
+                    "(or legacy GOOGLE_ aliases), or clear both to disable Google OAuth "
+                    "(DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true)."
+                )
+            if is_loopback_public_base(self.devnest_frontend_public_base_url):
+                raise RuntimeError(
+                    "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true but DEVNEST_FRONTEND_PUBLIC_BASE_URL is "
+                    "empty or loopback-only. Set it to the browser-visible UI origin "
+                    "(for example http://203-0-113-10.sslip.io:3000)."
+                )
+            github_creds_present = bool(
+                (self.oauth_github_client_id or "").strip() and (self.oauth_github_client_secret or "").strip()
+            )
+            google_creds_present = bool(
+                (self.oauth_google_client_id or "").strip() and (self.oauth_google_client_secret or "").strip()
+            )
+            if github_creds_present and is_loopback_public_base(self.github_oauth_public_base_url):
+                raise RuntimeError(
+                    "GitHub OAuth credentials are set, but GITHUB_OAUTH_PUBLIC_BASE_URL resolves to an "
+                    "empty or loopback-only host. In EC2/remote mode set DEVNEST_FRONTEND_PUBLIC_BASE_URL "
+                    "or GITHUB_OAUTH_PUBLIC_BASE_URL to the public UI origin."
+                )
+            if google_creds_present and is_loopback_public_base(self.gcloud_oauth_public_base_url):
+                raise RuntimeError(
+                    "Google OAuth credentials are set, but GCLOUD_OAUTH_PUBLIC_BASE_URL resolves to an "
+                    "empty or loopback-only host. In EC2/remote mode set DEVNEST_FRONTEND_PUBLIC_BASE_URL "
+                    "or GCLOUD_OAUTH_PUBLIC_BASE_URL to the public UI origin."
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_snapshot_storage_config(self) -> Self:
+        provider = (self.devnest_snapshot_storage_provider or "local").strip().lower()
+        if provider not in ("local", "s3"):
+            raise RuntimeError(
+                "DEVNEST_SNAPSHOT_STORAGE_PROVIDER must be 'local' or 's3' "
+                f"(got {self.devnest_snapshot_storage_provider!r})."
+            )
+        cloud_posture = bool(
+            self.devnest_expect_external_postgres or self.devnest_expect_remote_gateway_clients
+        )
+        if cloud_posture and provider != "s3":
+            raise RuntimeError(
+                "Integration/cloud posture is enabled (DEVNEST_EXPECT_EXTERNAL_POSTGRES and/or "
+                "DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS) but DEVNEST_SNAPSHOT_STORAGE_PROVIDER is not 's3'. "
+                "Snapshot archives must use object storage so the API and workspace-worker stay consistent "
+                "across hosts. Set DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3, DEVNEST_S3_SNAPSHOT_BUCKET, AWS_REGION, "
+                "and optional DEVNEST_S3_SNAPSHOT_PREFIX (see docs/INTEGRATION_STARTUP.md). "
+                "Or set both expect flags to false for single-node/local snapshot storage only."
+            )
+        if provider != "s3":
+            return self
+
+        bucket = (self.devnest_s3_snapshot_bucket or "").strip()
+        region = (self.aws_region or "").strip()
+        missing: list[str] = []
+        if not bucket:
+            missing.append("DEVNEST_S3_SNAPSHOT_BUCKET")
+        if not region:
+            missing.append("AWS_REGION")
+        if missing:
+            raise RuntimeError(
+                "S3 snapshot storage selected but required configuration is missing: "
+                + ", ".join(missing)
+                + ". Set DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3 only when the S3 snapshot bucket "
+                "and AWS region are configured."
+            )
         return self
 
 

@@ -73,6 +73,9 @@ def _make_service(
     mock_probe: MagicMock,
     ws_root: Path,
 ) -> DefaultOrchestratorService:
+    # Match production: restart passes launch_mode resume when the canonical host project dir exists.
+    ws_root.mkdir(parents=True, exist_ok=True)
+    (ws_root / WORKSPACE_ID).mkdir(parents=True, exist_ok=True)
     return DefaultOrchestratorService(
         mock_runtime,
         mock_topology,

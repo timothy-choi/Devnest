@@ -66,6 +66,7 @@ the callback request and is never logged.
 1. Create a GitHub OAuth App at https://github.com/settings/developers.
 2. Set the callback URL to `{GITHUB_OAUTH_PUBLIC_BASE_URL}/auth/provider-tokens/github/callback`.
 3. Configure `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `GITHUB_OAUTH_PUBLIC_BASE_URL`.
+   In the integration/EC2 stack this should be the browser-visible frontend origin, not the backend API origin.
 4. Generate and set `DEVNEST_TOKEN_ENCRYPTION_KEY`.
 
 ---
@@ -88,6 +89,7 @@ Repository access via Google is not applicable. GitLab/other providers are defer
 1. Create OAuth 2.0 credentials at https://console.developers.google.com/.
 2. Set the authorized redirect URI to `{GCLOUD_OAUTH_PUBLIC_BASE_URL}/auth/oauth/google/callback`.
 3. Configure `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GCLOUD_OAUTH_PUBLIC_BASE_URL`.
+   In the integration/EC2 stack this should be the browser-visible frontend origin, not the backend API origin.
 
 ---
 

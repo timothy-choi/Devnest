@@ -4,6 +4,8 @@
 #   NEXT_PUBLIC_API_BASE_URL — e.g. http://<public-ip>:8000 for the browser UI build
 #   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it (via DEVNEST_COMPOSE_DATABASE_URL)
 #     instead of local compose Postgres
+#   ${REPO_DIR}/.env.integration — optional; when present, sourced into this shell before validation and passed to
+#     ``docker compose --env-file`` so RDS, S3, and OAuth vars survive non-interactive SSH reliably.
 #   DEVNEST_DEPLOY_DIR — repo path (default: ~/Devnest)
 #   DEVNEST_DEPLOY_REPO_URL — git remote (default: upstream Devnest URL)
 #   DEVNEST_DEPLOY_GIT_REF — when set (e.g. CI ``github.sha``), check out this commit/tag after fetch instead of
@@ -15,6 +17,58 @@ BRANCH="${1:-main}"
 REPO_DIR="${DEVNEST_DEPLOY_DIR:-${HOME}/Devnest}"
 REPO_URL="${DEVNEST_DEPLOY_REPO_URL:-https://github.com/timothy-choi/Devnest.git}"
 COMPOSE="${COMPOSE_FILE:-docker-compose.integration.yml}"
+INTEGRATION_ENV_FILE="${REPO_DIR}/.env.integration"
+
+_devnest_load_integration_env_file() {
+  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+    echo "Loading ${INTEGRATION_ENV_FILE} into deploy shell (values not printed)."
+    set -a
+    # shellcheck disable=SC1091
+    source "${INTEGRATION_ENV_FILE}"
+    set +a
+  fi
+}
+
+_devnest_compose() {
+  # Cwd is ${REPO_DIR}; use an absolute --env-file so compose never misses integration env after chdir/cron.
+  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+    docker compose --env-file "${INTEGRATION_ENV_FILE}" -f "${COMPOSE}" "$@"
+    return
+  fi
+  if [[ -n "${DATABASE_URL:-}" ]]; then
+    echo "ERROR: ${INTEGRATION_ENV_FILE} is missing but DATABASE_URL is set (RDS deploy requires a generated integration env file)." >&2
+    exit 1
+  fi
+  docker compose -f "${COMPOSE}" "$@"
+}
+
+_devnest_deploy_env_presence() {
+  echo "--- deploy env presence (no secret values) ---"
+  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+    echo ".env.integration: present (${INTEGRATION_ENV_FILE})"
+  else
+    echo ".env.integration: absent (compose uses shell env only)"
+  fi
+  if [[ -n "${DATABASE_URL:-}" ]]; then echo "DATABASE_URL: set"; else echo "DATABASE_URL: missing"; fi
+  if [[ -n "${DEVNEST_COMPOSE_DATABASE_URL:-}" ]]; then echo "DEVNEST_COMPOSE_DATABASE_URL: set"; else echo "DEVNEST_COMPOSE_DATABASE_URL: missing"; fi
+  echo "DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-<unset>}"
+  if [[ -n "${DEVNEST_S3_SNAPSHOT_BUCKET:-}" ]]; then echo "DEVNEST_S3_SNAPSHOT_BUCKET: set"; else echo "DEVNEST_S3_SNAPSHOT_BUCKET: missing"; fi
+  if [[ -n "${AWS_REGION:-}" ]]; then echo "AWS_REGION: set"; else echo "AWS_REGION: missing"; fi
+  if [[ -n "${DEVNEST_S3_SNAPSHOT_PREFIX:-}" ]]; then echo "DEVNEST_S3_SNAPSHOT_PREFIX: set"; else echo "DEVNEST_S3_SNAPSHOT_PREFIX: missing"; fi
+  if [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL: set"; else echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL: missing"; fi
+  if [[ -n "${GITHUB_OAUTH_PUBLIC_BASE_URL:-}" ]]; then echo "GITHUB_OAUTH_PUBLIC_BASE_URL: set"; else echo "GITHUB_OAUTH_PUBLIC_BASE_URL: missing"; fi
+  if [[ -n "${GCLOUD_OAUTH_PUBLIC_BASE_URL:-}" ]]; then echo "GCLOUD_OAUTH_PUBLIC_BASE_URL: set"; else echo "GCLOUD_OAUTH_PUBLIC_BASE_URL: missing"; fi
+  if [[ -n "${OAUTH_GITHUB_CLIENT_ID:-}" ]]; then echo "OAUTH_GITHUB_CLIENT_ID: set"; else echo "OAUTH_GITHUB_CLIENT_ID: missing"; fi
+  if [[ -n "${OAUTH_GITHUB_CLIENT_SECRET:-}" ]]; then echo "OAUTH_GITHUB_CLIENT_SECRET: set"; else echo "OAUTH_GITHUB_CLIENT_SECRET: missing"; fi
+  if [[ -n "${OAUTH_GOOGLE_CLIENT_ID:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_ID: set"; else echo "OAUTH_GOOGLE_CLIENT_ID: missing"; fi
+  if [[ -n "${OAUTH_GOOGLE_CLIENT_SECRET:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_SECRET: set"; else echo "OAUTH_GOOGLE_CLIENT_SECRET: missing"; fi
+  if [[ -n "${DEVNEST_BASE_DOMAIN:-}" ]]; then echo "DEVNEST_BASE_DOMAIN: set"; else echo "DEVNEST_BASE_DOMAIN: missing"; fi
+  if [[ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_API_BASE_URL: set"; else echo "NEXT_PUBLIC_API_BASE_URL: missing"; fi
+  if [[ -n "${NEXT_PUBLIC_APP_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_APP_BASE_URL: set"; else echo "NEXT_PUBLIC_APP_BASE_URL: missing"; fi
+  echo "---"
+}
+
+_devnest_load_integration_env_file
 
 if [[ -n "${DEVNEST_DEPLOY_GIT_REF:-}" ]]; then
   echo "Deploying DevNest at ref: ${DEVNEST_DEPLOY_GIT_REF} (branch arg: ${BRANCH})"
@@ -35,6 +89,22 @@ if [[ -n "${DATABASE_URL:-}" ]]; then
   # Fail fast if DEVNEST_BASE_DOMAIN is still a client-loopback pattern (e.g. app.lvh.me) for remote browsers.
   export DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS=true
   echo "External DATABASE_URL detected; control-plane services will target managed Postgres/RDS."
+  # Same snapshot storage for API + workspace-worker (Settings enforces S3 when expect-* flags are set).
+  _snap_provider="${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-}"
+  if [[ "${_snap_provider}" != "s3" ]]; then
+    echo "ERROR: External DATABASE_URL requires S3 snapshot storage (DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3)." >&2
+    echo "Set DEVNEST_S3_SNAPSHOT_BUCKET and AWS_REGION (optional: DEVNEST_S3_SNAPSHOT_PREFIX, credentials)." >&2
+    exit 1
+  fi
+  if [[ -z "${DEVNEST_S3_SNAPSHOT_BUCKET:-}" ]]; then
+    echo "ERROR: DEVNEST_S3_SNAPSHOT_BUCKET must be set when using DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3." >&2
+    exit 1
+  fi
+  if [[ -z "${AWS_REGION:-}" ]]; then
+    echo "ERROR: AWS_REGION must be set when using DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3." >&2
+    exit 1
+  fi
+  unset _snap_provider || true
 elif [[ -n "${DEVNEST_REQUIRE_EXTERNAL_DB:-}" ]]; then
   echo "DEVNEST_REQUIRE_EXTERNAL_DB is set, but DATABASE_URL / DEVNEST_DATABASE_URL is empty." >&2
   exit 1
@@ -63,7 +133,7 @@ if [[ -z "${DEVNEST_BASE_DOMAIN:-}" ]]; then
   fi
   if [[ -n "${_pub_ip:-}" ]] && [[ "${_pub_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     export DEVNEST_BASE_DOMAIN="${_pub_ip//./-}.sslip.io"
-    echo "DEVNEST_BASE_DOMAIN unset: using ${DEVNEST_BASE_DOMAIN} (EC2 public-ipv4 → sslip.io)."
+    echo "DEVNEST_BASE_DOMAIN unset: derived from EC2 metadata → sslip.io (value not printed)."
   fi
   unset _meta_token _pub_ip || true
 fi
@@ -77,8 +147,17 @@ if [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
   _frontend_name="${_frontend_host%%:*}"
   _frontend_port="${_frontend_host#${_frontend_name}}"
   if [[ "${_frontend_name}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    _fe_before="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
     export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${_frontend_name//./-}.sslip.io${_frontend_port:-:3000}"
-    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL raw IPv4 normalized to ${DEVNEST_FRONTEND_PUBLIC_BASE_URL} for OAuth callbacks."
+    # .env.integration often mirrors the same URL for GitHub/Google; keep OAuth bases aligned with sslip.
+    if [[ "${GITHUB_OAUTH_PUBLIC_BASE_URL:-}" == "${_fe_before}" ]]; then
+      export GITHUB_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+    fi
+    if [[ "${GCLOUD_OAUTH_PUBLIC_BASE_URL:-}" == "${_fe_before}" ]]; then
+      export GCLOUD_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+    fi
+    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL raw IPv4 normalized to sslip.io form for OAuth (value not printed)."
+    unset _fe_before || true
   fi
   unset _frontend_host _frontend_name _frontend_port || true
 elif [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
@@ -93,7 +172,9 @@ elif [[ -z "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
   fi
   if [[ -n "${_pub_ip:-}" ]] && [[ "${_pub_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${_pub_ip//./-}.sslip.io:3000"
-    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL unset: using ${DEVNEST_FRONTEND_PUBLIC_BASE_URL} for OAuth callbacks."
+    export GITHUB_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+    export GCLOUD_OAUTH_PUBLIC_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
+    echo "DEVNEST_FRONTEND_PUBLIC_BASE_URL unset: derived from EC2 metadata (value not printed)."
   fi
   unset _meta_token _pub_ip || true
 fi
@@ -108,8 +189,12 @@ if [[ -z "${NEXT_PUBLIC_API_BASE_URL:-}" ]] && [[ -n "${DEVNEST_FRONTEND_PUBLIC_
   else
     export NEXT_PUBLIC_API_BASE_URL="${_fe}:8000"
   fi
-  echo "NEXT_PUBLIC_API_BASE_URL unset: derived ${NEXT_PUBLIC_API_BASE_URL} from DEVNEST_FRONTEND_PUBLIC_BASE_URL."
+  echo "NEXT_PUBLIC_API_BASE_URL unset: derived from DEVNEST_FRONTEND_PUBLIC_BASE_URL (value not printed)."
   unset _fe || true
+fi
+# Keep browser app origin aligned with the (possibly sslip-normalized) frontend base for compose --env-file sync.
+if [[ -n "${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-}" ]]; then
+  export NEXT_PUBLIC_APP_BASE_URL="${DEVNEST_FRONTEND_PUBLIC_BASE_URL}"
 fi
 
 if [[ -n "${DEVNEST_DEPLOY_GIT_REF:-}" ]]; then
@@ -124,21 +209,44 @@ else
   git reset --hard "origin/${BRANCH}"
 fi
 
-docker compose -f "${COMPOSE}" down || true
+_writer_py="${REPO_DIR}/scripts/write_integration_deploy_env.py"
+if [[ -n "${DATABASE_URL:-}" ]] && [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
+  if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "${_writer_py}" ]]; then
+    echo "ERROR: RDS deploy requires python3 and ${_writer_py} to validate .env.integration." >&2
+    exit 1
+  fi
+fi
+if [[ -f "${INTEGRATION_ENV_FILE}" ]] && [[ -f "${_writer_py}" ]] && command -v python3 >/dev/null 2>&1; then
+  python3 "${_writer_py}" sync-from-env --path "${INTEGRATION_ENV_FILE}" || exit 1
+  set -a
+  # shellcheck disable=SC1091
+  source "${INTEGRATION_ENV_FILE}"
+  set +a
+  python3 "${_writer_py}" validate --path "${INTEGRATION_ENV_FILE}" || exit 1
+  python3 "${_writer_py}" diagnostics --path "${INTEGRATION_ENV_FILE}" || exit 1
+fi
+if [[ -n "${DATABASE_URL:-}" ]] && [[ ! -f "${INTEGRATION_ENV_FILE}" ]]; then
+  echo "ERROR: DATABASE_URL is set but ${INTEGRATION_ENV_FILE} is missing (generate it before deploy-ec2.sh)." >&2
+  exit 1
+fi
+
+_devnest_deploy_env_presence
+
+_devnest_compose down || true
 # Build workspace-image explicitly so devnest/workspace:latest always reflects Dockerfile.workspace
 # on this host (Compose may otherwise reuse a stale :latest if cache is not invalidated).
-docker compose -f "${COMPOSE}" build workspace-image
+_devnest_compose build workspace-image
 # --force-recreate ensures services pick up compose changes (e.g. pid: host for Linux topology attach).
 if [[ -n "${DATABASE_URL:-}" ]]; then
   echo "Skipping local postgres service because DATABASE_URL points to an external database."
-  docker compose -f "${COMPOSE}" up -d route-admin traefik
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps backend
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps workspace-worker
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate --no-deps frontend
+  _devnest_compose up -d route-admin traefik
+  _devnest_compose up -d --build --force-recreate --no-deps backend
+  _devnest_compose up -d --build --force-recreate --no-deps workspace-worker
+  _devnest_compose up -d --build --force-recreate --no-deps frontend
 else
-  docker compose -f "${COMPOSE}" up -d --build --force-recreate
+  _devnest_compose up -d --build --force-recreate
 fi
-docker compose -f "${COMPOSE}" ps
+_devnest_compose ps
 
 echo "--- workspace image (expected: Entrypoint = [\"/usr/bin/entrypoint.sh\"] only; Cmd without code-server) ---"
 docker image inspect devnest/workspace:latest --format '{{json .Config.Labels}}' 2>/dev/null || true
@@ -155,5 +263,5 @@ echo "Browsers must resolve ws-<id>.<DEVNEST_BASE_DOMAIN> to this host's Traefik
 echo "--- deploy diagnostics ---"
 git status || true
 git rev-parse HEAD || true
-docker compose -f "${COMPOSE}" ps || true
-docker compose -f "${COMPOSE}" logs --no-color || true
+_devnest_compose ps || true
+_devnest_compose logs --no-color || true

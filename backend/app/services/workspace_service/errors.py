@@ -25,6 +25,12 @@ class WorkspaceInvalidStateError(WorkspaceServiceError):
     pass
 
 
+class WorkspaceGatewayUnavailableError(WorkspaceServiceError):
+    """Gateway edge or upstream path is not ready for workspace access (transient infrastructure)."""
+
+    pass
+
+
 class WorkspaceAccessDeniedError(WorkspaceServiceError):
     """Caller is authenticated but lacks a valid workspace session for access coordinates."""
 

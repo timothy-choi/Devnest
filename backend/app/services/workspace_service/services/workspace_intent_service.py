@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import func
+import httpx
+from sqlalchemy import and_, func
 from sqlmodel import Session, select
 
 from app.libs.observability.correlation import generate_correlation_id
@@ -24,6 +28,7 @@ from app.services.workspace_service.api.schemas import (
 )
 from app.services.workspace_service.errors import (
     WorkspaceBusyError,
+    WorkspaceGatewayUnavailableError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
 )
@@ -35,6 +40,8 @@ from app.services.workspace_service.models import (
     WorkspaceJobType,
     WorkspaceRuntime,
     WorkspaceRuntimeHealthStatus,
+    WorkspaceSnapshot,
+    WorkspaceSnapshotStatus,
     WorkspaceStatus,
 )
 from app.services.workspace_service.services.workspace_event_service import (
@@ -48,6 +55,13 @@ from app.services.workspace_service.services.workspace_session_service import (
     create_workspace_session,
     resolve_workspace_session_for_access,
 )
+from app.services.gateway_client.errors import GatewayClientError
+from app.services.gateway_client.gateway_client import DevnestGatewayClient
+from app.services.node_execution_service.workspace_project_dir import (
+    workspace_bundle_project_data_present,
+    workspace_project_dir_name,
+)
+from app.services.reconcile_service.decisions import gateway_route_needs_repair, route_row_for_workspace
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
@@ -135,6 +149,9 @@ class WorkspaceAttachResult:
     issues: tuple[str, ...] = field(default_factory=tuple)
 
 
+# User-visible reopen blocker when host project bundle or ``project/`` subtree is absent (no paths).
+_PROJECT_DATA_MISSING_SHORT_ISSUE = "Persisted project data is missing on the execution host."
+
 _BUSY_STATUSES: frozenset[str] = frozenset(
     {
         WorkspaceStatus.CREATING.value,
@@ -162,9 +179,185 @@ def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int
     ws = session.get(Workspace, workspace_id)
     if ws is None or ws.owner_user_id != owner_user_id:
         raise WorkspaceNotFoundError("Workspace not found")
+    if ws.status == WorkspaceStatus.DELETED.value:
+        raise WorkspaceNotFoundError("Workspace not found")
     # V1 attach/access are owner-only. ``is_private`` gates listing elsewhere; collaborators / shared
     # workspaces are deferred (TODO).
     return ws
+
+
+def _workspace_project_storage_reopen_assessment(
+    ws: Workspace,
+    *,
+    _rt: WorkspaceRuntime | None = None,
+) -> tuple[list[str], bool | None]:
+    """Return ``(reopen_issue_messages, project_data_missing)``.
+
+    ``project_data_missing`` is ``True`` when the expected bundle path is missing or has no usable
+    project subtree, ``False`` when data is present, and ``None`` when no filesystem check ran
+    (remote control plane, transitional status, or ``WORKSPACE_PROJECTS_BASE`` unset / not on disk).
+    """
+    issues: list[str] = []
+    project_data_missing: bool | None = None
+    if ws.status == WorkspaceStatus.DELETED.value:
+        return issues, project_data_missing
+    from app.libs.common.config import get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+    wid = ws.workspace_id
+    if wid is None:
+        return issues, project_data_missing
+    wid_s = str(int(wid))
+    key = (ws.project_storage_key or "").strip() or None
+
+    if settings.devnest_gateway_enabled:
+        expected = _gateway_unique_public_host(int(wid), settings.devnest_base_domain, project_storage_key=key)
+        stored = (ws.public_host or "").strip()
+        if stored and stored.lower() != expected.lower():
+            issues.append(
+                "Stored gateway hostname does not match the current DEVNEST_BASE_DOMAIN pattern; "
+                "routing may target the wrong edge host until a reconcile updates public_host.",
+            )
+
+    base = (settings.workspace_projects_base or "").strip()
+    if base and ws.status in (
+        WorkspaceStatus.RUNNING.value,
+        WorkspaceStatus.STOPPED.value,
+        WorkspaceStatus.ERROR.value,
+    ):
+        root = Path(os.path.realpath(os.path.expanduser(base)))
+        if root.is_dir():
+            dir_name = workspace_project_dir_name(wid_s, key)
+            canon = root / dir_name
+            legacy_candidates = [
+                Path(f"/tmp/devnest-workspaces/ws-{wid_s}"),
+                Path(f"/tmp/devnest-workspaces/{wid_s}"),
+            ]
+            if key:
+                legacy_candidates.append(Path(f"/tmp/devnest-workspaces/{wid_s}-{key}"))
+            legacy_hits = [str(p) for p in legacy_candidates if p.is_dir()]
+
+            if not canon.is_dir():
+                project_data_missing = True
+                issues.append(_PROJECT_DATA_MISSING_SHORT_ISSUE)
+                logger.info(
+                    "workspace_project_bundle_missing",
+                    extra={
+                        "workspace_id": wid_s,
+                        "expected_bundle_path": str(canon),
+                        "legacy_candidate_hits": legacy_hits,
+                    },
+                )
+                if legacy_hits:
+                    issues.append(
+                        "Legacy workspace data may exist outside WORKSPACE_PROJECTS_BASE; see server logs for paths.",
+                    )
+            elif not workspace_bundle_project_data_present(canon):
+                project_data_missing = True
+                issues.append(_PROJECT_DATA_MISSING_SHORT_ISSUE)
+                logger.info(
+                    "workspace_project_data_incomplete",
+                    extra={"workspace_id": wid_s, "bundle_path": str(canon)},
+                )
+            else:
+                project_data_missing = False
+                if legacy_hits:
+                    issues.append(
+                        "Legacy workspace directories still exist under temporary paths; "
+                        "remove or migrate them to avoid confusion.",
+                    )
+
+    return issues, project_data_missing
+
+
+def _compute_workspace_reopen_issues(
+    ws: Workspace,
+    *,
+    rt: WorkspaceRuntime | None = None,
+) -> list[str]:
+    """Detect stale gateway hosts or missing project dirs vs current Settings (best-effort, local FS)."""
+    issues, _missing = _workspace_project_storage_reopen_assessment(ws, _rt=rt)
+    return issues
+
+
+def _ensure_workspace_reopen_allowed(ws: Workspace, rt: WorkspaceRuntime | None) -> None:
+    blockers = _compute_workspace_reopen_issues(ws, rt=rt)
+    if blockers:
+        raise WorkspaceInvalidStateError("; ".join(blockers))
+
+
+def _restorable_snapshot_count(session: Session, workspace_id: int) -> int:
+    v = session.exec(
+        select(func.count())
+        .select_from(WorkspaceSnapshot)
+        .where(WorkspaceSnapshot.workspace_id == workspace_id)
+        .where(WorkspaceSnapshot.status == WorkspaceSnapshotStatus.AVAILABLE.value),
+    ).one()
+    return int(v or 0)
+
+
+_TRAEFIK_UPSTREAM_ERROR_STATUSES = frozenset({502, 503, 504})
+
+
+def _ensure_traefik_edge_observes_host(
+    settings,
+    *,
+    host_header_source: str,
+    session: Session | None = None,
+    workspace_id: int | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """When configured, poll Traefik until the workspace Host routes (not 404).
+
+    502/503/504 mean the edge matched the Host but the workspace upstream failed — surface as
+    gateway-unavailable (HTTP 503) and best-effort enqueue reconcile so the workspace can recover.
+
+    Persistent 404 means Traefik has not applied the route yet — same handling so callers can retry
+    without treating it as a workspace *state* conflict (HTTP 409).
+    """
+    base = (getattr(settings, "devnest_gateway_traefik_http_probe_base", "") or "").strip()
+    if not base:
+        return
+    host_header = (host_header_source or "").strip().split(":")[0].strip()
+    if not host_header:
+        return
+    url = base.rstrip("/") + "/"
+    deadline = time.monotonic() + 8.0
+    interval_s = 0.12
+    while time.monotonic() < deadline:
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                response = client.get(url, headers={"Host": host_header}, follow_redirects=False)
+        except httpx.RequestError:
+            time.sleep(interval_s)
+            continue
+        status_code = int(response.status_code)
+        if status_code == 404:
+            time.sleep(interval_s)
+            continue
+        if status_code in _TRAEFIK_UPSTREAM_ERROR_STATUSES:
+            if session is not None and workspace_id is not None:
+                _best_effort_enqueue_reconcile_for_access_drift(
+                    session,
+                    workspace_id=workspace_id,
+                    correlation_id=correlation_id,
+                )
+            raise WorkspaceGatewayUnavailableError(
+                "Gateway edge reached the workspace Host but the IDE upstream did not respond "
+                f"(HTTP {status_code}). A reconcile job was queued where possible; retry shortly, "
+                "or use Restart workspace from the dashboard if this persists.",
+            )
+        return
+    if session is not None and workspace_id is not None:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=workspace_id,
+            correlation_id=correlation_id,
+        )
+    raise WorkspaceGatewayUnavailableError(
+        "Edge gateway (Traefik) has not picked up the workspace route yet. "
+        "A reconcile job was queued where possible; retry shortly, or use Restart workspace from the dashboard if this persists.",
+    )
 
 
 def _require_not_busy(ws: Workspace) -> None:
@@ -229,7 +422,8 @@ def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime
     wid = ws.workspace_id
     if wid is None:
         return None
-    return _gateway_unique_public_host(int(wid), settings.devnest_base_domain)
+    psk = (ws.project_storage_key or "").strip() or None
+    return _gateway_unique_public_host(int(wid), settings.devnest_base_domain, project_storage_key=psk)
 
 
 def _gateway_public_host_for_url(host: str, scheme: str, port: int) -> str:
@@ -258,6 +452,149 @@ def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | 
     pub_port = int(settings.devnest_gateway_public_port or 0)
     host = _gateway_public_host_for_url(host, scheme, pub_port)
     return f"{scheme}://{host}/"
+
+
+def _best_effort_enqueue_reconcile_for_access_drift(
+    session: Session,
+    *,
+    workspace_id: int,
+    correlation_id: str | None,
+) -> None:
+    try:
+        enqueue_reconcile_runtime_job(
+            session,
+            workspace_id=workspace_id,
+            correlation_id=correlation_id,
+        )
+    except (WorkspaceBusyError, WorkspaceInvalidStateError, WorkspaceNotFoundError):
+        session.rollback()
+
+
+def _ensure_gateway_route_ready_for_open(
+    session: Session,
+    *,
+    ws: Workspace,
+    rt: WorkspaceRuntime,
+    correlation_id: str | None,
+) -> None:
+    from app.libs.common.config import get_settings  # noqa: PLC0415
+
+    settings = get_settings()
+    if not settings.devnest_gateway_enabled:
+        return
+
+    wid = ws.workspace_id
+    assert wid is not None
+    internal_endpoint = (rt.internal_endpoint or "").strip()
+    if not internal_endpoint:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=wid,
+            correlation_id=correlation_id,
+        )
+        raise WorkspaceInvalidStateError(
+            "Workspace is RUNNING but its gateway target is missing. A reconcile job was queued; retry shortly.",
+        )
+
+    expected_public_host = _resolve_public_host_for_gateway_display(ws, rt)
+    client = DevnestGatewayClient.from_settings(settings)
+    try:
+        routes = client.get_registered_routes()
+    except GatewayClientError as exc:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=wid,
+            correlation_id=correlation_id,
+        )
+        raise WorkspaceInvalidStateError(
+            "Workspace gateway state could not be verified right now. A reconcile job was queued; retry shortly.",
+        ) from exc
+
+    route_row = route_row_for_workspace(routes, wid)
+    if not gateway_route_needs_repair(
+        route_row=route_row,
+        observed_internal_endpoint=internal_endpoint,
+        expected_public_host=expected_public_host,
+    ):
+        host_probe = (expected_public_host or "").strip()
+        if host_probe:
+            _ensure_traefik_edge_observes_host(
+                settings,
+                host_header_source=host_probe,
+                session=session,
+                workspace_id=wid,
+                correlation_id=correlation_id,
+            )
+        return
+
+    try:
+        public_host = (expected_public_host or "").strip()
+        if not public_host:
+            raise WorkspaceInvalidStateError("Workspace public host is not ready for gateway routing.")
+        client.register_route(
+            str(wid),
+            internal_endpoint,
+            public_host,
+        )
+    except (GatewayClientError, ValueError) as exc:
+        _best_effort_enqueue_reconcile_for_access_drift(
+            session,
+            workspace_id=wid,
+            correlation_id=correlation_id,
+        )
+        raise WorkspaceInvalidStateError(
+            "Workspace gateway route was stale and could not be repaired automatically. "
+            "A reconcile job was queued; retry shortly.",
+        ) from exc
+
+    # Route-admin may briefly lag after POST /routes; avoid returning gateway_url until GET /routes agrees.
+    deadline = time.monotonic() + 4.0
+    poll_interval_s = 0.12
+    while True:
+        try:
+            routes_observed = client.get_registered_routes()
+        except GatewayClientError as exc:
+            if time.monotonic() >= deadline:
+                _best_effort_enqueue_reconcile_for_access_drift(
+                    session,
+                    workspace_id=wid,
+                    correlation_id=correlation_id,
+                )
+                raise WorkspaceInvalidStateError(
+                    "Workspace gateway route was repaired but could not be verified before timeout. "
+                    "A reconcile job was queued; retry shortly.",
+                ) from exc
+            time.sleep(poll_interval_s)
+            continue
+        observed_row = route_row_for_workspace(routes_observed, wid)
+        if not gateway_route_needs_repair(
+            route_row=observed_row,
+            observed_internal_endpoint=internal_endpoint,
+            expected_public_host=expected_public_host,
+        ):
+            host_probe = (expected_public_host or "").strip()
+            if host_probe:
+                _ensure_traefik_edge_observes_host(
+                    settings,
+                    host_header_source=host_probe,
+                    session=session,
+                    workspace_id=wid,
+                    correlation_id=correlation_id,
+                )
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(poll_interval_s)
+
+    _best_effort_enqueue_reconcile_for_access_drift(
+        session,
+        workspace_id=wid,
+        correlation_id=correlation_id,
+    )
+    raise WorkspaceInvalidStateError(
+        "Workspace gateway route was repaired but route-admin still reports drift. "
+        "A reconcile job was queued; retry shortly.",
+    )
 
 
 def _access_issues_for_runtime(rt: WorkspaceRuntime) -> tuple[str, ...]:
@@ -297,6 +634,13 @@ def get_workspace_access(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
+    _ensure_workspace_reopen_allowed(ws, rt)
+    _ensure_gateway_route_ready_for_open(
+        session,
+        ws=ws,
+        rt=rt,
+        correlation_id=correlation_id,
+    )
     resolve_workspace_session_for_access(
         session,
         workspace_id=workspace_id,
@@ -358,6 +702,13 @@ def request_attach_workspace(
             "Workspace is RUNNING but runtime metadata is not ready for access yet; retry shortly.",
         )
     assert rt is not None
+    _ensure_workspace_reopen_allowed(ws, rt)
+    _ensure_gateway_route_ready_for_open(
+        session,
+        ws=ws,
+        rt=rt,
+        correlation_id=correlation_id,
+    )
     issues = _access_issues_for_runtime(rt)
 
     # Quota + policy checks before creating the session
@@ -572,6 +923,8 @@ def request_start_workspace(
         raise WorkspaceInvalidStateError(
             f"Start is only allowed when stopped or error (current={ws.status})"
         )
+    rt = _get_workspace_runtime(session, workspace_id)
+    _ensure_workspace_reopen_allowed(ws, rt)
     cfg_v = _intent_config_version(session, workspace_id)
     return _persist_intent(
         session,
@@ -624,6 +977,8 @@ def request_restart_workspace(
         raise WorkspaceInvalidStateError(
             f"Restart is only allowed when running or stopped (current={ws.status})"
         )
+    rt = _get_workspace_runtime(session, workspace_id)
+    _ensure_workspace_reopen_allowed(ws, rt)
     cfg_v = _intent_config_version(session, workspace_id)
     return _persist_intent(
         session,
@@ -1100,13 +1455,16 @@ def list_workspaces(
     skip: int = 0,
     limit: int = 100,
 ) -> tuple[list[WorkspaceSummaryResponse], int]:
-    where_owner = Workspace.owner_user_id == owner_user_id
-    count_stmt = select(func.count()).select_from(Workspace).where(where_owner)
+    where_scope = and_(
+        Workspace.owner_user_id == owner_user_id,
+        Workspace.status != WorkspaceStatus.DELETED.value,
+    )
+    count_stmt = select(func.count()).select_from(Workspace).where(where_scope)
     total = session.exec(count_stmt).one()
 
     page_stmt = (
         select(Workspace)
-        .where(where_owner)
+        .where(where_scope)
         .order_by(Workspace.created_at.desc())
         .offset(skip)
         .limit(min(limit, 500))
@@ -1129,6 +1487,36 @@ def get_workspace(
     ws = session.exec(stmt).first()
     if ws is None:
         return None
+    if ws.status == WorkspaceStatus.DELETED.value:
+        return None
+    rt = (
+        _get_workspace_runtime(session, workspace_id)
+        if ws.status == WorkspaceStatus.RUNNING.value
+        else None
+    )
     latest = _latest_config_version(session, workspace_id)
     base = WorkspaceDetailResponse.model_validate(ws)
-    return base.model_copy(update={"latest_config_version": latest})
+    reopen, data_missing = _workspace_project_storage_reopen_assessment(ws, _rt=rt)
+    snaps = _restorable_snapshot_count(session, workspace_id)
+
+    lifecycle: str = "ok"
+    user_msg: str | None = None
+    if data_missing is True:
+        lifecycle = "restore_required" if snaps > 0 else "unrecoverable"
+        user_msg = (
+            "Restore an available snapshot, then start the workspace again."
+            if snaps > 0
+            else "No snapshot is available; you can permanently remove this workspace."
+        )
+    elif data_missing is None:
+        lifecycle = "unknown"
+
+    return base.model_copy(
+        update={
+            "latest_config_version": latest,
+            "reopen_issues": reopen,
+            "restorable_snapshot_count": snaps,
+            "project_data_lifecycle": lifecycle,
+            "project_data_user_message": user_msg,
+        },
+    )

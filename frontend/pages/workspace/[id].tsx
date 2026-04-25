@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 type WorkspaceDetailJson = {
   status?: string;
   last_error_message?: string | null;
+  reopen_issues?: string[];
 };
 
 type AttachJson = {
@@ -83,15 +84,39 @@ export default function WorkspacePage() {
           redirectToDashboard();
           return;
         }
+        if (detail.reopen_issues?.length) {
+          setMessage(detail.reopen_issues.join("; "));
+          redirectToDashboard();
+          return;
+        }
 
-        const attachRes = await fetch(`/api/workspaces/${workspaceId}/attach`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
-        const attach = (await attachRes.json()) as AttachJson;
-        if (!attachRes.ok) {
-          setMessage(typeof attach.detail === "string" ? attach.detail : "Unable to attach to this workspace.");
+        const maxAttachAttempts = 8;
+        let attach: AttachJson | null = null;
+        for (let attempt = 0; attempt < maxAttachAttempts; attempt++) {
+          const attachRes = await fetch(`/api/workspaces/${workspaceId}/attach`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          attach = (await attachRes.json()) as AttachJson;
+          if (attachRes.ok) {
+            break;
+          }
+          const detail = typeof attach.detail === "string" ? attach.detail : "";
+          const transientDetail =
+            /retry shortly|not ready|reconcile job was queued|timeout|traefik|gateway edge|ide upstream|restart workspace/i;
+          const transient =
+            (attachRes.status === 503 || attachRes.status === 409) && transientDetail.test(detail);
+          if (transient && attempt < maxAttachAttempts - 1) {
+            await new Promise((r) => setTimeout(r, 180 + attempt * 140));
+            continue;
+          }
+          setMessage(detail || "Unable to attach to this workspace.");
+          redirectToDashboard();
+          return;
+        }
+        if (!attach) {
+          setMessage("Unable to attach to this workspace.");
           redirectToDashboard();
           return;
         }

@@ -23,15 +23,27 @@ from app.services.workspace_service.models import (
     WorkspaceSession,
 )
 from app.services.workspace_service.models.enums import (
+    WorkspaceJobType,
     WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
 )
 from app.services.workspace_service.services import workspace_intent_service
+from app.libs.common.config import get_settings
 
 ENDPOINT_REF = "node-prod-1:32001"
-PUBLIC_HOST = "ws-123.devnest.local"
 INTERNAL_EP = "10.128.0.10:8080"
 CONTAINER_ID = "ctr-unit-abc123"
+
+
+def _expected_gateway_public_host(session: Session, wid: int) -> str:
+    ws = session.get(Workspace, wid)
+    assert ws is not None
+    key = (ws.project_storage_key or "").strip() or None
+    return workspace_intent_service._gateway_unique_public_host(
+        int(wid),
+        get_settings().devnest_base_domain,
+        project_storage_key=key,
+    )
 
 
 def _seed_running_with_runtime(
@@ -39,7 +51,7 @@ def _seed_running_with_runtime(
     owner_id: int,
     *,
     endpoint_ref: str = ENDPOINT_REF,
-    public_host: str = PUBLIC_HOST,
+    public_host: str | None = None,
     internal_endpoint: str = INTERNAL_EP,
     container_id: str = CONTAINER_ID,
     health_status: str = WorkspaceRuntimeHealthStatus.HEALTHY.value,
@@ -123,7 +135,7 @@ def test_request_attach_happy_path(workspace_unit_engine, owner_user_id: int) ->
     assert out.status == WorkspaceStatus.RUNNING.value
     assert out.runtime_ready is True
     assert out.endpoint_ref == ENDPOINT_REF
-    assert out.public_host == PUBLIC_HOST
+    assert out.public_host is None
     assert out.internal_endpoint == INTERNAL_EP
     assert out.gateway_url is None
     assert out.issues == ()
@@ -165,7 +177,7 @@ def test_get_workspace_access_happy_path(workspace_unit_engine, owner_user_id: i
     assert out.status == WorkspaceStatus.RUNNING.value
     assert out.runtime_ready is True
     assert out.endpoint_ref == ENDPOINT_REF
-    assert out.public_host == PUBLIC_HOST
+    assert out.public_host is None
     assert out.internal_endpoint == INTERNAL_EP
     assert out.gateway_url is None
     assert out.issues == ()
@@ -204,6 +216,148 @@ def test_get_workspace_access_does_not_increment_sessions(workspace_unit_engine,
         ws = session.get(Workspace, wid)
         assert ws is not None
         assert ws.active_sessions_count == 1
+
+
+def test_attach_repairs_missing_gateway_route(workspace_unit_engine, owner_user_id: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeGatewayClient:
+        def __init__(self) -> None:
+            self.routes: list[dict] = []
+            self.register_calls: list[tuple[str, str, str]] = []
+
+        def get_registered_routes(self) -> list[dict]:
+            return list(self.routes)
+
+        def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
+            self.register_calls.append((workspace_id, internal_endpoint, public_host))
+            self.routes.append(
+                {
+                    "workspace_id": workspace_id,
+                    "target": f"http://{internal_endpoint}",
+                    "public_host": public_host,
+                }
+            )
+
+    fake_client = _FakeGatewayClient()
+    monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.services.workspace_service.services.workspace_intent_service.DevnestGatewayClient.from_settings",
+        lambda _settings: fake_client,
+    )
+
+    try:
+        with Session(workspace_unit_engine) as session:
+            wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+            exp_host = _expected_gateway_public_host(session, wid)
+        with Session(workspace_unit_engine) as session:
+            out = workspace_intent_service.request_attach_workspace(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                requested_by_user_id=owner_user_id,
+            )
+        assert out.accepted is True
+        assert out.gateway_url == f"http://{exp_host}/"
+        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
+    finally:
+        get_settings.cache_clear()
+
+
+def test_attach_waits_until_gateway_route_observable_after_register(
+    workspace_unit_engine,
+    owner_user_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After POST /routes, GET /routes may lag; open should not succeed until observed state matches."""
+
+    class _EventuallyConsistentGatewayClient:
+        def __init__(self) -> None:
+            self.routes: list[dict] = []
+            self.register_calls: list[tuple[str, str, str]] = []
+            self._gets_after_register = 0
+
+        def get_registered_routes(self) -> list[dict]:
+            if self.register_calls and self._gets_after_register < 2:
+                self._gets_after_register += 1
+                return []
+            return list(self.routes)
+
+        def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
+            self.register_calls.append((workspace_id, internal_endpoint, public_host))
+            self.routes = [
+                {
+                    "workspace_id": workspace_id,
+                    "target": f"http://{internal_endpoint}",
+                    "public_host": public_host,
+                }
+            ]
+
+    fake_client = _EventuallyConsistentGatewayClient()
+    monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.services.workspace_service.services.workspace_intent_service.DevnestGatewayClient.from_settings",
+        lambda _settings: fake_client,
+    )
+
+    try:
+        with Session(workspace_unit_engine) as session:
+            wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+            exp_host = _expected_gateway_public_host(session, wid)
+        with Session(workspace_unit_engine) as session:
+            out = workspace_intent_service.request_attach_workspace(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                requested_by_user_id=owner_user_id,
+            )
+        assert out.accepted is True
+        assert out.gateway_url == f"http://{exp_host}/"
+        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
+        assert fake_client._gets_after_register == 2
+    finally:
+        get_settings.cache_clear()
+
+
+def test_attach_queues_reconcile_when_gateway_state_cannot_be_verified(
+    workspace_unit_engine,
+    owner_user_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.gateway_client.errors import GatewayClientTransportError
+
+    class _BrokenGatewayClient:
+        def get_registered_routes(self) -> list[dict]:
+            raise GatewayClientTransportError("route-admin unavailable")
+
+    monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.services.workspace_service.services.workspace_intent_service.DevnestGatewayClient.from_settings",
+        lambda _settings: _BrokenGatewayClient(),
+    )
+
+    try:
+        with Session(workspace_unit_engine) as session:
+            wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
+        with Session(workspace_unit_engine) as session:
+            with pytest.raises(WorkspaceInvalidStateError, match="reconcile job was queued"):
+                workspace_intent_service.request_attach_workspace(
+                    session,
+                    workspace_id=wid,
+                    owner_user_id=owner_user_id,
+                    requested_by_user_id=owner_user_id,
+                )
+        with Session(workspace_unit_engine) as session:
+            jobs = session.exec(
+                select(WorkspaceJob).where(
+                    WorkspaceJob.workspace_id == wid,
+                    WorkspaceJob.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value,
+                )
+            ).all()
+            assert len(jobs) == 1
+    finally:
+        get_settings.cache_clear()
 
 
 def test_attach_twice_increments_sessions(workspace_unit_engine, owner_user_id: int) -> None:
@@ -286,17 +440,19 @@ def test_get_workspace_access_rejects_expired_session(workspace_unit_engine, own
 
 
 @pytest.mark.parametrize(
-    "status",
+    "status,exc_type,match",
     [
-        WorkspaceStatus.STOPPED.value,
-        WorkspaceStatus.ERROR.value,
-        WorkspaceStatus.DELETED.value,
+        (WorkspaceStatus.STOPPED.value, WorkspaceInvalidStateError, "RUNNING"),
+        (WorkspaceStatus.ERROR.value, WorkspaceInvalidStateError, "RUNNING"),
+        (WorkspaceStatus.DELETED.value, WorkspaceNotFoundError, "not found"),
     ],
 )
 def test_attach_rejected_when_not_running(
     workspace_unit_engine,
     owner_user_id: int,
     status: str,
+    exc_type: type[Exception],
+    match: str,
 ) -> None:
     with Session(workspace_unit_engine) as session:
         wid = _seed_running_with_runtime(session, owner_user_id)
@@ -307,7 +463,7 @@ def test_attach_rejected_when_not_running(
         session.commit()
 
     with Session(workspace_unit_engine) as session:
-        with pytest.raises(WorkspaceInvalidStateError, match="RUNNING"):
+        with pytest.raises(exc_type, match=match):
             workspace_intent_service.request_attach_workspace(
                 session,
                 workspace_id=wid,
@@ -518,12 +674,32 @@ def test_attach_gateway_url_includes_public_port(
     owner_user_id: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    class _FakeGatewayClient:
+        def __init__(self) -> None:
+            self.routes: list[dict] = []
+
+        def get_registered_routes(self) -> list[dict]:
+            return list(self.routes)
+
+        def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
+            self.routes.append(
+                {
+                    "workspace_id": workspace_id,
+                    "target": f"http://{internal_endpoint}",
+                    "public_host": public_host,
+                }
+            )
+
     monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
     monkeypatch.setenv("DEVNEST_BASE_DOMAIN", "app.devnest.local")
     monkeypatch.setenv("DEVNEST_GATEWAY_PUBLIC_PORT", "9081")
     from app.libs.common.config import get_settings
 
     get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.services.workspace_service.services.workspace_intent_service.DevnestGatewayClient.from_settings",
+        lambda _settings: _FakeGatewayClient(),
+    )
     try:
         with Session(workspace_unit_engine) as session:
             wid = _seed_running_with_runtime(
@@ -532,6 +708,7 @@ def test_attach_gateway_url_includes_public_port(
                 public_host=None,
                 name="gw-port-ws",
             )
+            exp_host = _expected_gateway_public_host(session, wid)
             out = workspace_intent_service.request_attach_workspace(
                 session,
                 workspace_id=wid,
@@ -540,6 +717,6 @@ def test_attach_gateway_url_includes_public_port(
                 client_metadata={},
                 correlation_id=None,
             )
-        assert out.gateway_url == f"http://ws-{wid}.app.devnest.local:9081/"
+        assert out.gateway_url == f"http://{exp_host}:9081/"
     finally:
         get_settings.cache_clear()

@@ -94,12 +94,17 @@ DEVNEST_TOKEN_ENCRYPTION_KEY=<fernet-key>
 # GitHub OAuth (sign-in + repo connect)
 GITHUB_CLIENT_ID=<your-github-client-id>
 GITHUB_CLIENT_SECRET=<your-github-client-secret>
-GITHUB_OAUTH_PUBLIC_BASE_URL=https://api.yourdomain.com   # base for /auth/oauth/github/callback
+GITHUB_OAUTH_PUBLIC_BASE_URL=https://app.yourdomain.com   # browser-visible base for /auth/oauth/github/callback
 
 # Google OAuth (sign-in only in V1)
 GOOGLE_CLIENT_ID=<your-google-client-id>
 GOOGLE_CLIENT_SECRET=<your-google-client-secret>
-GCLOUD_OAUTH_PUBLIC_BASE_URL=https://api.yourdomain.com   # base for /auth/oauth/google/callback
+GCLOUD_OAUTH_PUBLIC_BASE_URL=https://app.yourdomain.com   # browser-visible base for /auth/oauth/google/callback
+
+# Browser-visible UI origin for integration / EC2. When this is public and the explicit OAuth callback
+# bases are unset or still point at localhost, backend startup rewrites the effective GitHub/Google
+# OAuth public base URLs to this value.
+DEVNEST_FRONTEND_PUBLIC_BASE_URL=https://app.yourdomain.com
 
 # Workspace runtime: projects base (required for persistent workspace files)
 # Must be an absolute path on the Docker host; created automatically if missing.
@@ -141,6 +146,7 @@ DEVNEST_TERMINAL_DEFAULT_ROWS=50
 DEVNEST_GATEWAY_ENABLED=true
 DEVNEST_GATEWAY_URL=http://route-admin:9080
 DEVNEST_BASE_DOMAIN=app.yourdomain.com
+DEVNEST_FRONTEND_PUBLIC_BASE_URL=https://app.yourdomain.com
 
 # Gateway ForwardAuth (enable once TLS and session flows are tested)
 DEVNEST_GATEWAY_AUTH_ENABLED=true
@@ -149,6 +155,7 @@ DEVNEST_GATEWAY_AUTH_ENABLED=true
 DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3
 DEVNEST_S3_SNAPSHOT_BUCKET=your-devnest-snapshots-bucket
 DEVNEST_S3_SNAPSHOT_PREFIX=devnest-snapshots
+DEVNEST_SNAPSHOT_TEMP_DIR=/var/lib/devnest/snapshot-staging
 # Leave AWS keys empty to use IAM instance profile (recommended)
 # AWS_ACCESS_KEY_ID=...
 # AWS_SECRET_ACCESS_KEY=...
@@ -572,6 +579,13 @@ DEVNEST_S3_SNAPSHOT_BUCKET=your-devnest-snapshots-bucket
 DEVNEST_S3_SNAPSHOT_PREFIX=devnest-snapshots
 AWS_REGION=us-east-1
 ```
+
+When `DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3` is selected, startup fails fast unless both
+`DEVNEST_S3_SNAPSHOT_BUCKET` and `AWS_REGION` are set. If `DEVNEST_EXPECT_EXTERNAL_POSTGRES` or
+`DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS` is true (RDS / remote EC2 posture), `DEVNEST_SNAPSHOT_STORAGE_PROVIDER`
+must be `s3` or Settings aborts—there is no silent local fallback. API and workspace-worker startup logs
+include the effective snapshot storage `provider`, `bucket`, `prefix`, `region`, and `root` (local `root`
+path or `-` for S3) without logging AWS secrets.
 
 S3 versioning on the bucket is recommended for durability. The IAM role/instance profile used by the backend needs `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, and `s3:HeadObject` on `arn:aws:s3:::your-bucket/*`.
 

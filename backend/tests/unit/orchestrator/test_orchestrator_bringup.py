@@ -180,7 +180,7 @@ class TestBringUpHappyPath:
         _probe_ok(mock_probe)
 
         svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
-        host_path = str(Path(ws_root).resolve() / WORKSPACE_ID)
+        host_path = str((Path(ws_root).resolve() / WORKSPACE_ID / "project"))
 
         out = svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
 
@@ -278,8 +278,8 @@ class TestBringUpHappyPath:
         second_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
 
         assert first_path != second_path
-        assert first_path.endswith(f"{WORKSPACE_ID}-run-a")
-        assert second_path.endswith(f"{WORKSPACE_ID}-run-b")
+        assert first_path.endswith(f"{WORKSPACE_ID}-run-a/project")
+        assert second_path.endswith(f"{WORKSPACE_ID}-run-b/project")
 
     def test_same_workspace_resume_reuses_same_project_path(
         self,
@@ -310,6 +310,24 @@ class TestBringUpHappyPath:
         second_path = mock_runtime.ensure_container.call_args.kwargs["workspace_host_path"]
 
         assert first_path == second_path
+
+    def test_resume_raises_when_project_dir_missing(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with pytest.raises(WorkspaceBringUpError, match="missing for resume"):
+            svc.bring_up_workspace_runtime(
+                workspace_id=WORKSPACE_ID,
+                project_storage_key="no-such-dir-on-disk",
+                launch_mode="resume",
+            )
 
 
 class TestBringUpRuntimeFailures:

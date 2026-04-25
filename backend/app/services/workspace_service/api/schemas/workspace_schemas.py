@@ -226,3 +226,25 @@ class WorkspaceDetailResponse(BaseModel):
     last_started: datetime | None
     last_stopped: datetime | None
     latest_config_version: int | None = None
+    reopen_issues: list[str] = Field(
+        default_factory=list,
+        description="Control-plane checks (host/path drift vs current settings) that block a safe reopen.",
+    )
+    restorable_snapshot_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of AVAILABLE snapshots for this workspace (restore path when project data is missing).",
+    )
+    project_data_lifecycle: Literal["ok", "unknown", "restore_required", "unrecoverable"] = Field(
+        default="ok",
+        description=(
+            "Disk-backed project layout vs snapshots: ``ok`` when data exists or was not checked; "
+            "``restore_required`` when project data is missing but snapshots exist; "
+            "``unrecoverable`` when data is missing and no AVAILABLE snapshots; "
+            "``unknown`` when WORKSPACE_PROJECTS_BASE is unset or not on this host (no FS check)."
+        ),
+    )
+    project_data_user_message: str | None = Field(
+        default=None,
+        description="Short, user-facing hint for missing project data (no host paths).",
+    )

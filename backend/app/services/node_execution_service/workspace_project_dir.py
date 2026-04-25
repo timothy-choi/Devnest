@@ -352,6 +352,63 @@ def ensure_host_path_owned_by_workspace_user(path: str, *, strict: bool = False)
             raise
 
 
+# Host subdirectory under each workspace bundle root for user-visible IDE files (v2 layout).
+# code-server config/data stay under ``<bundle>/code-server/`` so they are not under ``/home/coder/project``.
+WORKSPACE_USER_PROJECT_SUBDIR = "project"
+
+
+def workspace_bundle_has_legacy_root_level_files(bundle_root: Path) -> bool:
+    """True when v1 layout left user files directly under the bundle (outside ``project/``)."""
+    if not bundle_root.is_dir():
+        return False
+    skip = {WORKSPACE_USER_PROJECT_SUBDIR, "code-server"}
+    for child in bundle_root.iterdir():
+        if child.name in skip or child.name.startswith("."):
+            continue
+        return True
+    return False
+
+
+def workspace_bundle_project_data_present(bundle_root: Path) -> bool:
+    """True when persisted IDE project data exists (v2 ``project/`` or v1 files at bundle root)."""
+    if not bundle_root.is_dir():
+        return False
+    project_child = bundle_root / WORKSPACE_USER_PROJECT_SUBDIR
+    if project_child.is_dir():
+        return True
+    return workspace_bundle_has_legacy_root_level_files(bundle_root)
+
+
+def resolve_workspace_ide_bind_host_path(
+    bundle_host_path: str,
+    *,
+    launch_mode_raw: str | None,
+) -> str:
+    """Return the host path to bind at ``/home/coder/project`` (creates ``project/`` when adopting v2).
+
+    ``bundle_host_path`` is ``<WORKSPACE_PROJECTS_BASE>/<dir_name>`` (the workspace bundle root).
+
+    - **v2:** ``<bundle>/project`` — used for new workspaces, when ``project/`` already exists, or
+      permissive bring-up (``launch_mode_raw is None``) on an empty legacy-only bundle.
+    - **v1 legacy:** bind the bundle root when user files still live next to ``code-server/`` at the
+      bundle root and ``project/`` is absent.
+    """
+    br = Path(os.path.realpath(os.path.expanduser(str(bundle_host_path))))
+    pr = br / WORKSPACE_USER_PROJECT_SUBDIR
+
+    if pr.is_dir():
+        return str(pr.resolve())
+
+    explicit = (launch_mode_raw or "").strip().lower() if launch_mode_raw is not None else None
+    if explicit == "new":
+        pr.mkdir(parents=True, exist_ok=True)
+        return str(pr.resolve())
+    if launch_mode_raw is None and not workspace_bundle_has_legacy_root_level_files(br):
+        pr.mkdir(parents=True, exist_ok=True)
+        return str(pr.resolve())
+    return str(br.resolve())
+
+
 def workspace_project_dir_name(workspace_id: str, project_storage_key: str | None = None) -> str:
     """Stable host directory name for one workspace record.
 
@@ -371,8 +428,14 @@ def default_local_ensure_workspace_project_dir(
     projects_base: str,
     workspace_id: str,
     project_storage_key: str | None = None,
+    *,
+    allow_create: bool = True,
 ) -> str:
-    """Create the isolated workspace project directory on this machine; return absolute path."""
+    """Return the absolute workspace project directory, optionally creating it.
+
+    ``allow_create=False`` is used for resume/start flows: an existing workspace must already have
+    its host tree — DevNest must not silently mint an empty directory when persisted data is gone.
+    """
     wid = _validate_workspace_id_for_path(workspace_id)
     storage_key = _validate_workspace_storage_key_for_path(project_storage_key)
     base = (projects_base or "").strip()
@@ -380,11 +443,17 @@ def default_local_ensure_workspace_project_dir(
         base = os.path.join(tempfile.gettempdir(), "devnest-workspaces")
     dir_name = workspace_project_dir_name(wid, storage_key)
     p = Path(os.path.realpath(os.path.expanduser(str(Path(base) / dir_name))))
-    existed_before = p.exists()
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise ValueError(f"cannot create workspace project directory {p}: {e}") from e
+    directory_preexisted = p.is_dir()
+    if not directory_preexisted:
+        if not allow_create:
+            raise ValueError(
+                f"workspace project directory missing for resume (expected data at {p}); "
+                "restore from snapshot or recreate the directory before starting.",
+            )
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise ValueError(f"cannot create workspace project directory {p}: {e}") from e
     p_str = str(p)
     uid, gid = workspace_container_uid_gid()
     try:
@@ -402,7 +471,7 @@ def default_local_ensure_workspace_project_dir(
             "project_storage_key": storage_key,
             "host_dir_name": dir_name,
             "path_mode": "legacy_workspace_id" if not storage_key else "workspace_id_plus_storage_key",
-            "directory_preexisted": existed_before,
+            "directory_preexisted": directory_preexisted,
             "uid": uid,
             "gid": gid,
             "chown_strict": _strict_chown,
@@ -469,6 +538,8 @@ def ssh_remote_ensure_workspace_project_dir(
     projects_base: str,
     workspace_id: str,
     project_storage_key: str | None = None,
+    *,
+    allow_create: bool = True,
 ) -> str:
     """
     Create the isolated workspace project directory on the SSH target using POSIX paths.
@@ -489,7 +560,13 @@ def ssh_remote_ensure_workspace_project_dir(
         existed_before = True
     except RuntimeError:
         existed_before = False
-    runner.run(["mkdir", "-p", remote_path])
+    if not existed_before:
+        if not allow_create:
+            raise ValueError(
+                f"workspace project directory missing on execution host for resume "
+                f"(expected {remote_path!r}); restore from snapshot or recreate before starting.",
+            )
+        runner.run(["mkdir", "-p", remote_path])
     uid, gid = workspace_container_uid_gid()
     runner.run(["chown", "-R", f"{uid}:{gid}", remote_path])
     logger.info(

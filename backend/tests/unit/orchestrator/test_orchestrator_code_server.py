@@ -26,6 +26,7 @@ from app.libs.topology.results import (
     AttachWorkspaceResult,
     EnsureNodeTopologyResult,
 )
+from app.services.node_execution_service.workspace_project_dir import WORKSPACE_USER_PROJECT_SUBDIR
 from app.services.orchestrator_service import DefaultOrchestratorService
 
 
@@ -206,6 +207,26 @@ class TestCodeServerBindMounts:
 
         assert len(mounts) == 2
         assert stale.exists()
+
+    def test_fallback_uses_project_storage_key_when_host_path_missing(self, tmp_path: Path) -> None:
+        """Without workspace_host_path, resolve the same keyed dir as primary project mounts."""
+        svc = _make_svc(tmp_path)
+        mounts = svc._code_server_extra_bind_mounts("7", None, "resume", "mykey")
+        assert len(mounts) == 2
+        cfg = tmp_path / "workspaces" / "7-mykey" / "code-server" / "config" / "config.yaml"
+        assert cfg.is_file()
+
+    def test_code_server_persistence_sibling_to_project_subdir(self, tmp_path: Path) -> None:
+        """When the IDE bind is ``…/<bundle>/project``, code-server dirs stay under ``…/<bundle>/code-server``."""
+        svc = _make_svc(tmp_path)
+        bundle = tmp_path / "workspaces" / "v2ws"
+        ide = bundle / WORKSPACE_USER_PROJECT_SUBDIR
+        ide.mkdir(parents=True)
+        mounts = svc._code_server_extra_bind_mounts("v2ws", str(ide), "resume")
+        assert len(mounts) == 2
+        cfg = bundle / "code-server" / "config" / "config.yaml"
+        assert cfg.is_file()
+        assert not (ide / "code-server").exists()
 
 
 class TestCodeServerBringUp:

@@ -22,10 +22,16 @@ import sys
 import threading
 import time
 
-from app.libs.common.config import database_host_and_name_for_log, format_database_url_for_log, get_settings
+from app.libs.common.config import (
+    database_host_and_name_for_log,
+    format_database_url_for_log,
+    get_settings,
+    oauth_startup_status_for_log,
+)
 from app.libs.db.database import get_engine
 from app.services.orchestrator_service.app_factory import build_orchestrator_for_workspace_job
 from app.services.orchestrator_service.errors import AppOrchestratorBindingError
+from app.services.storage.factory import get_snapshot_storage_provider, snapshot_storage_log_fields
 
 from .workspace_job_worker.worker import poll_workspace_jobs_tick
 
@@ -79,6 +85,26 @@ def run_poll_loop(
         ws.devnest_gateway_public_scheme,
         ws.devnest_gateway_public_port,
         ws.devnest_expect_external_postgres,
+    )
+    oauth_status = oauth_startup_status_for_log(ws)
+    logger.info(
+        "[DevNest diagnostics] workspace-worker startup frontend_public_base_url=%s github_oauth_public_base_url=%s "
+        "gcloud_oauth_public_base_url=%s github_oauth_configured=%s google_oauth_configured=%s",
+        oauth_status["frontend_public_base_url"],
+        oauth_status["github_oauth_public_base_url"],
+        oauth_status["gcloud_oauth_public_base_url"],
+        oauth_status["github_oauth_configured"],
+        oauth_status["google_oauth_configured"],
+    )
+    get_snapshot_storage_provider()
+    snapshot_fields = snapshot_storage_log_fields()
+    logger.info(
+        "[DevNest diagnostics] workspace-worker startup snapshot_storage provider=%s bucket=%s prefix=%s region=%s root=%s",
+        snapshot_fields.get("provider", ""),
+        snapshot_fields.get("bucket", "-"),
+        snapshot_fields.get("prefix", "-"),
+        snapshot_fields.get("region", "-"),
+        snapshot_fields.get("root", "-"),
     )
     if db_host == "postgres" and not ws.devnest_expect_external_postgres:
         logger.info(

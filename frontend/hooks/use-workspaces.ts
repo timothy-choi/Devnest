@@ -1,22 +1,75 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { browserApi } from "@/lib/api/browser-client";
 import { ApiError } from "@/lib/api/error";
 import { WorkspaceFormValues } from "@/lib/validators";
 import { toWorkspace } from "@/lib/workspace-mappers";
-import { Workspace } from "@/types/workspace";
+import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
+
+export type DashboardWorkspaceSection = "active" | "restore_required" | "unrecoverable";
 
 export function useWorkspaces() {
   const queryClient = useQueryClient();
+  const openInFlight = useRef<Set<number>>(new Set());
   const [query, setQuery] = useState("");
+  const [dashboardSection, setDashboardSection] = useState<DashboardWorkspaceSection>("active");
   const [isCreateDialogOpen, setCreateDialogOpen] = useState(false);
   const [optimisticWorkspaces, setOptimisticWorkspaces] = useState<Workspace[]>([]);
   const [hiddenDeletedIds, setHiddenDeletedIds] = useState<number[]>([]);
   const [createError, setCreateError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const clearStaleOpeningState = () => {
+      queryClient.setQueryData<Workspace[]>(["workspaces"], (current = []) =>
+        current.map((workspace) =>
+          workspace.pendingAction === "Opening"
+            ? {
+                ...workspace,
+                pendingAction: null,
+                isBusy: false,
+                canOpen:
+                  workspace.rawStatus === "RUNNING" &&
+                  !(workspace.reopenIssues && workspace.reopenIssues.length > 0) &&
+                  workspace.projectDataLifecycle !== "restore_required" &&
+                  workspace.projectDataLifecycle !== "unrecoverable",
+                canStart:
+                  workspace.rawStatus === "STOPPED" &&
+                  workspace.projectDataLifecycle !== "restore_required" &&
+                  workspace.projectDataLifecycle !== "unrecoverable",
+                canStop: workspace.rawStatus === "RUNNING",
+                canRestart:
+                  (workspace.rawStatus === "RUNNING" || workspace.rawStatus === "STOPPED") &&
+                  workspace.projectDataLifecycle !== "restore_required" &&
+                  workspace.projectDataLifecycle !== "unrecoverable",
+                canDelete:
+                  workspace.rawStatus === "RUNNING" ||
+                  workspace.rawStatus === "STOPPED" ||
+                  workspace.rawStatus === "ERROR",
+                statusDetail:
+                  workspace.rawStatus === "RUNNING"
+                    ? null
+                    : workspace.statusDetail,
+              }
+            : workspace,
+        ),
+      );
+      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+    };
+
+    clearStaleOpeningState();
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.addEventListener("pageshow", clearStaleOpeningState);
+    return () => {
+      window.removeEventListener("pageshow", clearStaleOpeningState);
+    };
+  }, [queryClient]);
 
   const hasBusyOptimisticWorkspace = optimisticWorkspaces.some((workspace) => workspace.isBusy);
 
@@ -148,20 +201,49 @@ export function useWorkspaces() {
     );
   }, [hiddenDeletedIds, optimisticWorkspaces, workspacesQuery.data]);
 
+  const lifecycleOf = (w: Workspace): ProjectDataLifecycle => w.projectDataLifecycle ?? "ok";
+
+  const activeDashboardWorkspaces = useMemo(() => {
+    return workspaces.filter((w) => {
+      const life = lifecycleOf(w);
+      return life !== "restore_required" && life !== "unrecoverable";
+    });
+  }, [workspaces]);
+
+  const restoreRequiredList = useMemo(
+    () => workspaces.filter((w) => lifecycleOf(w) === "restore_required"),
+    [workspaces],
+  );
+
+  const unrecoverableList = useMemo(
+    () => workspaces.filter((w) => lifecycleOf(w) === "unrecoverable"),
+    [workspaces],
+  );
+
+  const sectionWorkspaces = useMemo(() => {
+    if (dashboardSection === "restore_required") {
+      return restoreRequiredList;
+    }
+    if (dashboardSection === "unrecoverable") {
+      return unrecoverableList;
+    }
+    return activeDashboardWorkspaces;
+  }, [activeDashboardWorkspaces, dashboardSection, restoreRequiredList, unrecoverableList]);
+
   const filteredWorkspaces = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
 
     if (!normalizedQuery) {
-      return workspaces;
+      return sectionWorkspaces;
     }
 
-    return workspaces.filter((workspace) => {
+    return sectionWorkspaces.filter((workspace) => {
       return (
         workspace.name.toLowerCase().includes(normalizedQuery) ||
         workspace.description.toLowerCase().includes(normalizedQuery)
       );
     });
-  }, [query, workspaces]);
+  }, [query, sectionWorkspaces]);
 
   const openWorkspace = async (id: string) => {
     const workspaceId = Number(id);
@@ -169,6 +251,10 @@ export function useWorkspaces() {
       setActionError("Invalid workspace id.");
       return;
     }
+    if (openInFlight.current.has(workspaceId)) {
+      return;
+    }
+    openInFlight.current.add(workspaceId);
 
     setActionError(null);
     const previousWorkspaces = queryClient.getQueryData<Workspace[]>(["workspaces"]) || [];
@@ -191,15 +277,51 @@ export function useWorkspaces() {
     );
 
     try {
-        const detail = await browserApi.workspaces.get(workspaceId);
-        if ((detail.status || "").toUpperCase() !== "RUNNING") {
-          throw new ApiError(
-            409,
-            "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
-          );
-        }
+      const detail = await browserApi.workspaces.get(workspaceId);
+      if ((detail.status || "").toUpperCase() !== "RUNNING") {
+        throw new ApiError(
+          409,
+          "This workspace is not running yet. Start it from the dashboard, wait until it is RUNNING, then open again.",
+        );
+      }
+      const diskLife = detail.project_data_lifecycle ?? "ok";
+      if (diskLife === "restore_required" || diskLife === "unrecoverable") {
+        throw new ApiError(
+          409,
+          detail.project_data_user_message ||
+            "Workspace project data is not available on the execution host.",
+        );
+      }
+      const reopenBlockers = detail.reopen_issues?.length
+        ? detail.reopen_issues
+        : detail.reopenIssues ?? [];
+      if (reopenBlockers.length > 0) {
+        throw new ApiError(409, reopenBlockers.join("; "));
+      }
 
-      const attach = await browserApi.workspaces.attach(workspaceId);
+      const maxAttachAttempts = 8;
+      let attach: Awaited<ReturnType<typeof browserApi.workspaces.attach>> | null = null;
+      for (let attempt = 0; attempt < maxAttachAttempts; attempt++) {
+        try {
+          attach = await browserApi.workspaces.attach(workspaceId);
+          break;
+        } catch (err) {
+          const transientDetail =
+            /retry shortly|not ready|reconcile job was queued|timeout|traefik|gateway edge|ide upstream|restart workspace/i;
+          const isTransient =
+            err instanceof ApiError &&
+            ((err.status === 503 && transientDetail.test(err.detail)) ||
+              (err.status === 409 && transientDetail.test(err.detail)));
+          if (isTransient && attempt < maxAttachAttempts - 1) {
+            await new Promise((r) => setTimeout(r, 180 + attempt * 140));
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (!attach) {
+        throw new ApiError(502, "Attach did not return a response.");
+      }
       if (!attach.accepted) {
         throw new ApiError(
           409,
@@ -225,13 +347,21 @@ export function useWorkspaces() {
       return;
     } catch (error) {
       queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);
+      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
       setActionError(error instanceof ApiError ? error.detail : "Unable to open the workspace right now.");
+    } finally {
+      openInFlight.current.delete(workspaceId);
     }
   };
 
   return {
     workspaces,
     filteredWorkspaces,
+    dashboardSection,
+    setDashboardSection,
+    activeDashboardWorkspaces,
+    restoreRequiredList,
+    unrecoverableList,
     query,
     setQuery,
     isCreateDialogOpen,

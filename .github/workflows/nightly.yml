@@ -413,15 +413,7 @@ jobs:
             export DEVNEST_DEPLOY_DIR="${REPO_DIR}"
             export DEVNEST_DEPLOY_GIT_REF="${COMMIT_SHA}"
             export NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
-            export DEVNEST_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
-            export DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
-            export DEVNEST_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
-            export DEVNEST_COMPOSE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"
             export DEVNEST_REQUIRE_EXTERNAL_DB="1"
-            export GITHUB_CLIENT_ID="${{ secrets.GH_CLIENT_ID }}"
-            export GITHUB_CLIENT_SECRET="${{ secrets.GH_CLIENT_SECRET }}"
-            export GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}"
-            export GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}"
             export SMTP_HOST="${{ secrets.SMTP_HOST }}"
             export SMTP_PORT="${{ secrets.SMTP_PORT }}"
             export SMTP_USER="${{ secrets.SMTP_USER }}"
@@ -432,6 +424,42 @@ jobs:
               echo "Missing ${REPO_DIR}/scripts/deploy-ec2.sh; sync repo then retry." >&2
               exit 1
             fi
+            cd "${REPO_DIR}"
+            git fetch origin
+            git checkout -f "${COMMIT_SHA}"
+            export DEVNEST_CI_WRITE_FRONTEND_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export DEVNEST_CI_WRITE_GITHUB_OAUTH_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export DEVNEST_CI_WRITE_GCLOUD_OAUTH_PUBLIC_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export DEVNEST_CI_WRITE_BASE_DOMAIN="${EC2_HOST_OAUTH}"
+            export DEVNEST_CI_WRITE_GATEWAY_PUBLIC_SCHEME="http"
+            export DEVNEST_CI_WRITE_GATEWAY_PUBLIC_PORT="${{ vars.DEVNEST_GATEWAY_PUBLIC_PORT }}"
+            if [ -z "${DEVNEST_CI_WRITE_GATEWAY_PUBLIC_PORT}" ]; then export DEVNEST_CI_WRITE_GATEWAY_PUBLIC_PORT="9081"; fi
+            export DEVNEST_CI_WRITE_NEXT_PUBLIC_API_BASE_URL="http://${{ secrets.EC2_HOST }}:8000"
+            export DEVNEST_CI_WRITE_NEXT_PUBLIC_APP_BASE_URL="http://${EC2_HOST_OAUTH}:3000"
+            export DEVNEST_CI_WRITE_OAUTH_GITHUB_ID="${{ secrets.OAUTH_GITHUB_CLIENT_ID }}"
+            if [ -z "${DEVNEST_CI_WRITE_OAUTH_GITHUB_ID}" ]; then export DEVNEST_CI_WRITE_OAUTH_GITHUB_ID="${{ secrets.GH_CLIENT_ID }}"; fi
+            if [ -z "${DEVNEST_CI_WRITE_OAUTH_GITHUB_ID}" ]; then export DEVNEST_CI_WRITE_OAUTH_GITHUB_ID="${{ secrets.GITHUB_CLIENT_ID }}"; fi
+            export DEVNEST_CI_WRITE_OAUTH_GITHUB_SECRET="${{ secrets.OAUTH_GITHUB_CLIENT_SECRET }}"
+            if [ -z "${DEVNEST_CI_WRITE_OAUTH_GITHUB_SECRET}" ]; then export DEVNEST_CI_WRITE_OAUTH_GITHUB_SECRET="${{ secrets.GH_CLIENT_SECRET }}"; fi
+            if [ -z "${DEVNEST_CI_WRITE_OAUTH_GITHUB_SECRET}" ]; then export DEVNEST_CI_WRITE_OAUTH_GITHUB_SECRET="${{ secrets.GITHUB_CLIENT_SECRET }}"; fi
+            export DEVNEST_CI_WRITE_OAUTH_GOOGLE_ID="${{ secrets.OAUTH_GOOGLE_CLIENT_ID }}"
+            if [ -z "${DEVNEST_CI_WRITE_OAUTH_GOOGLE_ID}" ]; then export DEVNEST_CI_WRITE_OAUTH_GOOGLE_ID="${{ secrets.GOOGLE_CLIENT_ID }}"; fi
+            export DEVNEST_CI_WRITE_OAUTH_GOOGLE_SECRET="${{ secrets.OAUTH_GOOGLE_CLIENT_SECRET }}"
+            if [ -z "${DEVNEST_CI_WRITE_OAUTH_GOOGLE_SECRET}" ]; then export DEVNEST_CI_WRITE_OAUTH_GOOGLE_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}"; fi
+            export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DATABASE_URL }}"
+            if [ -z "${DEVNEST_CI_WRITE_DATABASE_URL}" ]; then export DEVNEST_CI_WRITE_DATABASE_URL="${{ secrets.DEVNEST_DATABASE_URL }}"; fi
+            export DEVNEST_CI_WRITE_S3_BUCKET="${{ secrets.DEVNEST_S3_SNAPSHOT_BUCKET }}"
+            export DEVNEST_CI_WRITE_AWS_REGION="${{ secrets.AWS_REGION }}"
+            if [ -z "${DEVNEST_CI_WRITE_AWS_REGION}" ]; then export DEVNEST_CI_WRITE_AWS_REGION="${{ vars.AWS_REGION }}"; fi
+            export DEVNEST_CI_WRITE_S3_PREFIX="${{ vars.DEVNEST_S3_SNAPSHOT_PREFIX }}"
+            export DEVNEST_CI_WRITE_SNAPSHOT_PROVIDER="s3"
+            _ak="${{ secrets.AWS_ACCESS_KEY_ID }}"
+            _sk="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            if [ -n "${_ak}" ]; then export DEVNEST_CI_WRITE_AWS_ACCESS_KEY_ID="${_ak}"; fi
+            if [ -n "${_sk}" ]; then export DEVNEST_CI_WRITE_AWS_SECRET_ACCESS_KEY="${_sk}"; fi
+            python3 "${REPO_DIR}/scripts/write_integration_deploy_env.py" write
+            unset DEVNEST_CI_WRITE_DATABASE_URL DEVNEST_CI_WRITE_S3_BUCKET DEVNEST_CI_WRITE_AWS_REGION DEVNEST_CI_WRITE_S3_PREFIX DEVNEST_CI_WRITE_SNAPSHOT_PROVIDER DEVNEST_CI_WRITE_AWS_ACCESS_KEY_ID DEVNEST_CI_WRITE_AWS_SECRET_ACCESS_KEY DEVNEST_CI_WRITE_FRONTEND_PUBLIC_BASE_URL DEVNEST_CI_WRITE_GITHUB_OAUTH_PUBLIC_BASE_URL DEVNEST_CI_WRITE_GCLOUD_OAUTH_PUBLIC_BASE_URL DEVNEST_CI_WRITE_BASE_DOMAIN DEVNEST_CI_WRITE_GATEWAY_PUBLIC_SCHEME DEVNEST_CI_WRITE_GATEWAY_PUBLIC_PORT DEVNEST_CI_WRITE_NEXT_PUBLIC_API_BASE_URL DEVNEST_CI_WRITE_NEXT_PUBLIC_APP_BASE_URL DEVNEST_CI_WRITE_OAUTH_GITHUB_ID DEVNEST_CI_WRITE_OAUTH_GITHUB_SECRET DEVNEST_CI_WRITE_OAUTH_GOOGLE_ID DEVNEST_CI_WRITE_OAUTH_GOOGLE_SECRET || true
+            unset _ak _sk || true
             bash "${REPO_DIR}/scripts/deploy-ec2.sh" main
             echo "Deployment complete."
 

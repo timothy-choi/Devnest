@@ -304,17 +304,33 @@ Workflow **`.github/workflows/tests.yml`** runs on **all branch pushes**, **all 
 
 1. **Path-based `detect`** still skips jobs when a change only touches unrelated areas (same as before).
 2. After required jobs succeed, **linux-full-stack-integration** brings up **`docker-compose.integration.yml`**, waits for **`http://localhost:8000/health`** and **`http://localhost:3000/`**, then tears the stack down.
-3. **Deploy** (only if secrets are set) uses **`appleboy/ssh-action@v1.2.3`** and the repo script **`scripts/deploy-ec2.sh`** (branch tip + compose rebuild; logs/`git` diagnostics at the end). **Pull requests never deploy.** **Push to non-`main`** → **deploy-staging**; **push to `main`** → **deploy-production**. **`workflow_dispatch`** follows the same rule using the selected ref.
+3. **Deploy** (only if secrets are set) uses **`appleboy/ssh-action@v1.2.3`**, runs **`python3 scripts/write_integration_deploy_env.py write`** to emit **`~/Devnest/.env.integration`** (mode **0600**, double-quoted values so long SQLAlchemy URLs are not shell-mangled; libpq-style **`DATABASE_URL`** secrets are normalized to **`postgresql+psycopg://…`**), then **`scripts/deploy-ec2.sh`** **sources** it, **sync/validates**, prints **`diagnostics`** (DB host/name, S3 presence, OAuth configured flags, public URLs — no secrets), and runs **`docker compose --env-file "${REPO_DIR}/.env.integration"`** when that file exists. **SMTP** remains on the SSH shell via **`export`**. **Pull requests never deploy.** **Push to non-`main`** → **deploy-staging**; **push to `main`** → **deploy-production**. **`workflow_dispatch`** follows the same rule using the selected ref.
 
 | Secret | Purpose |
 |--------|---------|
 | `EC2_HOST` | Public DNS or IPv4 |
 | `EC2_USER` | SSH user |
 | `EC2_SSH_KEY` | Private key (full multiline PEM/OpenSSH) |
+| `DATABASE_URL` | Optional RDS-style Postgres URL; if set, used for `.env.integration` (otherwise **`DEVNEST_DATABASE_URL`** is used) |
+| `DEVNEST_DATABASE_URL` | Fallback RDS URL when **`DATABASE_URL`** is unset |
+| `DEVNEST_S3_SNAPSHOT_BUCKET` | S3 bucket for workspace snapshots (required when using external Postgres; enforced in **`scripts/deploy-ec2.sh`**) |
+| `AWS_REGION` | Region written into `.env.integration` (secret preferred; **`vars.AWS_REGION`** used when the secret is empty) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Optional; included in `.env.integration` only when set. Omit when the EC2 instance uses an **IAM instance profile** with S3 permissions |
+| `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET` | GitHub OAuth app (written into `.env.integration`). If unset, the workflow falls back to **`GH_CLIENT_ID`** / **`GH_CLIENT_SECRET`**, then **`GITHUB_CLIENT_ID`** / **`GITHUB_CLIENT_SECRET`**. |
+| `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET` | Google OAuth web client (same file). If unset, falls back to **`GOOGLE_CLIENT_ID`** / **`GOOGLE_CLIENT_SECRET`**. |
 
-Missing secrets → deploy jobs skip; tests can still pass. Job `if` conditions use `env.*` mapped from secrets (GitHub does not allow `secrets.*` in all `if:` contexts).
+Public UI / OAuth redirect bases (**not** secrets) are derived on the EC2 shell from **`EC2_HOST`**: `http://<dashed-ip>.sslip.io:3000` when the host is an IPv4 address, otherwise `http://<EC2_HOST>:3000`. Those values are written as **`DEVNEST_FRONTEND_PUBLIC_BASE_URL`**, **`GITHUB_OAUTH_PUBLIC_BASE_URL`**, and **`GCLOUD_OAUTH_PUBLIC_BASE_URL`** in `.env.integration` (callbacks: `/auth/oauth/github/callback` and `/auth/oauth/google/callback` under that origin).
 
-**Verify a deploy:** open `http://<EC2_HOST>:3000` and `http://<EC2_HOST>:8000/health` after the workflow completes; check the **Deploy to EC2** job log for `git rev-parse HEAD` and `docker compose ps` output from the script.
+| Variable (repo **Settings → Secrets and variables → Actions → Variables**) | Purpose |
+|---|---|
+| `DEVNEST_S3_SNAPSHOT_PREFIX` | Optional S3 key prefix; default **`devnest-snapshots`** when unset |
+| `DEVNEST_GATEWAY_PUBLIC_PORT` | Port embedded in `gateway_url` when non-zero (workflow defaults to **`9081`** when unset) |
+
+**If deploy still fails after setting secrets:** confirm secret **names** match the table, values are **repository** (or organization) secrets visible to the workflow, and you are not storing RDS/S3 only under a GitHub **Environment** that these jobs do not use (`environment:` is not set on deploy jobs). After SSH, **`echo "$DEVNEST_S3_SNAPSHOT_BUCKET"`** is often empty by design (secrets are not left exported on the shell); check **`test -s ~/Devnest/.env.integration`** and deploy logs for **`--- deploy env presence ---`** (presence only).
+
+Missing EC2 SSH secrets → deploy jobs skip; tests can still pass. Job `if` conditions use `env.*` mapped from secrets (GitHub does not allow `secrets.*` in all `if:` contexts).
+
+**Verify a deploy:** open `http://<EC2_HOST>:3000` and `http://<EC2_HOST>:8000/health` after the workflow completes; check the **Deploy to EC2** job log for `[devnest-deploy]` diagnostics, `git rev-parse HEAD`, and `docker compose ps`. On the instance: `python3 ~/Devnest/scripts/write_integration_deploy_env.py diagnostics --path ~/Devnest/.env.integration`.
 
 **Run the stack locally (Linux or Docker Desktop):**
 

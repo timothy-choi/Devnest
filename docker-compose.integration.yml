@@ -57,6 +57,17 @@
 #   ``DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`` when ``DATABASE_URL`` is set so miswired URLs fail at process start
 #   instead of silently using bundled Postgres or ``app.lvh.me`` (see ``docs/INTEGRATION_STARTUP.md``).
 #
+# Snapshot/archive storage (workspace files stay on host bind mounts):
+#   Live workspace project data remains under ``WORKSPACE_PROJECTS_BASE`` on the host. Only snapshot archives
+#   use the snapshot storage provider. Local default: ``DEVNEST_SNAPSHOT_STORAGE_PROVIDER=local`` (omit S3 vars).
+#   EC2 / RDS: set ``DEVNEST_SNAPSHOT_STORAGE_PROVIDER=s3``, ``DEVNEST_S3_SNAPSHOT_BUCKET``, ``AWS_REGION``,
+#   optional ``DEVNEST_S3_SNAPSHOT_PREFIX`` (default ``devnest-snapshots``), optional keys in ``AWS_*``.
+#   ``x-workspace-snapshot-env`` injects the **same** snapshot + workspace image keys into ``backend`` and
+#   ``workspace-worker`` (API and worker never diverge on compose-derived snapshot env).
+#   When ``DEVNEST_EXPECT_EXTERNAL_POSTGRES`` or ``DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS`` is true, Settings
+#   requires ``s3`` plus bucket and region — no silent local fallback (see ``config.py`` + ``deploy-ec2.sh``).
+#   Startup logs print provider/bucket/prefix/region/root only; credentials are never logged.
+#
 # Services: PostgreSQL, FastAPI, workspace job worker, Traefik + route-admin, Next.js frontend.
 #
 # Backend uses the host Docker socket for workspace containers; NET_ADMIN helps topology bring-up on Linux.
@@ -82,9 +93,17 @@ name: devnest-integration
 x-pid-host: &pid_host
   pid: "host"
 
-# Default workspace runtime for orchestrator bring-up (matches Dockerfile.workspace).
-x-workspace-image: &workspace_image
+# Workspace image + snapshot storage: one merge anchor so backend and workspace-worker always get
+# identical values (matches Dockerfile.workspace + same S3/local snapshot env).
+x-workspace-snapshot-env: &workspace_snapshot_env
   DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-devnest/workspace:latest}
+  DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-local}
+  DEVNEST_S3_SNAPSHOT_BUCKET: ${DEVNEST_S3_SNAPSHOT_BUCKET:-}
+  DEVNEST_S3_SNAPSHOT_PREFIX: ${DEVNEST_S3_SNAPSHOT_PREFIX:-devnest-snapshots}
+  DEVNEST_SNAPSHOT_TEMP_DIR: ${DEVNEST_SNAPSHOT_TEMP_DIR:-}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
 
 services:
   # Build-only helper: tags devnest/workspace:latest so backend/worker can start user workspaces.
@@ -131,7 +150,7 @@ services:
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_WORKER_ENABLED: "false"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
-      <<: *workspace_image
+      <<: *workspace_snapshot_env
       # Optional fail-fast for EC2/RDS (see header + docs/INTEGRATION_STARTUP.md). deploy-ec2.sh sets when using RDS.
       DEVNEST_EXPECT_EXTERNAL_POSTGRES: "${DEVNEST_EXPECT_EXTERNAL_POSTGRES:-false}"
       DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS: "${DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS:-false}"
@@ -144,14 +163,16 @@ services:
       # Traefik + route-admin (same compose network): enable attach ``gateway_url`` and worker route registration.
       DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"
       DEVNEST_GATEWAY_URL: "http://route-admin:8080"
+      # Wait for Traefik to observe dynamic routes before attach returns gateway_url (avoids first-hit 404).
+      DEVNEST_GATEWAY_TRAEFIK_HTTP_PROBE_BASE: "http://traefik:80"
       DEVNEST_BASE_DOMAIN: ${DEVNEST_BASE_DOMAIN:-app.lvh.me}
       DEVNEST_GATEWAY_PUBLIC_SCHEME: ${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}
       DEVNEST_GATEWAY_PUBLIC_PORT: ${DEVNEST_GATEWAY_PUBLIC_PORT:-9081}
       DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
       # Passed explicitly so Settings can prefer this over loopback values from ``backend/.env``.
       DEVNEST_FRONTEND_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
-      GITHUB_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
-      GCLOUD_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      GITHUB_OAUTH_PUBLIC_BASE_URL: ${GITHUB_OAUTH_PUBLIC_BASE_URL:-${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}}
+      GCLOUD_OAUTH_PUBLIC_BASE_URL: ${GCLOUD_OAUTH_PUBLIC_BASE_URL:-${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}}
       OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
       OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
       OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
@@ -209,7 +230,7 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_RATE_LIMIT_ENABLED: "false"
-      <<: *workspace_image
+      <<: *workspace_snapshot_env
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
@@ -224,8 +245,8 @@ services:
       DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS: "${DEVNEST_EXPECT_REMOTE_GATEWAY_CLIENTS:-false}"
       # Passed explicitly so Settings can prefer this over loopback values from ``backend/.env``.
       DEVNEST_FRONTEND_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
-      GITHUB_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
-      GCLOUD_OAUTH_PUBLIC_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      GITHUB_OAUTH_PUBLIC_BASE_URL: ${GITHUB_OAUTH_PUBLIC_BASE_URL:-${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}}
+      GCLOUD_OAUTH_PUBLIC_BASE_URL: ${GCLOUD_OAUTH_PUBLIC_BASE_URL:-${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}}
       OAUTH_GITHUB_CLIENT_ID: ${OAUTH_GITHUB_CLIENT_ID:-}
       OAUTH_GITHUB_CLIENT_SECRET: ${OAUTH_GITHUB_CLIENT_SECRET:-}
       OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID:-}
@@ -309,12 +330,12 @@ services:
       dockerfile: Dockerfile.integration
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
-        NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+        NEXT_PUBLIC_APP_BASE_URL: ${NEXT_PUBLIC_APP_BASE_URL:-${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}}
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_APP_BASE_URL: ${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}
+      NEXT_PUBLIC_APP_BASE_URL: ${NEXT_PUBLIC_APP_BASE_URL:-${DEVNEST_FRONTEND_PUBLIC_BASE_URL:-http://localhost:3000}}
       # Server-side fetches to FastAPI: see frontend/lib/server/internal-api-base.ts (uses http://backend:8000 in Docker).
       DOCKER_CONTAINER: "true"
       # Optional override; default in-container URL is already http://backend:8000.

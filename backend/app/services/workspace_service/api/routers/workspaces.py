@@ -32,6 +32,7 @@ from app.services.workspace_service.api.schemas import (
 from app.services.workspace_service.errors import (
     WorkspaceAccessDeniedError,
     WorkspaceBusyError,
+    WorkspaceGatewayUnavailableError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
     WorkspaceServiceError,
@@ -65,6 +66,8 @@ def _raise_workspace_http(exc: WorkspaceServiceError) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found") from exc
     if isinstance(exc, WorkspaceAccessDeniedError):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    if isinstance(exc, WorkspaceGatewayUnavailableError):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceBusyError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceInvalidStateError):

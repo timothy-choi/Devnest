@@ -12,8 +12,10 @@ import pytest
 from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
     prune_orphaned_workspace_project_dirs,
+    resolve_workspace_ide_bind_host_path,
     ssh_remote_ensure_workspace_project_dir,
     verify_workspace_runtime_owns_path,
+    workspace_bundle_has_legacy_root_level_files,
     workspace_project_dir_name,
 )
 
@@ -30,6 +32,45 @@ def test_default_local_uses_storage_key_for_isolated_directory() -> None:
         p = default_local_ensure_workspace_project_dir(tmp, "1", "abc123")
         assert Path(p).is_dir()
         assert p.endswith("1-abc123")
+
+
+def test_default_local_resume_missing_raises_without_creating() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        missing = Path(tmp) / "9-deadbeef"
+        with pytest.raises(ValueError, match="missing for resume"):
+            default_local_ensure_workspace_project_dir(tmp, "9", "deadbeef", allow_create=False)
+        assert not missing.exists()
+
+
+def test_default_local_resume_allows_existing_dir() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        p = default_local_ensure_workspace_project_dir(tmp, "3", "aa", allow_create=True)
+        p2 = default_local_ensure_workspace_project_dir(tmp, "3", "aa", allow_create=False)
+        assert p == p2
+
+
+def test_resolve_workspace_ide_bind_host_path_new_creates_project(tmp_path: Path) -> None:
+    bundle = tmp_path / "ws1"
+    bundle.mkdir()
+    out = resolve_workspace_ide_bind_host_path(str(bundle), launch_mode_raw="new")
+    assert out == str((bundle / "project").resolve())
+
+
+def test_resolve_workspace_ide_bind_host_path_permissive_empty_bundle(tmp_path: Path) -> None:
+    bundle = tmp_path / "ws2"
+    bundle.mkdir()
+    out = resolve_workspace_ide_bind_host_path(str(bundle), launch_mode_raw=None)
+    assert out == str((bundle / "project").resolve())
+    assert (bundle / "project").is_dir()
+
+
+def test_resolve_workspace_ide_bind_host_path_resume_legacy_stays_at_bundle(tmp_path: Path) -> None:
+    bundle = tmp_path / "ws3"
+    bundle.mkdir()
+    (bundle / "app.py").write_text("x", encoding="utf-8")
+    assert workspace_bundle_has_legacy_root_level_files(bundle) is True
+    out = resolve_workspace_ide_bind_host_path(str(bundle), launch_mode_raw="resume")
+    assert out == str(bundle.resolve())
 
 
 def test_workspace_project_dir_name_changes_when_storage_key_changes() -> None:
@@ -74,10 +115,21 @@ def test_ssh_remote_requires_absolute_base() -> None:
         ssh_remote_ensure_workspace_project_dir(runner, "relative/path", "ws1")
 
 
+def test_ssh_remote_resume_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_UID", "1000")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_GID", "1000")
+    runner = MagicMock()
+    runner.run.side_effect = RuntimeError("no dir")
+    with pytest.raises(ValueError, match="missing on execution host"):
+        ssh_remote_ensure_workspace_project_dir(runner, "/var/devnest", "ws7", "k1", allow_create=False)
+
+
 def test_ssh_remote_mkdir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_UID", "1000")
     monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_GID", "1000")
     runner = MagicMock()
+    # First call is ``test -d`` (missing dir); then ``mkdir -p``; then ``chown``.
+    runner.run.side_effect = [RuntimeError("missing"), None, None]
     path = ssh_remote_ensure_workspace_project_dir(runner, "/var/devnest", "ws7", "k1")
     assert path == "/var/devnest/ws7-k1"
     assert runner.run.call_count == 3
