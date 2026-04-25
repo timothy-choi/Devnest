@@ -209,6 +209,24 @@ def active_workload_count_subquery():
     ).scalar_subquery()
 
 
+def workspace_slot_claim_count_subquery():
+    """Correlated subquery: workspaces assigned to this node (``execution_node_id``) that hold a slot.
+
+    Counts any non-terminal status (same release rule as reservation sums: not STOPPED / DELETED /
+    ERROR), including ``CREATING`` before ``WorkspaceRuntime`` exists — prevents CREATE overbooking.
+    """
+    return (
+        select(func.count())
+        .select_from(Workspace)
+        .where(
+            Workspace.execution_node_id == ExecutionNode.id,
+            Workspace.execution_node_id.isnot(None),
+            Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
+        )
+        .correlate(ExecutionNode)
+    ).scalar_subquery()
+
+
 def count_active_workloads_on_node_key(session: Session, node_key: str) -> int:
     """Count active (capacity-consuming) workloads pinned to ``node_key``.
 

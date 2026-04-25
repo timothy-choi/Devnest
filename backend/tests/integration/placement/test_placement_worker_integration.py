@@ -10,7 +10,7 @@ from sqlmodel import Session
 
 from app.services.auth_service.models import UserAuth
 from app.services.orchestrator_service.app_factory import build_orchestrator_for_workspace_job
-from app.services.placement_service.bootstrap import default_local_node_key
+from app.services.placement_service.bootstrap import default_local_node_key, ensure_default_local_execution_node
 from app.services.placement_service.errors import NoSchedulableNodeError
 from app.services.placement_service.orchestrator_binding import resolve_orchestrator_placement
 from app.services.workspace_service.models import (
@@ -46,6 +46,8 @@ def _seed_create_job(
     max_attempts: int | None = None,
 ) -> tuple[int, int]:
     now = datetime.now(timezone.utc)
+    node = ensure_default_local_execution_node(session)
+    assert node.id is not None
     ws = Workspace(
         name="placement-ws",
         description="",
@@ -54,6 +56,7 @@ def _seed_create_job(
         is_private=True,
         created_at=now,
         updated_at=now,
+        execution_node_id=int(node.id),
     )
     session.add(ws)
     session.flush()

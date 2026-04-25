@@ -37,6 +37,8 @@ from app.services.workspace_service.errors import (
     WorkspaceGatewayUnavailableError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
+    WorkspaceSchedulingCapacityError,
+    WorkspaceSchedulingInvalidError,
     WorkspaceServiceError,
 )
 from app.services.workspace_service.services import workspace_intent_service
@@ -71,6 +73,10 @@ def _raise_workspace_http(exc: WorkspaceServiceError) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceGatewayUnavailableError):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    if isinstance(exc, WorkspaceSchedulingCapacityError):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    if isinstance(exc, WorkspaceSchedulingInvalidError):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceBusyError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceInvalidStateError):
@@ -136,12 +142,15 @@ def post_workspace(
     current: UserAuth = Depends(get_current_user),
 ) -> CreateWorkspaceAcceptedResponse:
     assert current.user_auth_id is not None
-    out = workspace_intent_service.create_workspace(
-        session,
-        owner_user_id=current.user_auth_id,
-        body=body,
-        correlation_id=_correlation_id_from_request(request),
-    )
+    try:
+        out = workspace_intent_service.create_workspace(
+            session,
+            owner_user_id=current.user_auth_id,
+            body=body,
+            correlation_id=_correlation_id_from_request(request),
+        )
+    except WorkspaceServiceError as exc:
+        _raise_workspace_http(exc)
     return CreateWorkspaceAcceptedResponse(
         workspace_id=out.workspace_id,
         status=out.status,

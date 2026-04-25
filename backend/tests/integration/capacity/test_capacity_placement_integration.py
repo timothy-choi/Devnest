@@ -30,7 +30,12 @@ def test_placement_raises_when_effective_capacity_blocked_by_runtime_reservation
     db_session.commit()
     db_session.refresh(u)
 
-    ws = Workspace(name="cap_ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+    ws = Workspace(
+        name="cap_ws",
+        owner_user_id=u.user_auth_id,
+        status=WorkspaceStatus.RUNNING.value,
+        execution_node_id=int(node.id),
+    )
     db_session.add(ws)
     db_session.commit()
     db_session.refresh(ws)
@@ -78,7 +83,12 @@ def test_stop_clears_reservation_so_capacity_frees(db_session: Session) -> None:
     db_session.commit()
     db_session.refresh(u)
 
-    ws = Workspace(name="cap_ws2", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+    ws = Workspace(
+        name="cap_ws2",
+        owner_user_id=u.user_auth_id,
+        status=WorkspaceStatus.RUNNING.value,
+        execution_node_id=int(node.id),
+    )
     db_session.add(ws)
     db_session.commit()
     db_session.refresh(ws)

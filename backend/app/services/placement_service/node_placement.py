@@ -15,6 +15,7 @@ from .capacity import (
     effective_free_disk_mb_expr,
     effective_free_memory_mb_expr,
     max_effective_free_resources_across_schedulable,
+    workspace_slot_claim_count_subquery,
 )
 from .constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
@@ -113,6 +114,11 @@ def select_node_for_workspace(
     ``allocatable_*`` minus sums of ``WorkspaceRuntime.reserved_*`` for workloads on that ``node_key``
     (workspace not ``STOPPED`` / ``DELETED`` / ``ERROR``).
 
+    **Slot ceiling:** both ``workspace_slot_claim_count_subquery()`` (``Workspace.execution_node_id``,
+    non-terminal statuses — includes ``CREATING`` before runtime exists) **and**
+    ``active_workload_count_subquery()`` (runtime ``node_key`` ledger) must be ``< max_workspaces``,
+    so CREATE cannot overbook and legacy rows without an FK still respect the cap.
+
     **Sort policy (4 levels, descending priority):**
 
     1. ``effective_free_cpu DESC`` — capacity-first; prevents fragmentation on large requests.
@@ -150,11 +156,15 @@ def select_node_for_workspace(
     free_mem_e = effective_free_memory_mb_expr()
     free_disk_e = effective_free_disk_mb_expr()
     active_wl_e = active_workload_count_subquery()
+    slot_claim_e = workspace_slot_claim_count_subquery()
     preds = [
         *_schedulable_base_predicates(),
         free_cpu_e >= req_cpu,
         free_mem_e >= req_mem,
         free_disk_e >= req_disk,
+        # FK-based slots (CREATING before runtime) and runtime-pinned cohort (legacy rows) must both
+        # stay under max_workspaces so neither path overbooks.
+        slot_claim_e < ExecutionNode.max_workspaces,
         active_wl_e < ExecutionNode.max_workspaces,
     ]
     stmt = (
@@ -188,7 +198,8 @@ def select_node_for_workspace(
             "no execution node matches placement policy "
             f"(need status=READY, schedulable=true, effective_free_cpu>={req_cpu}, "
             f"effective_free_memory_mb>={req_mem}, effective_free_disk_mb>={req_disk}, "
-            "and active_workspaces < max_workspaces after workspace reservations; "
+            "and both workspace slot claims (execution_node_id) and active runtime-pinned workloads "
+            "< max_workspaces; "
             f"{n_gate} node(s) are READY+schedulable (after provider filter) but none have enough "
             f"effective capacity — check execution_node, workspace_runtime reservations, and bootstrap; "
             f"diagnostic max_effective_free_cpu≈{max_cpu:.4f}, "

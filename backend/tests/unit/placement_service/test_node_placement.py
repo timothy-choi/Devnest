@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.services.placement_service.errors import (
     ExecutionNodeNotFoundError,
@@ -167,12 +167,17 @@ def test_select_skips_node_when_effective_capacity_exhausted(placement_engine: E
     from app.services.workspace_service.models.enums import WorkspaceStatus
 
     with Session(placement_engine) as session:
-        _add_node(session, key="only", alloc_cpu=2.0, alloc_mem=2048)
+        n_only = _add_node(session, key="only", alloc_cpu=2.0, alloc_mem=2048)
         u = UserAuth(username="p1", password_hash="x", email="p1@e.com")
         session.add(u)
         session.commit()
         session.refresh(u)
-        ws = Workspace(name="pw", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+        ws = Workspace(
+            name="pw",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(n_only.id),
+        )
         session.add(ws)
         session.commit()
         session.refresh(ws)
@@ -216,7 +221,14 @@ def test_select_allows_placement_when_only_error_workloads_have_ledger(placement
         session.add(u)
         session.commit()
         session.refresh(u)
-        ws = Workspace(name="err_ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.ERROR.value)
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "solo")).first()
+        assert node is not None and node.id is not None
+        ws = Workspace(
+            name="err_ws",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.ERROR.value,
+            execution_node_id=int(node.id),
+        )
         session.add(ws)
         session.commit()
         session.refresh(ws)
@@ -246,12 +258,17 @@ def test_select_node_rejects_when_max_workspaces_reached(placement_engine: Engin
     from app.services.workspace_service.models.enums import WorkspaceStatus
 
     with Session(placement_engine) as session:
-        _add_node(session, key="slot-full", max_workspaces=1)
+        n = _add_node(session, key="slot-full", max_workspaces=1)
         u = UserAuth(username="slot1", password_hash="x", email="slot1@e.com")
         session.add(u)
         session.commit()
         session.refresh(u)
-        ws = Workspace(name="slot-ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+        ws = Workspace(
+            name="slot-ws",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(n.id),
+        )
         session.add(ws)
         session.commit()
         session.refresh(ws)
@@ -266,7 +283,7 @@ def test_select_node_rejects_when_max_workspaces_reached(placement_engine: Engin
         )
         session.commit()
 
-        with pytest.raises(NoSchedulableNodeError, match="active_workspaces < max_workspaces"):
+        with pytest.raises(NoSchedulableNodeError, match="max_workspaces"):
             select_node_for_workspace(
                 session,
                 workspace_id=999,
@@ -295,13 +312,18 @@ def test_select_node_chooses_other_node_when_first_is_full(placement_engine: Eng
     from app.services.workspace_service.models.enums import WorkspaceStatus
 
     with Session(placement_engine) as session:
-        _add_node(session, key="full", max_workspaces=1, alloc_disk=8192)
+        n_full = _add_node(session, key="full", max_workspaces=1, alloc_disk=8192)
         _add_node(session, key="roomy", max_workspaces=4, alloc_disk=8192)
         u = UserAuth(username="other1", password_hash="x", email="other1@e.com")
         session.add(u)
         session.commit()
         session.refresh(u)
-        ws = Workspace(name="full-ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+        ws = Workspace(
+            name="full-ws",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(n_full.id),
+        )
         session.add(ws)
         session.commit()
         session.refresh(ws)
@@ -332,13 +354,18 @@ def test_select_node_reports_no_capacity_when_all_nodes_ineligible(placement_eng
     from app.services.workspace_service.models.enums import WorkspaceStatus
 
     with Session(placement_engine) as session:
-        _add_node(session, key="slot-full", max_workspaces=1, alloc_disk=8192)
+        n_slot = _add_node(session, key="slot-full", max_workspaces=1, alloc_disk=8192)
         _add_node(session, key="disk-tight", max_workspaces=4, alloc_disk=1024)
         u = UserAuth(username="none1", password_hash="x", email="none1@e.com")
         session.add(u)
         session.commit()
         session.refresh(u)
-        ws = Workspace(name="slot-ws", owner_user_id=u.user_auth_id, status=WorkspaceStatus.RUNNING.value)
+        ws = Workspace(
+            name="slot-ws",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(n_slot.id),
+        )
         session.add(ws)
         session.commit()
         session.refresh(ws)
