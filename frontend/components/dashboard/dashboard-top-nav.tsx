@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Bell, ChevronDown } from "lucide-react";
+import { Activity, Bell, ChevronDown } from "lucide-react";
 import { useRouter } from "next/router";
 
 import { useAuth } from "@/hooks/use-auth";
@@ -76,6 +76,15 @@ export function DashboardTopNav({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem
+                className="cursor-pointer"
+                onClick={() => {
+                  void router.push("/system-status");
+                }}
+              >
+                <Activity className="mr-2 h-4 w-4" />
+                System status
+              </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={async () => {
                   await logout();

@@ -21,6 +21,7 @@ from app.services.storage.factory import get_snapshot_storage_provider, snapshot
 from app.workers.lifespan_worker import start_background_worker, stop_background_worker
 from app.workers.lifespan_reconcile import start_reconcile_loop, stop_reconcile_loop
 from app.libs.observability.routes import router as observability_router
+from app.libs.observability.system_status_routes import router as system_status_router
 from app.services.audit_service.api.routers import router as audit_router
 from app.services.auth_service.api.routers.auth import router as auth_router
 from app.services.notification_service.api.routers import internal_notifications_router, notifications_router
@@ -157,6 +158,7 @@ async def _quota_exceeded_handler(request: Request, exc: QuotaExceededError) -> 
 
 app.include_router(observability_router)
 app.include_router(auth_router)
+app.include_router(system_status_router)
 app.include_router(users_router)
 app.include_router(workspaces_router)
 app.include_router(workspace_snapshots_router)

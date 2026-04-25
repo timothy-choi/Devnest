@@ -29,6 +29,12 @@ _logger = logging.getLogger(__name__)
 _worker_task: Optional[asyncio.Task] = None  # type: ignore[type-arg]
 
 
+def in_process_workspace_worker_running() -> bool:
+    """True when this API process started the in-process job loop and the task is still active."""
+    t = _worker_task
+    return t is not None and not t.done()
+
+
 async def _run_one_tick(*, batch_size: int) -> int:
     """Execute one worker tick in the default thread-pool executor.
 

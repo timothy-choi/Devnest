@@ -561,6 +561,15 @@ def _workspace_set_error(ws: Workspace, code: str, message: str) -> None:
     ws.last_error_code = _truncate(code, 64)
     ws.last_error_message = _truncate(message, 4096)
     ws.status_reason = _truncate(message, 1024)
+    wid = ws.workspace_id
+    if wid is not None:
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_STATUS_ERROR,
+            workspace_id=int(wid),
+            error_code=_truncate(code, 64),
+            detail=_truncate(message, 256),
+        )
 
 
 def _touch_workspace(session: Session, ws: Workspace) -> None:
@@ -1115,12 +1124,12 @@ def _execute_snapshot_create_job(
         )
         log_event(
             logger,
-            LogEvent.WORKSPACE_SNAPSHOT_CREATED,
+            LogEvent.WORKSPACE_SNAPSHOT_COMPLETED,
             correlation_id=job.correlation_id,
             workspace_id=wid,
             workspace_job_id=job.workspace_job_id,
             workspace_snapshot_id=sid,
-            phase="materialized",
+            size_bytes=snap.size_bytes,
         )
         record_audit(
             session,

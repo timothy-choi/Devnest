@@ -191,12 +191,11 @@ def create_snapshot(
     record_job_queued(job_type=WorkspaceJobType.SNAPSHOT_CREATE.value)
     log_event(
         logger,
-        LogEvent.WORKSPACE_SNAPSHOT_CREATED,
+        LogEvent.WORKSPACE_SNAPSHOT_REQUESTED,
         correlation_id=cid,
         workspace_id=workspace_id,
         workspace_job_id=jid,
         workspace_snapshot_id=sid,
-        phase="accepted",
     )
     record_workspace_event(
         session,
@@ -322,6 +321,7 @@ def prepare_snapshot_archive_download(
     workspace_id: int,
     owner_user_id: int,
     snapshot_id: int | None = None,
+    correlation_id: str | None = None,
 ) -> SnapshotArchiveDownloadInfo:
     """Resolve an AVAILABLE snapshot with a non-empty archive and materialize a local file for download.
 
@@ -375,6 +375,13 @@ def prepare_snapshot_archive_download(
         raise WorkspaceInvalidStateError("Snapshot archive file is missing or empty after storage sync")
 
     name = f"workspace-{wid}-snapshot-{sid_final}.tar.gz"
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_SNAPSHOT_DOWNLOAD_REQUESTED,
+        correlation_id=correlation_id,
+        workspace_id=int(wid),
+        workspace_snapshot_id=int(sid_final),
+    )
     return SnapshotArchiveDownloadInfo(
         local_path=local_path,
         suggested_filename=name,
