@@ -1047,6 +1047,12 @@ class Settings(BaseSettings):
                 f"could not parse as SQLAlchemy URL ({type(exc).__name__}: {exc}). "
                 "Use a single-line postgresql+psycopg://USER:PASSWORD@HOST:PORT/DBNAME?... value."
             ) from exc
+        driver = (u.drivername or "").lower()
+        # SQLite and other non-Postgres URLs are allowed for unit tests and local tools; only
+        # enforce host/database/psycopg rules for PostgreSQL family URLs.
+        if not driver.startswith("postgresql"):
+            return self
+
         cloud = self.devnest_expect_external_postgres or self.devnest_expect_remote_gateway_clients
         if cloud and (u.drivername or "") != "postgresql+psycopg":
             raise RuntimeError(
@@ -1058,12 +1064,12 @@ class Settings(BaseSettings):
         dbn = (u.database or "").strip() if u.database is not None else ""
         if not dbn:
             raise RuntimeError(
-                "DATABASE_URL must include a database name in the path "
+                "PostgreSQL DATABASE_URL must include a database name in the path "
                 "(postgresql+psycopg://…@HOST:PORT/DBNAME)."
             )
         if not (u.host or "").strip():
             raise RuntimeError(
-                "DATABASE_URL must include a non-empty database host "
+                "PostgreSQL DATABASE_URL must include a non-empty database host "
                 "(postgresql+psycopg://…@HOST:PORT/DBNAME)."
             )
         return self
