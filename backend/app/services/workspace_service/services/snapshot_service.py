@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -13,6 +14,7 @@ from app.libs.observability.correlation import generate_correlation_id
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability.metrics import record_job_queued
 from app.services.storage.factory import get_snapshot_storage_provider
+from app.services.storage.s3_storage import S3SnapshotStorageProvider
 from app.services.workspace_service.errors import (
     SnapshotConflictError,
     SnapshotNotFoundError,
@@ -29,6 +31,9 @@ from app.services.workspace_service.models.enums import (
     WorkspaceJobType,
     WorkspaceSnapshotStatus,
     WorkspaceStatus,
+)
+from app.services.workspace_service.services.snapshot_download_token import (
+    create_snapshot_archive_download_token,
 )
 from app.services.workspace_service.services.workspace_event_service import (
     WorkspaceStreamEventType,
@@ -118,6 +123,65 @@ class SnapshotArchiveDownloadInfo:
     local_path: str
     suggested_filename: str
     cleanup_after_send: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotArchiveDownloadOffer:
+    """How the browser should download bytes without proxying the archive through Next.js."""
+
+    mode: Literal["presigned_s3", "backend_direct"]
+    filename: str
+    expires_in: int
+    presigned_url: str | None = None
+    relative_url: str | None = None
+
+
+def _resolve_owned_snapshot_archive_for_download(
+    session: Session,
+    *,
+    workspace_id: int,
+    owner_user_id: int,
+    snapshot_id: int | None,
+) -> tuple[int, int]:
+    """Return ``(workspace_id, snapshot_id)`` for an AVAILABLE snapshot with a non-empty archive."""
+    assert_workspace_owner(session, workspace_id, owner_user_id)
+    storage = get_snapshot_storage_provider()
+
+    snap: WorkspaceSnapshot | None
+    if snapshot_id is not None:
+        snap = _get_snapshot_for_owner(session, snapshot_id=snapshot_id, owner_user_id=owner_user_id)
+        if int(snap.workspace_id) != int(workspace_id):
+            raise SnapshotNotFoundError("Snapshot not found")
+    else:
+        snap = None
+        for row in list_snapshots(session, workspace_id=workspace_id, owner_user_id=owner_user_id):
+            if row.status != WorkspaceSnapshotStatus.AVAILABLE.value:
+                continue
+            sid = row.workspace_snapshot_id
+            assert sid is not None
+            if storage.has_nonempty_archive(workspace_id=workspace_id, snapshot_id=sid):
+                snap = row
+                break
+        if snap is None:
+            raise SnapshotNotFoundError(
+                "No snapshot with a completed archive is available yet. Save the workspace first, "
+                "wait for the snapshot job to finish, then try again."
+            )
+
+    sid_final = snap.workspace_snapshot_id
+    assert sid_final is not None
+    wid = snap.workspace_id
+    assert wid is not None
+
+    if snap.status != WorkspaceSnapshotStatus.AVAILABLE.value:
+        raise WorkspaceInvalidStateError(f"Snapshot must be AVAILABLE (current={snap.status})")
+
+    if not storage.has_nonempty_archive(workspace_id=wid, snapshot_id=sid_final):
+        raise WorkspaceInvalidStateError(
+            "Snapshot archive is missing or empty on storage; try saving again once the workspace is RUNNING or STOPPED.",
+        )
+
+    return int(wid), int(sid_final)
 
 
 def create_snapshot(
@@ -329,42 +393,13 @@ def prepare_snapshot_archive_download(
     For S3-backed storage, downloads the object to the provider staging path (same as restore preflight).
     For local storage, returns the canonical archive path under the snapshot root.
     """
-    assert_workspace_owner(session, workspace_id, owner_user_id)
+    wid, sid_final = _resolve_owned_snapshot_archive_for_download(
+        session,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        snapshot_id=snapshot_id,
+    )
     storage = get_snapshot_storage_provider()
-
-    snap: WorkspaceSnapshot | None
-    if snapshot_id is not None:
-        snap = _get_snapshot_for_owner(session, snapshot_id=snapshot_id, owner_user_id=owner_user_id)
-        if int(snap.workspace_id) != int(workspace_id):
-            raise SnapshotNotFoundError("Snapshot not found")
-    else:
-        snap = None
-        for row in list_snapshots(session, workspace_id=workspace_id, owner_user_id=owner_user_id):
-            if row.status != WorkspaceSnapshotStatus.AVAILABLE.value:
-                continue
-            sid = row.workspace_snapshot_id
-            assert sid is not None
-            if storage.has_nonempty_archive(workspace_id=workspace_id, snapshot_id=sid):
-                snap = row
-                break
-        if snap is None:
-            raise SnapshotNotFoundError(
-                "No snapshot with a completed archive is available yet. Save the workspace first, "
-                "wait for the snapshot job to finish, then try again."
-            )
-
-    sid_final = snap.workspace_snapshot_id
-    assert sid_final is not None
-    wid = snap.workspace_id
-    assert wid is not None
-
-    if snap.status != WorkspaceSnapshotStatus.AVAILABLE.value:
-        raise WorkspaceInvalidStateError(f"Snapshot must be AVAILABLE (current={snap.status})")
-
-    if not storage.has_nonempty_archive(workspace_id=wid, snapshot_id=sid_final):
-        raise WorkspaceInvalidStateError(
-            "Snapshot archive is missing or empty on storage; try saving again once the workspace is RUNNING or STOPPED.",
-        )
 
     cleanup = False
     if hasattr(storage, "download_archive"):
@@ -387,6 +422,67 @@ def prepare_snapshot_archive_download(
         local_path=local_path,
         suggested_filename=name,
         cleanup_after_send=cleanup,
+    )
+
+
+def build_snapshot_archive_download_offer(
+    session: Session,
+    *,
+    workspace_id: int,
+    owner_user_id: int,
+    snapshot_id: int | None = None,
+    correlation_id: str | None = None,
+) -> SnapshotArchiveDownloadOffer:
+    """Return a presigned S3 URL or a backend-relative URL with a short-lived download token (local).
+
+    Does not download S3 objects onto the API host — suitable for large archives.
+    """
+    wid, sid_final = _resolve_owned_snapshot_archive_for_download(
+        session,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        snapshot_id=snapshot_id,
+    )
+    storage = get_snapshot_storage_provider()
+    filename = f"workspace-{wid}-snapshot-{sid_final}.tar.gz"
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_SNAPSHOT_DOWNLOAD_REQUESTED,
+        correlation_id=correlation_id,
+        workspace_id=int(wid),
+        workspace_snapshot_id=int(sid_final),
+    )
+
+    if isinstance(storage, S3SnapshotStorageProvider):
+        expires_in = 900
+        url = storage.presign_archive_get_url(
+            workspace_id=wid,
+            snapshot_id=sid_final,
+            filename=filename,
+            expires_in=expires_in,
+        )
+        return SnapshotArchiveDownloadOffer(
+            mode="presigned_s3",
+            filename=filename,
+            expires_in=expires_in,
+            presigned_url=url,
+            relative_url=None,
+        )
+
+    expires_in = 600
+    token = create_snapshot_archive_download_token(
+        workspace_id=wid,
+        snapshot_id=sid_final,
+        user_auth_id=owner_user_id,
+        ttl_seconds=expires_in,
+    )
+    rel = f"/workspaces/{wid}/snapshots/archive?download_token={token}"
+    return SnapshotArchiveDownloadOffer(
+        mode="backend_direct",
+        filename=filename,
+        expires_in=expires_in,
+        presigned_url=None,
+        relative_url=rel,
     )
 
 

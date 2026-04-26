@@ -24,6 +24,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 if TYPE_CHECKING:
     import boto3 as _boto3_type
@@ -214,4 +215,28 @@ class S3SnapshotStorageProvider:
         _logger.info(
             "s3_storage.download_succeeded",
             extra={"bucket": self._bucket, "key": key},
+        )
+
+    def presign_archive_get_url(
+        self,
+        *,
+        workspace_id: int,
+        snapshot_id: int,
+        filename: str,
+        expires_in: int = 900,
+    ) -> str:
+        """Return a time-limited HTTPS GET URL for the snapshot object (no AWS secrets in the URL body)."""
+        key = self._s3_key(workspace_id=workspace_id, snapshot_id=snapshot_id)
+        safe = (filename or "snapshot.tar.gz").replace('"', "").replace("\r", "").replace("\n", "")[:255]
+        enc = quote(safe, safe="")
+        disp = f'attachment; filename="{safe}"; filename*=UTF-8\'\'{enc}'
+        return self._client().generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "ResponseContentDisposition": disp,
+                "ResponseContentType": "application/gzip",
+            },
+            ExpiresIn=int(expires_in),
         )
