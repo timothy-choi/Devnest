@@ -1983,11 +1983,17 @@ class DefaultOrchestratorService(OrchestratorService):
         container_id: str | None = None,
     ) -> WorkspaceSnapshotOperationResult:
         wid = (workspace_id or "").strip()
-        try:
-            root = self._workspace_project_path_for_snapshot(wid, project_storage_key)
-        except WorkspaceSnapshotError as e:
+        if not wid:
             return WorkspaceSnapshotOperationResult(
-                workspace_id=wid or (workspace_id or ""),
+                workspace_id=workspace_id or "",
+                success=False,
+                issues=["snapshot:export:workspace_id_empty"],
+            )
+        try:
+            _parse_topology_workspace_id(wid)
+        except WorkspaceBringUpError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
                 success=False,
                 issues=[str(e)],
             )
@@ -2002,6 +2008,8 @@ class DefaultOrchestratorService(OrchestratorService):
                 issues=[f"snapshot:export:mkdir_failed:{e}"],
             )
 
+        # Prefer streaming from the **placed** engine (local or ssh://) before resolving host bind paths.
+        # Remote nodes often have no matching directory on the control-plane filesystem.
         dc = self._docker_engine_client()
         cid = (container_id or "").strip() or None
         if cid and dc:
@@ -2050,6 +2058,15 @@ class DefaultOrchestratorService(OrchestratorService):
                     "that can stream exec output (use ssh_docker execution_mode for the execution node, "
                     "or extend SSM snapshot staging).",
                 ],
+            )
+
+        try:
+            root = self._workspace_project_path_for_snapshot(wid, project_storage_key)
+        except WorkspaceSnapshotError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=[str(e)],
             )
 
         root_path = Path(root).resolve()

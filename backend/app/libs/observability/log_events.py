@@ -83,6 +83,7 @@ class LogEvent:
     ORCHESTRATOR_BRINGUP_SUCCEEDED = "orchestrator.bringup.succeeded"
     ORCHESTRATOR_BRINGUP_FAILED = "orchestrator.bringup.failed"
     ORCHESTRATOR_BRINGUP_ROLLBACK = "orchestrator.bringup.rollback"
+    ORCHESTRATOR_SNAPSHOT_EXPORT_STARTED = "orchestrator.snapshot.export_started"
     ORCHESTRATOR_SNAPSHOT_EXPORT_SUCCEEDED = "orchestrator.snapshot.export_succeeded"
     ORCHESTRATOR_SNAPSHOT_IMPORT_SUCCEEDED = "orchestrator.snapshot.import_succeeded"
 

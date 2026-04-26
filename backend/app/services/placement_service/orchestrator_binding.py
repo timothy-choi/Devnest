@@ -12,6 +12,11 @@ except ``CREATE`` (which schedules fresh, or uses **operator pinned** placement 
 :mod:`app.services.placement_service.operator_pinned_create` matches) and ``START`` on a workspace with no runtime row yet (first start).
 ``REPO_IMPORT`` also requires that persisted runtime (it runs git in the placed container via the node
 execution bundle; the worker resolves placement but does not build a full orchestrator for that job).
+
+**Snapshots (Phase 3b Step 10):** ``SNAPSHOT_CREATE`` / ``SNAPSHOT_RESTORE`` resolve the execution host from
+``WorkspaceRuntime`` when complete; otherwise from ``Workspace.execution_node_id`` plus the
+``ExecutionNode`` catalog (and partial ``node_id`` on runtime). Env-based ``DEVNEST_NODE_ID`` fallback
+is **not** used for snapshot jobs (avoids archiving the wrong node).
 New scheduling in staging/production requires ``ExecutionNode.default_topology_id``; env-based
 ``DEVNEST_TOPOLOGY_ID`` is **not** used for new placement when strict mode is on. Legacy
 ``DEVNEST_NODE_ID`` / ``DEVNEST_TOPOLOGY_ID`` fallback for *existing* incomplete rows is **disabled**
@@ -134,6 +139,63 @@ _JOBS_NEED_RUNTIME_PLACEMENT = frozenset(
     },
 )
 
+_SNAPSHOT_JOB_TYPES = frozenset(
+    {
+        WorkspaceJobType.SNAPSHOT_CREATE.value,
+        WorkspaceJobType.SNAPSHOT_RESTORE.value,
+    },
+)
+
+
+def _execution_node_by_key(session: Session, node_key: str) -> ExecutionNode | None:
+    nk = (node_key or "").strip()
+    if not nk:
+        return None
+    return session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+
+
+def _snapshot_placement_from_runtime_or_workspace(
+    session: Session,
+    ws: Workspace,
+    rt: WorkspaceRuntime | None,
+) -> tuple[str, int] | None:
+    """Infer ``(node_key, topology_id)`` for snapshot jobs when ``WorkspaceRuntime`` is incomplete."""
+    nk = (rt.node_id or "").strip() if rt is not None else ""
+    tid: int | None = int(rt.topology_id) if rt is not None and rt.topology_id is not None else None
+
+    node_from_workspace: ExecutionNode | None = None
+    if ws.execution_node_id is not None:
+        node_from_workspace = session.get(ExecutionNode, int(ws.execution_node_id))
+
+    if not nk and node_from_workspace is not None:
+        nk = (node_from_workspace.node_key or "").strip()
+
+    if not nk:
+        return None
+
+    catalog_node = node_from_workspace
+    if catalog_node is None or (catalog_node.node_key or "").strip() != nk:
+        catalog_node = _execution_node_by_key(session, nk)
+    if catalog_node is None:
+        return None
+
+    if tid is None:
+        if placement_strict_enforced():
+            if catalog_node.default_topology_id is None:
+                raise InvalidPlacementParametersError(
+                    f"snapshot placement: node {nk!r} has no default_topology_id; cannot infer topology",
+                )
+            tid = int(catalog_node.default_topology_id)
+        else:
+            tid = (
+                int(catalog_node.default_topology_id)
+                if catalog_node.default_topology_id is not None
+                else _topology_id_from_env()
+            )
+
+    _validate_topology_catalog_exists(session, int(tid))
+    return nk, int(tid)
+
 
 def resolve_orchestrator_placement(
     session: Session,
@@ -147,8 +209,11 @@ def resolve_orchestrator_placement(
       :func:`~app.services.placement_service.operator_pinned_create.workspace_uses_operator_pinned_create` matches.
     - **START** reuses complete ``WorkspaceRuntime`` when present; otherwise schedules when there is
       no runtime row or (development only) an incomplete row may be replaced by a fresh schedule.
-    - **STOP / DELETE / RECONCILE / RESTART / UPDATE / snapshots / REPO_IMPORT** require complete runtime
+    - **STOP / DELETE / RECONCILE / RESTART / UPDATE / REPO_IMPORT** require complete runtime
       placement in production; development may use env fallback when explicitly enabled.
+    - **SNAPSHOT_CREATE / SNAPSHOT_RESTORE** use runtime when complete; otherwise merge ``node_id`` /
+      ``topology_id`` from ``Workspace.execution_node_id`` and the ``ExecutionNode`` catalog (never
+      env fallback for snapshots).
     """
     wid = ws.workspace_id
     assert wid is not None
@@ -174,6 +239,15 @@ def resolve_orchestrator_placement(
     if runtime_placement_row_complete(rt):
         assert rt is not None
         return str(rt.node_id).strip(), int(rt.topology_id)  # type: ignore[arg-type]
+
+    if jt in _SNAPSHOT_JOB_TYPES:
+        sp = _snapshot_placement_from_runtime_or_workspace(session, ws, rt)
+        if sp is not None:
+            return sp
+        raise AuthoritativePlacementError(
+            f"Snapshot job requires placement: WorkspaceRuntime with node_id and topology_id, and/or "
+            f"workspace.execution_node_id with a matching ExecutionNode row (workspace_id={wid}).",
+        )
 
     # START: first bring-up may have no runtime row yet; reschedule when placement is incomplete.
     if jt == WorkspaceJobType.START.value:

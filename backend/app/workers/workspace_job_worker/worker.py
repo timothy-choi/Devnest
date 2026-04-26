@@ -1153,6 +1153,20 @@ def _execute_snapshot_create_job(
         if st == "running" and (rt.container_id or "").strip():
             snapshot_cid = str(rt.container_id).strip()
 
+    log_event(
+        logger,
+        LogEvent.ORCHESTRATOR_SNAPSHOT_EXPORT_STARTED,
+        correlation_id=job.correlation_id,
+        workspace_id=wid,
+        workspace_snapshot_id=sid,
+        execution_node_id=ws.execution_node_id,
+        workspace_runtime_node_id=(rt.node_id or "").strip() if rt is not None else None,
+        workspace_runtime_topology_id=int(rt.topology_id)
+        if rt is not None and rt.topology_id is not None
+        else None,
+        snapshot_container_id=snapshot_cid,
+    )
+
     res = orchestrator.export_workspace_filesystem_snapshot(
         workspace_id=wid_str,
         project_storage_key=ws.project_storage_key,

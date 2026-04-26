@@ -130,6 +130,7 @@ def create_snapshot(
     metadata: dict | None = None,
     correlation_id: str | None = None,
 ) -> CreateSnapshotResult:
+    """Enqueue ``SNAPSHOT_CREATE``; the worker resolves the execution host from runtime / placement (Phase 3b Step 10)."""
     assert_workspace_owner(session, workspace_id, owner_user_id)
     ws = session.get(Workspace, workspace_id)
     assert ws is not None
