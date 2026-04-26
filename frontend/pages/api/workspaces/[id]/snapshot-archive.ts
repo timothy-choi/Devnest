@@ -1,9 +1,8 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 
 import { backendRequest, readBackendJson } from "@/lib/server/backend-client";
 import { sendMethodNotAllowed } from "@/lib/server/http";
+import { pipeWebReadableStreamToNextResponse } from "@/lib/server/pipe-web-stream-to-next-response";
 
 export const config = {
   api: {
@@ -43,10 +42,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const ct = response.headers.get("content-type") || "application/gzip";
   const cd = response.headers.get("content-disposition");
+  const cl = response.headers.get("content-length");
   res.status(200);
   res.setHeader("Content-Type", ct);
   if (cd) {
     res.setHeader("Content-Disposition", cd);
+  }
+  if (cl && /^\d{1,20}$/.test(cl.trim())) {
+    res.setHeader("Content-Length", cl.trim());
   }
 
   if (!response.body) {
@@ -54,6 +57,5 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
 
-  const nodeStream = Readable.fromWeb(response.body as import("stream/web").ReadableStream<Uint8Array>);
-  await pipeline(nodeStream, res);
+  await pipeWebReadableStreamToNextResponse(response.body, req, res);
 }
