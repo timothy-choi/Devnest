@@ -60,32 +60,44 @@ def _emit_one_heartbeat_http(engine: Engine, *, base_url: str, node_key: str) ->
         return False, str(e)[:500]
 
 
+def _heartbeat_internal_api_base_url(settings: object) -> str:
+    """Prefer ``INTERNAL_API_BASE_URL``; fall back to ``DEVNEST_WORKER_HEARTBEAT_INTERNAL_API_BASE_URL``."""
+    s = settings
+    primary = (getattr(s, "internal_api_base_url", "") or "").strip().rstrip("/")
+    if primary:
+        return primary
+    return (getattr(s, "devnest_worker_heartbeat_internal_api_base_url", "") or "").strip().rstrip("/")
+
+
 def run_execution_node_heartbeat_emitter_loop(engine: Engine, stop_event: threading.Event) -> None:
     """Blocking loop: emit immediately, then every ``DEVNEST_NODE_HEARTBEAT_INTERVAL_SECONDS`` until stopped."""
     settings = get_settings()
-    base = (settings.internal_api_base_url or "").strip().rstrip("/")
+    base = _heartbeat_internal_api_base_url(settings)
     interval = max(5, min(3600, int(getattr(settings, "devnest_node_heartbeat_interval_seconds", 30) or 30)))
     node_key = (getattr(settings, "devnest_node_key", "") or "").strip() or default_local_node_key()
     api_key = _infrastructure_internal_api_key()
 
+    # Human-facing strings for operator dashboards; ``extra`` retains structured fields.
     logger.info(
-        "execution_node_heartbeat_emitter_started",
+        "heartbeat emitter started",
         extra={
             "node_key": node_key,
             "interval_seconds": interval,
             "internal_api_base_url": base or None,
             "has_internal_api_key": bool(api_key),
+            "event": "execution_node_heartbeat_emitter_started",
         },
     )
 
     if not base or not api_key:
         logger.warning(
-            "execution_node_heartbeat_emitter_misconfigured",
+            "heartbeat emitter misconfigured",
             extra={
                 "node_key": node_key,
                 "detail": "Set INTERNAL_API_BASE_URL and INTERNAL_API_KEY (or INTERNAL_API_KEY_INFRASTRUCTURE)",
                 "has_internal_api_base_url": bool(base),
                 "has_internal_api_key": bool(api_key),
+                "event": "execution_node_heartbeat_emitter_misconfigured",
             },
         )
         return
@@ -94,17 +106,22 @@ def run_execution_node_heartbeat_emitter_loop(engine: Engine, stop_event: thread
         ok, detail = _emit_one_heartbeat_http(engine, base_url=base, node_key=node_key)
         if ok:
             logger.info(
-                "execution_node_heartbeat_success",
+                "heartbeat success",
                 extra={
                     "node_key": node_key,
                     "internal_api_base_url": base,
                     "heartbeat_post_url": internal_api_execution_node_heartbeat_post_url(base),
+                    "event": "execution_node_heartbeat_success",
                 },
             )
         else:
             logger.warning(
-                "execution_node_heartbeat_failure",
-                extra={"node_key": node_key, "detail": detail or "heartbeat post failed"},
+                "heartbeat failure",
+                extra={
+                    "node_key": node_key,
+                    "detail": detail or "heartbeat post failed",
+                    "event": "execution_node_heartbeat_failure",
+                },
             )
         if stop_event.wait(timeout=float(interval)):
             break

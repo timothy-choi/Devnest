@@ -194,8 +194,11 @@ class Settings(BaseSettings):
     internal_api_key_autoscaler: str = ""
     internal_api_key_infrastructure: str = ""
     internal_api_key_notifications: str = ""
-    # Workers / sidecars: base URL for calling FastAPI internal routes (e.g. http://backend:8000). Env: INTERNAL_API_BASE_URL.
-    internal_api_base_url: str = ""
+    # Workers / sidecars: base URL for calling FastAPI internal routes (e.g. http://backend:8000).
+    internal_api_base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("INTERNAL_API_BASE_URL", "internal_api_base_url"),
+    )
     # When > 0, every non-empty internal API secret (legacy + scoped) must be at least this many characters.
     # Default 0 disables (local/CI). Production: set via DEVNEST_INTERNAL_API_KEY_MIN_LENGTH (e.g. 24).
     devnest_internal_api_key_min_length: int = 0
@@ -707,10 +710,22 @@ class Settings(BaseSettings):
     devnest_require_fresh_node_heartbeat: bool = False
     devnest_node_heartbeat_max_age_seconds: int = 300
     # Dedicated workspace-worker heartbeat loop: POST /internal/execution-nodes/heartbeat on an interval.
-    devnest_node_heartbeat_enabled: bool = False
-    # Heartbeat ``node_key`` when the dedicated emitter is enabled; empty uses DEVNEST_NODE_ID / node-1.
-    devnest_node_key: str = ""
-    devnest_node_heartbeat_interval_seconds: int = 30
+    devnest_node_heartbeat_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DEVNEST_NODE_HEARTBEAT_ENABLED", "devnest_node_heartbeat_enabled"),
+    )
+    # Heartbeat ``node_key`` when the dedicated emitter is enabled; empty uses default local node (e.g. node-1).
+    devnest_node_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("DEVNEST_NODE_KEY", "devnest_node_key"),
+    )
+    devnest_node_heartbeat_interval_seconds: int = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "DEVNEST_NODE_HEARTBEAT_INTERVAL_SECONDS",
+            "devnest_node_heartbeat_interval_seconds",
+        ),
+    )
     # When set (e.g. http://backend:8000 in Docker Compose), workspace-worker POSTs heartbeats to
     # ``{base}/internal/execution-nodes/heartbeat`` so ``last_heartbeat_at`` is written via the API
     # (same INTERNAL_API_KEY / infrastructure scope as other internal routes). Empty = direct DB write.
