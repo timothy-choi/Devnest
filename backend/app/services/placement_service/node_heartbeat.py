@@ -312,6 +312,30 @@ def log_default_execution_node_heartbeat_diagnostics(session: Session) -> None:
         )
 
 
+def execution_node_heartbeat_within_max_age(
+    node: ExecutionNode,
+    *,
+    settings: Any | None = None,
+) -> tuple[bool, str]:
+    """Return ``(True, \"\")`` if ``last_heartbeat_at`` is within ``devnest_node_heartbeat_max_age_seconds``.
+
+    Used for operator pinned CREATE (Phase 3b Step 8) regardless of
+    ``DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT`` (that flag only affects normal scheduler placement).
+    """
+    s = settings or get_settings()
+    max_age = int(getattr(s, "devnest_node_heartbeat_max_age_seconds", 300) or 300)
+    ts = node.last_heartbeat_at
+    if ts is None:
+        return False, "last_heartbeat_at is null"
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age)
+    if ts < cutoff:
+        age_s = (datetime.now(timezone.utc) - ts).total_seconds()
+        return False, f"heartbeat age ≈ {age_s:.0f}s exceeds max_age_seconds={max_age}"
+    return True, ""
+
+
 def heartbeat_fresh_sql_predicates() -> list:
     """SQL predicates: node heartbeat is recent enough for placement (when gating is enabled)."""
     settings = get_settings()

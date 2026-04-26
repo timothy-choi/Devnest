@@ -25,13 +25,14 @@ import os
 
 from sqlmodel import Session, select
 
+from app.libs.common.config import get_settings
 from app.libs.topology.models import Topology
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeStatus
 from app.services.scheduler_service.service import schedule_workspace
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceJobType, WorkspaceRuntime
 
 from .errors import AuthoritativePlacementError, InvalidPlacementParametersError, NoSchedulableNodeError
-from .operator_pinned_create import workspace_uses_operator_pinned_create
+from .operator_pinned_create import validate_operator_pinned_create_node_gates, workspace_uses_operator_pinned_create
 from .runtime_policy import placement_strict_enforced, runtime_env_fallback_allowed, runtime_placement_row_complete
 
 
@@ -101,6 +102,7 @@ def _pinned_operator_create_placement(session: Session, ws: Workspace) -> tuple[
         raise InvalidPlacementParametersError(
             f"pinned CREATE: execution_node {node.node_key!r} is not schedulable",
         )
+    validate_operator_pinned_create_node_gates(get_settings(), node)
     if placement_strict_enforced():
         if node.default_topology_id is None:
             raise InvalidPlacementParametersError(
@@ -141,7 +143,8 @@ def resolve_orchestrator_placement(
     """
     Return ``(node_key, topology_id)`` for building :class:`DefaultOrchestratorService`.
 
-    - **CREATE** always calls the scheduler (new placement).
+    - **CREATE** uses the scheduler for normal workspaces, or **operator pinned** placement when
+      :func:`~app.services.placement_service.operator_pinned_create.workspace_uses_operator_pinned_create` matches.
     - **START** reuses complete ``WorkspaceRuntime`` when present; otherwise schedules when there is
       no runtime row or (development only) an incomplete row may be replaced by a fresh schedule.
     - **STOP / DELETE / RECONCILE / RESTART / UPDATE / snapshots / REPO_IMPORT** require complete runtime

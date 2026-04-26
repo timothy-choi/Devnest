@@ -1519,9 +1519,11 @@ def create_operator_pinned_test_workspace(
     Queue CREATE for a workspace pinned to ``execution_node_id`` (operator / Phase 3b Step 8).
 
     Requires ``DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT=true`` and ``execution_node_id`` listed in
-    ``DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS``. The workspace name is always prefixed with
-    ``devnest-op-pinned-test-`` so :func:`~app.services.placement_service.orchestrator_binding.resolve_orchestrator_placement`
-    can skip the scheduler on CREATE.
+    ``DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS``. Also requires ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=true``
+    and a **fresh** ``last_heartbeat_at`` on the target node (``DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS``).
+    The workspace name is always prefixed with ``devnest-op-pinned-test-`` so
+    :func:`~app.services.placement_service.orchestrator_binding.resolve_orchestrator_placement` can skip
+    the scheduler on CREATE.
     """
     from app.libs.common.config import get_settings
 
@@ -1553,6 +1555,14 @@ def create_operator_pinned_test_workspace(
             f"execution_node {chosen.node_key!r} must be schedulable=true for pinned bring-up.",
         )
     assert chosen.id is not None
+
+    from app.services.placement_service.errors import InvalidPlacementParametersError
+    from app.services.placement_service.operator_pinned_create import validate_operator_pinned_create_node_gates
+
+    try:
+        validate_operator_pinned_create_node_gates(settings, chosen)
+    except InvalidPlacementParametersError as exc:
+        raise WorkspaceOperatorPinnedNodeInvalidError(str(exc)) from exc
 
     name = f"{PINNED_OPERATOR_TEST_WORKSPACE_NAME_PREFIX}{uuid4().hex[:12]}"
     rt = runtime if runtime is not None else WorkspaceRuntimeSpecSchema()

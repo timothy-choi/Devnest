@@ -55,7 +55,10 @@ def _raise_workspace_operator_http(exc: WorkspaceServiceError) -> None:
     "/pinned-operator-create",
     response_model=CreateWorkspaceAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Queue pinned CREATE on an allowlisted execution_node.id (operator diagnostics; Step 8)",
+    summary=(
+        "Queue pinned CREATE on an allowlisted execution_node.id (Step 8). "
+        "Requires DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=true and fresh target heartbeat."
+    ),
 )
 def post_pinned_operator_test_create(
     body: PinnedOperatorTestCreateBody,
