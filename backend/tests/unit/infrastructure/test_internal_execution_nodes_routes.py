@@ -17,6 +17,13 @@ from app.services.placement_service.models import ExecutionNode, ExecutionNodeSt
 INTERNAL_HEADERS = {"X-Internal-API-Key": "unit-test-internal-key"}
 
 
+def test_internal_execution_nodes_router_registers_post_heartbeat() -> None:
+    paths = [getattr(r, "path", "") for r in internal_execution_nodes_router.routes]
+    assert "/internal/execution-nodes/heartbeat" in paths
+    hb_routes = [r for r in internal_execution_nodes_router.routes if getattr(r, "path", "") == "/internal/execution-nodes/heartbeat"]
+    assert hb_routes and "POST" in (getattr(hb_routes[0], "methods", set()) or set())
+
+
 @pytest.fixture
 def internal_api_client(infrastructure_unit_engine: Engine, monkeypatch):
     monkeypatch.setenv("INTERNAL_API_KEY", "unit-test-internal-key")
@@ -84,6 +91,138 @@ def test_internal_execution_nodes_requires_api_key(internal_api_client: TestClie
     key = default_local_node_key()
     r = internal_api_client.post("/internal/execution-nodes/drain", json={"node_key": key})
     assert r.status_code == 401
+
+
+def test_post_heartbeat_updates_node(
+    internal_api_client: TestClient,
+    infrastructure_unit_engine: Engine,
+) -> None:
+    key = default_local_node_key()
+    r = internal_api_client.post(
+        "/internal/execution-nodes/heartbeat",
+        json={
+            "node_key": key,
+            "docker_ok": True,
+            "disk_free_mb": 12345,
+            "slots_in_use": 2,
+            "version": "test-unit",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert set(data.keys()) == {"id", "node_key", "status", "schedulable", "last_heartbeat_at"}
+    assert data["last_heartbeat_at"] is not None
+    assert data["node_key"] == key
+    with Session(infrastructure_unit_engine) as s:
+        row = s.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+        assert row is not None
+        hb = (row.metadata_json or {}).get("heartbeat") or {}
+        assert hb.get("version") == "test-unit"
+        assert hb.get("disk_free_mb") == 12345
+        assert hb.get("slots_in_use") == 2
+
+
+def test_post_heartbeat_docker_false_sets_error(
+    internal_api_client: TestClient,
+    infrastructure_unit_engine: Engine,
+) -> None:
+    key = default_local_node_key()
+    r = internal_api_client.post(
+        "/internal/execution-nodes/heartbeat",
+        json={
+            "node_key": key,
+            "docker_ok": False,
+            "disk_free_mb": 100,
+            "slots_in_use": 0,
+            "version": "test-unit",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["node_key"] == key
+    with Session(infrastructure_unit_engine) as s:
+        row = s.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+        assert row is not None
+        assert row.last_error_code == "DOCKER_UNREACHABLE"
+        assert (row.metadata_json or {}).get("heartbeat", {}).get("docker_ok") is False
+
+
+def test_post_heartbeat_minimal_response_matches_contract(internal_api_client: TestClient) -> None:
+    key = default_local_node_key()
+    r = internal_api_client.post(
+        "/internal/execution-nodes/heartbeat",
+        json={
+            "node_key": key,
+            "docker_ok": True,
+            "disk_free_mb": 50,
+            "slots_in_use": 0,
+            "version": "contract-check",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert set(data.keys()) == {"id", "node_key", "status", "schedulable", "last_heartbeat_at"}
+    assert data["id"] is not None
+    assert data["node_key"] == key
+
+
+def test_post_heartbeat_bootstrap_default_node_when_table_empty(
+    infrastructure_unit_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty execution_node table: default local node_key still returns 200 (bootstrap in handler)."""
+    monkeypatch.setenv("INTERNAL_API_KEY", "unit-test-internal-key")
+    get_settings.cache_clear()
+    with Session(infrastructure_unit_engine) as s:
+        for row in list(s.exec(select(ExecutionNode)).all()):
+            s.delete(row)
+        s.commit()
+
+    mini = FastAPI()
+    mini.include_router(internal_execution_nodes_router)
+
+    def db_dep():
+        db = Session(infrastructure_unit_engine)
+        try:
+            yield db
+        finally:
+            db.close()
+
+    mini.dependency_overrides[get_db] = db_dep
+    key = default_local_node_key()
+    with TestClient(mini) as client:
+        r = client.post(
+            "/internal/execution-nodes/heartbeat",
+            json={
+                "node_key": key,
+                "docker_ok": True,
+                "disk_free_mb": 100,
+                "slots_in_use": 0,
+                "version": "cold-db-bootstrap",
+            },
+            headers=INTERNAL_HEADERS,
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["node_key"] == key
+    assert r.json()["last_heartbeat_at"] is not None
+
+
+def test_post_heartbeat_unknown_node_returns_404(internal_api_client: TestClient) -> None:
+    r = internal_api_client.post(
+        "/internal/execution-nodes/heartbeat",
+        json={
+            "node_key": "no-such-node-xyz",
+            "docker_ok": True,
+            "disk_free_mb": 1,
+            "slots_in_use": 0,
+            "version": "v",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r.status_code == 404
 
 
 def test_sync_body_requires_selector(internal_api_client: TestClient) -> None:

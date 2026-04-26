@@ -17,6 +17,7 @@ from .capacity import (
     max_effective_free_resources_across_schedulable,
     workspace_slot_claim_count_subquery,
 )
+from .node_heartbeat import heartbeat_fresh_sql_predicates
 from .constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
@@ -57,7 +58,11 @@ def _schedulable_base_predicates():
 
 
 def schedulable_placement_predicates() -> list:
-    """Public: SQLAlchemy boolean clauses for READY + schedulable (+ ``devnest_node_provider`` filter)."""
+    """Public: SQLAlchemy boolean clauses for READY + schedulable (+ ``devnest_node_provider`` filter).
+
+    Does **not** include the optional heartbeat freshness gate; that applies only in
+    :func:`select_node_for_workspace` when ``DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT`` is true.
+    """
     return list(_schedulable_base_predicates())
 
 
@@ -135,8 +140,9 @@ def select_node_for_workspace(
     When ``DEVNEST_NODE_PROVIDER`` is ``local`` or ``ec2``, only matching ``provider_type`` rows are
     considered (see :func:`_provider_type_clause`).
 
-    TODO: Optional staleness gate on ``last_heartbeat_at`` once node agents report in; keep
-    ``NULL`` heartbeats valid for dev/single-node bootstrap.
+    When ``DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT=true``, candidates must have ``last_heartbeat_at``
+    within ``DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS`` (default off so bootstrap without a worker
+    still schedules).
 
     Raises:
         InvalidPlacementParametersError: when request sizes are not positive.
@@ -159,6 +165,7 @@ def select_node_for_workspace(
     slot_claim_e = workspace_slot_claim_count_subquery()
     preds = [
         *_schedulable_base_predicates(),
+        *heartbeat_fresh_sql_predicates(),
         free_cpu_e >= req_cpu,
         free_mem_e >= req_mem,
         free_disk_e >= req_disk,
@@ -194,6 +201,13 @@ def select_node_for_workspace(
             session,
             base_predicates=list(_schedulable_base_predicates()),
         )
+        hb_hint = ""
+        if bool(get_settings().devnest_require_fresh_node_heartbeat):
+            hb_hint = (
+                " Heartbeat gate is on (DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT=true): "
+                "candidates also need a recent last_heartbeat_at (see DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS "
+                "and docs/EXECUTION_NODE_HEARTBEAT.md)."
+            )
         raise NoSchedulableNodeError(
             "no execution node matches placement policy "
             f"(need status=READY, schedulable=true, effective_free_cpu>={req_cpu}, "
@@ -204,7 +218,7 @@ def select_node_for_workspace(
             f"effective capacity — check execution_node, workspace_runtime reservations, and bootstrap; "
             f"diagnostic max_effective_free_cpu≈{max_cpu:.4f}, "
             f"max_effective_free_memory_mb≈{max_mem} in that pool)"
-            f"{pool_hint}",
+            f"{pool_hint}{hb_hint}",
         )
     return row
 

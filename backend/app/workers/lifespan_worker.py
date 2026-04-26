@@ -63,12 +63,18 @@ async def _run_one_tick(*, batch_size: int) -> int:
         except Exception:
             _logger.warning("lifespan_worker_reclaim_error", exc_info=True)
 
+        from app.services.placement_service.node_heartbeat import (  # noqa: PLC0415
+            try_emit_default_local_execution_node_heartbeat,
+        )
+
         with Session(engine) as session:
             result = execute_workspace_job_tick_with_default_orchestrator(
                 session,
                 limit=batch_size,
             )
-            return result.processed_count
+            processed = result.processed_count
+        try_emit_default_local_execution_node_heartbeat(engine)
+        return processed
 
     try:
         count: int = await loop.run_in_executor(None, _sync_tick)

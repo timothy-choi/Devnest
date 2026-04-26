@@ -230,5 +230,14 @@ if needs_s3_snapshot_storage; then
   info "Worker snapshot provider check: s3 (required posture) OK."
 fi
 
+info "execution node heartbeat (recent workspace-worker logs, non-fatal):"
+hb_line="$(dc logs --no-color --tail 400 workspace-worker 2>&1 | grep -E 'execution_node_heartbeat_(emitter_started|success|emitted|emitted_via_http)' | tail -1)" || true
+if [[ -z "${hb_line}" ]]; then
+  warn "No execution_node_heartbeat_* line yet (check INTERNAL_API_BASE_URL, DEVNEST_NODE_HEARTBEAT_ENABLED, INTERNAL_API_KEY). See docs/EXECUTION_NODE_HEARTBEAT.md."
+else
+  echo "${hb_line}"
+  info "Worker execution-node heartbeat log line found (freshness is scheduling-only when DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT=true)."
+fi
+
 info "=== DevNest integration stack is up ==="
 info "UI: http://127.0.0.1:3000  API: http://127.0.0.1:8000  (adjust if you mapped different host ports)"

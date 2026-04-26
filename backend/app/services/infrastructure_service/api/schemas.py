@@ -98,6 +98,36 @@ class NodeKeyOrIdBody(BaseModel):
         return self
 
 
+class ExecutionNodeHeartbeatRequest(BaseModel):
+    """Agent / worker payload for ``POST /internal/execution-nodes/heartbeat``."""
+
+    node_key: str = Field(..., min_length=1, max_length=128, description="ExecutionNode.node_key")
+    docker_ok: bool
+    disk_free_mb: int = Field(..., ge=0, le=2_000_000_000)
+    slots_in_use: int = Field(..., ge=0, le=1_000_000)
+    version: str = Field(..., min_length=1, max_length=128)
+
+
+class ExecutionNodeHeartbeatResponse(BaseModel):
+    """Minimal response for heartbeat POST (Phase 3a)."""
+
+    id: int | None
+    node_key: str
+    status: str
+    schedulable: bool
+    last_heartbeat_at: datetime | None
+
+    @classmethod
+    def from_row(cls, row: ExecutionNode) -> ExecutionNodeHeartbeatResponse:
+        return cls(
+            id=row.id,
+            node_key=row.node_key,
+            status=row.status,
+            schedulable=bool(row.schedulable),
+            last_heartbeat_at=row.last_heartbeat_at,
+        )
+
+
 class ProvisionExecutionNodeRequest(BaseModel):
     """Optional overrides; omitted fields fall back to ``DEVNEST_EC2_*`` / ``AWS_REGION`` settings."""
 

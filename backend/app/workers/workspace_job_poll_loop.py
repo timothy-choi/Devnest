@@ -33,6 +33,8 @@ from app.services.orchestrator_service.app_factory import build_orchestrator_for
 from app.services.orchestrator_service.errors import AppOrchestratorBindingError
 from app.services.storage.factory import get_snapshot_storage_provider, snapshot_storage_log_fields
 
+from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
+
 from .workspace_job_worker.worker import poll_workspace_jobs_tick
 
 logger = logging.getLogger(__name__)
@@ -127,40 +129,60 @@ def run_poll_loop(
     interval = max(0.1, float(poll_interval_sec))
     limit = max(1, int(jobs_per_tick))
 
+    hb_stop = threading.Event()
+    hb_thread: threading.Thread | None = None
+    if bool(getattr(ws, "devnest_node_heartbeat_enabled", False)):
+        from app.workers.execution_node_heartbeat_emitter import run_execution_node_heartbeat_emitter_loop
+
+        hb_thread = threading.Thread(
+            target=run_execution_node_heartbeat_emitter_loop,
+            args=(engine, hb_stop),
+            name="execution-node-heartbeat",
+            daemon=True,
+        )
+        hb_thread.start()
+
     logger.info(
         "workspace_job_poll_loop_start",
         extra={"poll_interval_sec": interval, "jobs_per_tick": limit},
     )
+    # One immediate heartbeat when the dedicated emitter is off (per-tick path still applies).
+    try_emit_default_local_execution_node_heartbeat(engine)
 
-    while not evt.is_set():
-        try:
-            tick = poll_workspace_jobs_tick(
-                engine,
-                get_orchestrator=build_orchestrator_for_workspace_job,
-                limit=limit,
-            )
-        except AppOrchestratorBindingError as e:
-            logger.error("workspace_job_poll_orchestrator_bind_failed", extra={"error": str(e)})
-            time.sleep(interval)
-            continue
-        except Exception:
-            logger.exception("workspace_job_poll_tick_failed")
-            time.sleep(interval)
-            continue
+    try:
+        while not evt.is_set():
+            try:
+                tick = poll_workspace_jobs_tick(
+                    engine,
+                    get_orchestrator=build_orchestrator_for_workspace_job,
+                    limit=limit,
+                )
+            except AppOrchestratorBindingError as e:
+                logger.error("workspace_job_poll_orchestrator_bind_failed", extra={"error": str(e)})
+                time.sleep(interval)
+                continue
+            except Exception:
+                logger.exception("workspace_job_poll_tick_failed")
+                time.sleep(interval)
+                continue
 
-        if tick.processed_count > 0:
-            logger.info(
-                "workspace_job_poll_tick_done",
-                extra={
-                    "processed_count": tick.processed_count,
-                    "last_job_id": tick.last_job_id,
-                },
-            )
-            continue
+            if tick.processed_count > 0:
+                logger.info(
+                    "workspace_job_poll_tick_done",
+                    extra={
+                        "processed_count": tick.processed_count,
+                        "last_job_id": tick.last_job_id,
+                    },
+                )
+                continue
 
-        # Idle: wait for interval or stop.
-        if evt.wait(timeout=interval):
-            break
+            # Idle: wait for interval or stop.
+            if evt.wait(timeout=interval):
+                break
+    finally:
+        hb_stop.set()
+        if hb_thread is not None:
+            hb_thread.join(timeout=min(15.0, float(interval) + 10.0))
 
     logger.info("workspace_job_poll_loop_stop")
 

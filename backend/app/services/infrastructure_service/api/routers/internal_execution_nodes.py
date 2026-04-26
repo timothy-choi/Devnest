@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.libs.db.database import get_db
@@ -19,6 +22,7 @@ from app.libs.security.dependencies import require_internal_api_key
 from app.libs.security.internal_auth import InternalApiScope
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
+from app.services.placement_service.bootstrap import default_local_node_key, ensure_default_local_execution_node
 from app.services.placement_service.errors import ExecutionNodeNotFoundError
 from app.services.placement_service.models import ExecutionNode
 from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
@@ -33,6 +37,7 @@ from ...lifecycle import (
     terminate_ec2_node,
 )
 from ...models import Ec2ProvisionRequest
+
 from ..schemas import (
     ExecutionNodeCapacityResponse,
     ExecutionNodeSummaryResponse,
@@ -61,6 +66,40 @@ def _select_kwargs(body: NodeKeyOrIdBody) -> dict:
     return {"node_key": str(body.node_key).strip()}
 
 
+class ExecutionNodeHeartbeatInBody(BaseModel):
+    """JSON body for POST ``/heartbeat`` (execution node liveness)."""
+
+    node_key: str = Field(..., min_length=1, max_length=128)
+    docker_ok: bool = True
+    disk_free_mb: int | None = None
+    slots_in_use: int | None = None
+    version: str | None = None
+
+
+class ExecutionNodeHeartbeatOutBody(BaseModel):
+    """JSON response for POST ``/heartbeat``."""
+
+    id: int | None
+    node_key: str
+    status: str
+    schedulable: bool
+    last_heartbeat_at: datetime | None
+
+
+def _merge_heartbeat_metadata_json(existing: dict[str, Any] | None, heartbeat_payload: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``heartbeat_payload`` under ``metadata_json['heartbeat']``."""
+    base = dict(existing or {})
+    hb = dict(base.get("heartbeat") or {})
+    hb.update(heartbeat_payload)
+    base["heartbeat"] = hb
+    return base
+
+
+def _load_execution_node_for_heartbeat(session: Session, node_key: str) -> ExecutionNode | None:
+    key = node_key.strip()
+    return session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+
+
 @router.get(
     "/",
     response_model=list[ExecutionNodeCapacityResponse],
@@ -69,6 +108,71 @@ def _select_kwargs(body: NodeKeyOrIdBody) -> dict:
 def get_execution_nodes_with_capacity(session: Session = Depends(get_db)) -> list[ExecutionNodeCapacityResponse]:
     rows = list(session.exec(select(ExecutionNode).order_by(ExecutionNode.id.asc())).all())
     return [ExecutionNodeCapacityResponse.from_row_with_capacity(session, row) for row in rows]
+
+
+@router.post(
+    "/heartbeat",
+    response_model=ExecutionNodeHeartbeatOutBody,
+    summary="Record execution node heartbeat (POST /internal/execution-nodes/heartbeat)",
+)
+def post_execution_node_heartbeat(
+    body: ExecutionNodeHeartbeatInBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeHeartbeatOutBody:
+    """Apply execution node heartbeat: update ``last_heartbeat_at`` and optional ``metadata_json['heartbeat']``."""
+    nk = str(body.node_key).strip()
+    _logger.info(
+        "execution_node_heartbeat_received",
+        extra={"node_key": nk, "docker_ok": body.docker_ok},
+    )
+    node = _load_execution_node_for_heartbeat(session, nk)
+    if node is None and nk == default_local_node_key().strip():
+        ensure_default_local_execution_node(session)
+        node = _load_execution_node_for_heartbeat(session, nk)
+    if node is None:
+        _logger.warning("execution_node_heartbeat_unknown_node", extra={"node_key": nk})
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail=f"execution node key={nk!r} not found",
+        )
+
+    now = datetime.now(timezone.utc)
+    node.last_heartbeat_at = now
+    node.updated_at = now
+
+    hb_payload: dict[str, Any] = {
+        "received_at": now.isoformat(),
+        "docker_ok": bool(body.docker_ok),
+    }
+    if body.disk_free_mb is not None:
+        hb_payload["disk_free_mb"] = int(body.disk_free_mb)
+    if body.slots_in_use is not None:
+        hb_payload["slots_in_use"] = int(body.slots_in_use)
+    if body.version is not None and str(body.version).strip():
+        hb_payload["version"] = str(body.version).strip()[:128]
+
+    node.metadata_json = _merge_heartbeat_metadata_json(node.metadata_json, hb_payload)
+    if not body.docker_ok:
+        node.last_error_code = "DOCKER_UNREACHABLE"
+        node.last_error_message = "Heartbeat reported docker_ok=false"
+    else:
+        node.last_error_code = None
+        node.last_error_message = None
+    session.add(node)
+    session.commit()
+    session.refresh(node)
+
+    _logger.info(
+        "execution_node_heartbeat_node_updated",
+        extra={"node_key": nk, "execution_node_id": node.id},
+    )
+    return ExecutionNodeHeartbeatOutBody(
+        id=node.id,
+        node_key=node.node_key,
+        status=str(node.status or ""),
+        schedulable=bool(node.schedulable),
+        last_heartbeat_at=node.last_heartbeat_at,
+    )
 
 
 def _merge_provision_request(body: ProvisionExecutionNodeRequest) -> Ec2ProvisionRequest:
