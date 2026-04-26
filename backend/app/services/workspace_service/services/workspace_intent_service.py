@@ -1516,7 +1516,10 @@ def create_operator_pinned_test_workspace(
     correlation_id: str | None = None,
 ) -> CreateWorkspaceResult:
     """
-    Queue CREATE for a workspace pinned to ``execution_node_id`` (operator / Phase 3b Step 8).
+    Queue CREATE for a workspace pinned to ``execution_node_id`` (operator-only / Phase 3b Step 8).
+
+    Standard ``POST /workspaces`` flows use the normal scheduler (capacity + spread); this internal
+    path is optional and off by default.
 
     Requires ``DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT=true`` and ``execution_node_id`` listed in
     ``DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS``. Also requires ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=true``

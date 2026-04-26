@@ -505,6 +505,18 @@ def test_select_node_chooses_other_node_when_first_is_full(
         assert picked.node_key == "roomy"
 
 
+def test_drained_node_not_in_pool_remaining_node_receives_placement(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
+    """Non-schedulable (drained) nodes are excluded; placement lands on the other READY node (Step 11)."""
+    with Session(placement_engine) as session:
+        _add_node(session, key="alpha", alloc_cpu=8.0)
+        _add_node(session, key="zeta", alloc_cpu=16.0, schedulable=False)
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "alpha"
+
+
 def test_select_node_reports_no_capacity_when_all_nodes_ineligible(
     placement_engine: Engine,
     enable_multi_node_scheduling: None,

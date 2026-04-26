@@ -47,9 +47,9 @@ def workspace_uses_operator_pinned_create(ws: Workspace, settings: Settings | No
 def validate_operator_pinned_create_node_gates(settings: Settings, node: ExecutionNode) -> None:
     """Phase 3b Step 8: pinned CREATE only when multi-node scheduling is on and target heartbeat is fresh.
 
-    Normal ``POST /workspaces`` is unchanged. This gates the **internal** pinned operator path so a
-    one-off node-2 test cannot run while the fleet is still on primary-only scheduling or the node
-    has no recent heartbeat.
+    Normal ``POST /workspaces`` is unchanged. This gates the **internal** pinned operator path so
+    allowlisted test workspaces cannot bypass fleet policy while primary-only scheduling is enforced,
+    and so the target catalog row shows a recent heartbeat.
 
     Raises :class:`~app.services.placement_service.errors.InvalidPlacementParametersError` so worker
     ``resolve_orchestrator_placement`` failures are handled like other placement errors.

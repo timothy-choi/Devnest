@@ -644,10 +644,11 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = ""
     # Placement filter: ``all`` (default) = local + EC2 nodes; ``local`` / ``ec2`` = restrict pool.
     devnest_node_provider: str = "all"
-    # When false (default, Phase 3b Step 7), new placement is restricted to the primary node only:
-    # lowest ``execution_node.id`` among READY+schedulable rows after the provider filter. When true,
-    # all READY+schedulable nodes in the provider pool compete using capacity + spread ordering (and
-    # optional heartbeat freshness when DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT is set).
+    # When false, new placement is restricted to the primary node only: lowest ``execution_node.id``
+    # among READY+schedulable rows after the provider filter. When true (recommended for multi-node
+    # fleets; integration Compose defaults this on), all READY+schedulable nodes in the provider pool
+    # compete using capacity + spread ordering (and optional heartbeat freshness when
+    # DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT is set).
     # See docs/PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md and docs/PHASE_3B_STEP11_TWO_NODE_SCHEDULING_SPREAD.md.
     devnest_enable_multi_node_scheduling: bool = Field(
         default=False,
