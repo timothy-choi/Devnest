@@ -8,13 +8,15 @@ Intended for operators and automation — not end-user facing.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from sqlalchemy import and_
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.libs.db.database import get_db
 from app.libs.observability.log_events import LogEvent, log_event
@@ -27,6 +29,9 @@ from app.services.placement_service.errors import ExecutionNodeNotFoundError
 from app.services.placement_service.models import ExecutionNode
 from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
 
+from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+from app.services.workspace_service.models.enums import WorkspaceStatus
+
 from ...errors import Ec2ProvisionConfigurationError, NodeLifecycleError
 from ...lifecycle import (
     deregister_node,
@@ -35,6 +40,7 @@ from ...lifecycle import (
     register_existing_ec2_node,
     sync_node_state,
     terminate_ec2_node,
+    undrain_node,
 )
 from ...execution_node_smoke import ExecutionNodeSmokeUnsupportedError, run_read_only_execution_node_smoke
 from ...models import Ec2ProvisionRequest
@@ -44,9 +50,11 @@ from ..schemas import (
     ExecutionNodeSmokeResponse,
     ExecutionNodeSummaryResponse,
     NodeKeyOrIdBody,
+    NodeWorkspacesSummaryResponse,
     ProvisionExecutionNodeRequest,
     RegisterExistingEc2Body,
     SyncExecutionNodeBody,
+    WorkspaceOnNodeBrief,
 )
 
 _logger = logging.getLogger(__name__)
@@ -110,6 +118,71 @@ def _load_execution_node_for_heartbeat(session: Session, node_key: str) -> Execu
 def get_execution_nodes_with_capacity(session: Session = Depends(get_db)) -> list[ExecutionNodeCapacityResponse]:
     rows = list(session.exec(select(ExecutionNode).order_by(ExecutionNode.id.asc())).all())
     return [ExecutionNodeCapacityResponse.from_row_with_capacity(session, row) for row in rows]
+
+
+@router.get(
+    "/workspaces-by-node",
+    response_model=list[NodeWorkspacesSummaryResponse],
+    summary="Workspaces grouped by workspace_runtime.node_id (ops inventory)",
+)
+def get_workspaces_by_runtime_node(
+    session: Session = Depends(get_db),
+    limit_per_node: int = Query(
+        50,
+        ge=1,
+        le=200,
+        description="Maximum workspaces returned per node_key bucket (total count is always exact).",
+    ),
+) -> list[NodeWorkspacesSummaryResponse]:
+    nodes = list(session.exec(select(ExecutionNode).order_by(ExecutionNode.node_key.asc())).all())
+    stmt = (
+        select(Workspace.workspace_id, Workspace.name, Workspace.status, WorkspaceRuntime.node_id)
+        .join(WorkspaceRuntime, WorkspaceRuntime.workspace_id == Workspace.workspace_id)
+        .where(
+            Workspace.status != WorkspaceStatus.DELETED.value,
+            and_(col(WorkspaceRuntime.node_id).is_not(None), WorkspaceRuntime.node_id != ""),
+        )
+    )
+    by_key: defaultdict[str, list[tuple[int, str, str]]] = defaultdict(list)
+    for wid, name, st, nk in session.exec(stmt).all():
+        key = str(nk or "").strip()
+        if not key:
+            continue
+        by_key[key].append((int(wid), str(name or ""), str(st or "")))
+
+    catalog_keys: set[str] = set()
+    out: list[NodeWorkspacesSummaryResponse] = []
+    for n in nodes:
+        nk = (n.node_key or "").strip()
+        if not nk:
+            continue
+        catalog_keys.add(nk)
+        raw = by_key.get(nk, [])
+        briefs = [
+            WorkspaceOnNodeBrief(workspace_id=w, name=nm, status=st) for w, nm, st in raw[:limit_per_node]
+        ]
+        out.append(
+            NodeWorkspacesSummaryResponse(
+                node_key=nk,
+                execution_node_id=n.id,
+                workspace_count=len(raw),
+                workspaces=briefs,
+            ),
+        )
+    for nk in sorted(set(by_key.keys()) - catalog_keys):
+        raw = by_key[nk]
+        briefs = [
+            WorkspaceOnNodeBrief(workspace_id=w, name=nm, status=st) for w, nm, st in raw[:limit_per_node]
+        ]
+        out.append(
+            NodeWorkspacesSummaryResponse(
+                node_key=nk,
+                execution_node_id=None,
+                workspace_count=len(raw),
+                workspaces=briefs,
+            ),
+        )
+    return out
 
 
 @router.post(
@@ -344,6 +417,27 @@ def post_drain_execution_node(
         session.refresh(node)
     except ExecutionNodeNotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
+    "/undrain",
+    response_model=ExecutionNodeSummaryResponse,
+    summary="Re-admit a DRAINING node (READY + schedulable) or set schedulable=true on READY",
+)
+def post_undrain_execution_node(
+    body: NodeKeyOrIdBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("undrain", node_id=body.node_id, node_key=body.node_key)
+    try:
+        node = undrain_node(session, **_select_kwargs(body))
+        session.commit()
+        session.refresh(node)
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except NodeLifecycleError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e)) from e
     return ExecutionNodeSummaryResponse.from_row(node)
 
 

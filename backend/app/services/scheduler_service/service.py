@@ -61,6 +61,27 @@ def schedule_workspace(
             multi_node_scheduling_enabled=bool(get_settings().devnest_enable_multi_node_scheduling),
             placement_single_node_gate=not bool(get_settings().devnest_enable_multi_node_scheduling),
         )
+        try:
+            explain = explain_placement_decision(
+                session,
+                chosen=node,
+                workspace_id=workspace_id,
+                requested_cpu=requested_cpu,
+                requested_memory_mb=requested_memory_mb,
+                requested_disk_mb=requested_disk_mb,
+            )
+            digest = (explain or "").replace("\n", " | ").replace("\r", "")[:900]
+            if digest:
+                log_event(
+                    logger,
+                    LogEvent.PLACEMENT_DECISION_SUMMARY,
+                    workspace_id=workspace_id,
+                    execution_node_id=node.id,
+                    node_key=node.node_key,
+                    placement_summary=digest,
+                )
+        except Exception:
+            logger.debug("placement_decision_summary_skipped", exc_info=True)
         return WorkspaceScheduleResult(
             execution_node=node,
             insufficient_capacity=False,

@@ -103,6 +103,8 @@ class LogEvent:
     RECONCILE_FAILED = "reconcile.failed"
 
     PLACEMENT_NO_SCHEDULABLE_NODE = "placement.no_schedulable_node"
+    # Single-line digest from ``explain_placement_decision`` (newlines flattened) for Loki; max size bounded in code.
+    PLACEMENT_DECISION_SUMMARY = "placement.decision.summary"
 
     # Placement success/failure: include ``multi_node_scheduling_enabled`` and ``placement_single_node_gate``
     # (inverse) on emitted records for Loki/Grafana correlation (Phase 3b Step 7).

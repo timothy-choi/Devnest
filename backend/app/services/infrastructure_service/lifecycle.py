@@ -327,6 +327,57 @@ def mark_node_draining(
     return row
 
 
+def undrain_node(
+    session: Session,
+    *,
+    node_id: int | None = None,
+    node_key: str | None = None,
+) -> ExecutionNode:
+    """Re-admit a node for placement after drain or catalog-only ``schedulable=false``.
+
+    - **DRAINING** → ``READY`` + ``schedulable=True``.
+    - **READY** with ``schedulable=False`` → ``schedulable=True`` (status unchanged).
+    - **TERMINATED** / **PROVISIONING** / **NOT_READY** (etc.) → :class:`NodeLifecycleError` — use
+      ``POST /internal/execution-nodes/sync`` or ``register-existing`` / provisioning flows instead.
+
+    Idempotent when already ``READY`` and ``schedulable=True``.
+    """
+    row = get_node(session, node_id=node_id, node_key=node_key)
+    if row.status == ExecutionNodeStatus.TERMINATED.value:
+        raise NodeLifecycleError(
+            f"cannot undrain TERMINATED node (node_key={row.node_key!r}); re-register the instance or restore from backup",
+        )
+    if row.status == ExecutionNodeStatus.READY.value and bool(row.schedulable):
+        return row
+    if row.status == ExecutionNodeStatus.DRAINING.value:
+        row.status = ExecutionNodeStatus.READY.value
+        row.schedulable = True
+    elif row.status == ExecutionNodeStatus.READY.value and not bool(row.schedulable):
+        row.schedulable = True
+    else:
+        raise NodeLifecycleError(
+            f"undrain supports DRAINING or READY+schedulable=false (node_key={row.node_key!r}, "
+            f"status={row.status!r}); for NOT_READY/PROVISIONING use POST /internal/execution-nodes/sync",
+        )
+    row.updated_at = _now()
+    row.metadata_json = _merge_metadata(
+        row,
+        {"lifecycle": {"undrained_at": _now().isoformat()}},
+    )
+    session.add(row)
+    session.flush()
+    logger.info(
+        "execution_node_undrained",
+        extra={
+            "node_key": row.node_key,
+            "node_id": row.id,
+            "status": row.status,
+            "schedulable": bool(row.schedulable),
+        },
+    )
+    return row
+
+
 def deregister_node(
     session: Session,
     *,

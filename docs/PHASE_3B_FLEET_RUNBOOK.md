@@ -15,6 +15,7 @@ This document is **Step A** of Phase 3b: a **fleet runbook** and **network / IAM
 - [Phase 3b Step 5 — Heartbeat from node 2](./PHASE_3B_STEP5_HEARTBEAT_NODE2.md) — systemd/cron → `POST /internal/execution-nodes/heartbeat`, stay `schedulable=false`.
 - [Phase 3b Step 7 — Multi-node scheduling flag](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md) — `DEVNEST_ENABLE_MULTI_NODE_SCHEDULING` (default **on** since Step 11), primary-node gate when **false**, placement logging.
 - [Phase 3b Step 11 — Two-node scheduling spread](./PHASE_3B_STEP11_TWO_NODE_SCHEDULING_SPREAD.md) — verification and rollback for generic fleet placement.
+- [Phase 3b Step 12 — Ops hardening](./PHASE_3B_STEP12_OPS_HARDENING.md) — drain/undrain/deregister runbooks, internal APIs, diagnostics, rollback.
 - [Phase 3b Step 8 — Controlled test workspace on node 2](./PHASE_3B_STEP8_CONTROLLED_NODE2_TEST_WORKSPACE.md) — pinned internal CREATE, Traefik verification, rollback.
 
 ---

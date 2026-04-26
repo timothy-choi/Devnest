@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
@@ -70,6 +70,10 @@ class ExecutionNodeCapacityResponse(ExecutionNodeSummaryResponse):
         description="RUNNING (etc.) workspaces pinned to this node_key that consume a schedulable slot.",
     )
     available_workspace_slots: int = Field(..., ge=0, description="max(0, max_workspaces - active).")
+    heartbeat_age_seconds: int | None = Field(
+        default=None,
+        description="Seconds since last_heartbeat_at (UTC) when set; null if never heartbeated.",
+    )
 
     @classmethod
     def from_row_with_capacity(cls, session: Session, row: ExecutionNode) -> ExecutionNodeCapacityResponse:
@@ -78,11 +82,35 @@ class ExecutionNodeCapacityResponse(ExecutionNodeSummaryResponse):
         active = count_active_workloads_on_node_key(session, key)
         max_w = int(row.max_workspaces or 0)
         avail = max(0, max_w - active)
+        now = datetime.now(timezone.utc)
+        hb_age: int | None = None
+        if row.last_heartbeat_at is not None:
+            delta = now - row.last_heartbeat_at
+            sec = int(delta.total_seconds())
+            hb_age = max(0, sec)
         return cls(
             **base.model_dump(),
             active_workspace_slots=active,
             available_workspace_slots=avail,
+            heartbeat_age_seconds=hb_age,
         )
+
+
+class WorkspaceOnNodeBrief(BaseModel):
+    """Minimal workspace row for ops listing (no secrets)."""
+
+    workspace_id: int
+    name: str
+    status: str
+
+
+class NodeWorkspacesSummaryResponse(BaseModel):
+    """Workspaces whose ``workspace_runtime.node_id`` matches this catalog ``node_key``."""
+
+    node_key: str
+    execution_node_id: int | None = None
+    workspace_count: int = Field(..., ge=0)
+    workspaces: list[WorkspaceOnNodeBrief] = Field(default_factory=list)
 
 
 class NodeKeyOrIdBody(BaseModel):

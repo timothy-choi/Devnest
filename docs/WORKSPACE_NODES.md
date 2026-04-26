@@ -39,7 +39,9 @@ Revision **`0011_workspace_execution_node_fk`**:
 
 ## Internal API (capacity listing)
 
-`GET /internal/execution-nodes/` (scoped `X-Internal-API-Key` for **infrastructure**) returns each node plus **`active_workspace_slots`** and **`available_workspace_slots**`, using the same capacity cohort as placement (`count_active_workloads_on_node_key`). Responses intentionally **omit** `metadata_json` and SSH-related columns so operator JSON does not carry opaque config blobs or connection secrets.
+`GET /internal/execution-nodes/` (scoped `X-Internal-API-Key` for **infrastructure**) returns each node plus **`active_workspace_slots`**, **`available_workspace_slots`**, and **`heartbeat_age_seconds`** (ops signal for stale heartbeats), using the same capacity cohort as placement (`count_active_workloads_on_node_key`). Responses intentionally **omit** `metadata_json` and SSH-related columns so operator JSON does not carry opaque config blobs or connection secrets.
+
+`GET /internal/execution-nodes/workspaces-by-node` returns workspace counts (and a capped list) grouped by **`workspace_runtime.node_id`**. **`POST /internal/execution-nodes/drain`** / **`undrain`** control schedulability; see [Phase 3b Step 12 — Ops hardening](./PHASE_3B_STEP12_OPS_HARDENING.md).
 
 `POST /internal/execution-nodes/heartbeat` records liveness and a small metrics snapshot; see [Execution node heartbeat](./EXECUTION_NODE_HEARTBEAT.md).
 
@@ -50,7 +52,7 @@ Workspace **create** selects an execution node via ``schedule_workspace`` → ``
 - **FK claims:** ``Workspace.execution_node_id`` with a non-terminal status (includes ``CREATING`` before runtime exists).
 - **Runtime pins:** ``WorkspaceRuntime.node_key`` with the same non-terminal cohort (covers legacy rows without an FK).
 
-Both counts must stay **below** ``execution_node.max_workspaces``. If no node qualifies, the API returns **503** with a **short, user-facing** ``detail`` string and **does not** insert a workspace row. Verbose placement diagnostics remain in application logs (``placement.no_schedulable_node`` / scheduler events), not in the HTTP body.
+Both counts must stay **below** ``execution_node.max_workspaces``. If no node qualifies, the API returns **503** with a **short, user-facing** ``detail`` string and **does not** insert a workspace row. Verbose placement diagnostics remain in application logs (``placement.no_schedulable_node``, ``scheduler.node.selected``, ``placement.decision.summary``), not in the HTTP body.
 
 ## Phase 3a (heartbeat only)
 

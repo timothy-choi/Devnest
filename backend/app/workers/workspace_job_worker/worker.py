@@ -1125,20 +1125,26 @@ def _execute_snapshot_create_job(
         # storage after the orchestrator writes it.  Local providers are a no-op here.
         if hasattr(storage, "upload_archive"):
             try:
+                upload_kw: dict[str, object] = {}
+                src_nk: str | None = None
+                if rt is not None:
+                    nk = (rt.node_id or "").strip() or None
+                    if nk:
+                        upload_kw["source_node_key"] = nk
+                        src_nk = nk
+                src_eid: int | None = None
+                if ws.execution_node_id is not None:
+                    src_eid = int(ws.execution_node_id)
+                    upload_kw["source_execution_node_id"] = src_eid
                 log_event(
                     logger,
                     LogEvent.SNAPSHOT_STORAGE_UPLOAD_STARTED,
                     correlation_id=job.correlation_id,
                     workspace_id=wid,
                     workspace_snapshot_id=sid,
+                    source_node_key=src_nk,
+                    source_execution_node_id=src_eid,
                 )
-                upload_kw: dict[str, object] = {}
-                if rt is not None:
-                    nk = (rt.node_id or "").strip() or None
-                    if nk:
-                        upload_kw["source_node_key"] = nk
-                if ws.execution_node_id is not None:
-                    upload_kw["source_execution_node_id"] = int(ws.execution_node_id)
                 storage.upload_archive(workspace_id=wid, snapshot_id=sid, **upload_kw)
                 log_event(
                     logger,
@@ -1146,6 +1152,8 @@ def _execute_snapshot_create_job(
                     correlation_id=job.correlation_id,
                     workspace_id=wid,
                     workspace_snapshot_id=sid,
+                    source_node_key=src_nk,
+                    source_execution_node_id=src_eid,
                 )
             except Exception as upload_exc:
                 log_event(

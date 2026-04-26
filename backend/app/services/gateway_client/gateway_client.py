@@ -113,6 +113,7 @@ class DevnestGatewayClient:
                 node_key=nk,
                 execution_node_id=execution_node_id,
                 gateway_upstream_target=target,
+                gateway_route_target=target,
             )
         finally:
             c.close()
