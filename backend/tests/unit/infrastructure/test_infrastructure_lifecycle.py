@@ -14,6 +14,7 @@ from app.services.infrastructure_service.errors import NodeLifecycleError
 from app.services.infrastructure_service.lifecycle import (
     mark_node_draining,
     provision_ec2_node,
+    register_catalog_ec2_stub,
     sync_node_state,
     terminate_ec2_node,
     undrain_node,
@@ -211,6 +212,32 @@ def test_undrain_after_drain_restores_ready(infrastructure_unit_engine) -> None:
         session.refresh(out)
     assert out.status == ExecutionNodeStatus.READY.value
     assert out.schedulable is True
+
+
+def test_register_catalog_ec2_stub_inserts_node2_like_row(infrastructure_unit_engine) -> None:
+    with Session(infrastructure_unit_engine) as session:
+        node = register_catalog_ec2_stub(
+            session,
+            node_key="node-2",
+            name="staging node 2 catalog",
+            provider_instance_id="i-placeholder00000000",
+            private_ip="10.0.2.10",
+            public_ip="203.0.113.50",
+            region="us-east-1",
+            execution_mode="ssm_docker",
+            status="NOT_READY",
+        )
+        session.commit()
+        session.refresh(node)
+        assert node.node_key == "node-2"
+        assert node.provider_type == ExecutionNodeProviderType.EC2.value
+        assert node.schedulable is False
+        assert node.status == ExecutionNodeStatus.NOT_READY.value
+        assert node.provider_instance_id == "i-placeholder00000000"
+        assert node.private_ip == "10.0.2.10"
+        assert node.public_ip == "203.0.113.50"
+        assert node.region == "us-east-1"
+        assert node.execution_mode == ExecutionNodeExecutionMode.SSM_DOCKER.value
 
 
 def test_undrain_terminated_raises(infrastructure_unit_engine) -> None:

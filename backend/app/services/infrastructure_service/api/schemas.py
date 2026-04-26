@@ -188,6 +188,43 @@ class RegisterExistingEc2Body(BaseModel):
     )
 
 
+class RegisterCatalogEc2Body(BaseModel):
+    """Upsert an EC2 execution_node row without AWS describe (Step 4 catalog before/without live sync)."""
+
+    node_key: str = Field(..., min_length=1, max_length=128, description="Stable registry key, e.g. node-2")
+    name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Display/catalog name (defaults to node_key)",
+    )
+    provider_instance_id: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Real i-… when known; omitted uses catalog-pending:<node_key>",
+    )
+    private_ip: str | None = Field(default=None, max_length=64)
+    public_ip: str | None = Field(default=None, max_length=64)
+    region: str | None = Field(default="us-east-1", max_length=32)
+    availability_zone: str | None = Field(default=None, max_length=32)
+    instance_type: str | None = Field(default=None, max_length=64)
+    execution_mode: str | None = Field(default=None, description="ssm_docker or ssh_docker")
+    ssh_user: str | None = Field(default=None, max_length=64)
+    status: str | None = Field(
+        default=None,
+        description="READY or NOT_READY; omit for NOT_READY on insert, unchanged on update unless set",
+    )
+    total_cpu: float | None = Field(default=None, gt=0)
+    total_memory_mb: int | None = Field(default=None, gt=0)
+    allocatable_cpu: float | None = Field(default=None, gt=0)
+    allocatable_memory_mb: int | None = Field(default=None, gt=0)
+    max_workspaces: int | None = Field(default=None, ge=0)
+    allocatable_disk_mb: int | None = Field(default=None, ge=0)
+    align_status_with_heartbeat: bool = Field(
+        default=False,
+        description="If true, set READY only when last_heartbeat_at is within DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS",
+    )
+
+
 class SyncExecutionNodeBody(NodeKeyOrIdBody):
     promote_provisioning_when_ready: bool = True
 

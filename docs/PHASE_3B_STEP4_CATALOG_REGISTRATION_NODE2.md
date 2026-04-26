@@ -28,6 +28,30 @@ Use **`catalog_only`** so you do **not** need a follow-up SQL `UPDATE` when the 
 - **HTTP:** `POST /internal/execution-nodes/register-existing` JSON field **`"catalog_only": true`** (with `node_key`, `instance_id`, etc.).
 - **CLI:** `PYTHONPATH=. python scripts/register_ec2_instance.py <INSTANCE_ID> --node-key node-2 --execution-mode ssm_docker --catalog-only`
 
+**C. No AWS yet (placeholder row)** — `POST /internal/execution-nodes/register-catalog-ec2` or:
+
+```bash
+PYTHONPATH=. python scripts/register_node2_catalog_stub.py --private-ip 10.0.2.10 --public-ip 1.2.3.4 \
+  --provider-instance-id i-0yourrealinstanceid
+```
+
+JSON example:
+
+```json
+{
+  "node_key": "node-2",
+  "name": "node 2 (catalog)",
+  "region": "us-east-1",
+  "private_ip": "10.0.2.10",
+  "public_ip": "1.2.3.4",
+  "provider_instance_id": "i-0optionalrealid",
+  "execution_mode": "ssm_docker",
+  "status": "NOT_READY"
+}
+```
+
+Optional **`align_status_with_heartbeat": true`** sets **READY** only when `last_heartbeat_at` is within `DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS` (otherwise **NOT_READY**). Omit **`provider_instance_id`** to use `catalog-pending:node-2`.
+
 Behavior:
 
 - **Status** still follows EC2 describe (e.g. **`READY`** if `running`, **`NOT_READY`** if stopped/pending).
@@ -233,12 +257,15 @@ UPDATE execution_node SET schedulable = true WHERE node_key = 'node-2';
 
 | File | Role |
 |------|------|
-| `backend/app/services/providers/ec2_provider.py` | `register_ec2_instance(..., catalog_only=...)` forces `schedulable=false`; sets `metadata_json.ec2.catalog_only`. |
-| `backend/app/services/infrastructure_service/lifecycle.py` | `register_existing_ec2_node(..., catalog_only=...)`. |
-| `backend/app/services/infrastructure_service/api/schemas.py` | `RegisterExistingEc2Body.catalog_only`. |
-| `backend/app/services/infrastructure_service/api/routers/internal_execution_nodes.py` | Passes `catalog_only` to registration. |
-| `backend/scripts/register_ec2_instance.py` | `--catalog-only` CLI flag. |
-| `backend/tests/unit/providers/test_ec2_provider.py` | Unit test for catalog-only running instance. |
+| `backend/app/services/providers/ec2_provider.py` | `register_ec2_instance(..., catalog_only=...)` (real EC2 describe). |
+| `backend/app/services/infrastructure_service/lifecycle.py` | `register_existing_ec2_node(..., catalog_only=...)`; **`register_catalog_ec2_stub`** (no AWS). |
+| `backend/app/services/infrastructure_service/api/schemas.py` | `RegisterExistingEc2Body.catalog_only`; **`RegisterCatalogEc2Body`**. |
+| `backend/app/services/infrastructure_service/api/routers/internal_execution_nodes.py` | `POST /register-existing`; **`POST /register-catalog-ec2`**. |
+| `backend/scripts/register_ec2_instance.py` | `--catalog-only` (with instance id). |
+| `backend/scripts/register_node2_catalog_stub.py` | CLI catalog stub **without** AWS. |
+| `backend/tests/unit/providers/test_ec2_provider.py` | `catalog_only` EC2 unit test. |
+| `backend/tests/unit/infrastructure/test_infrastructure_lifecycle.py` | `register_catalog_ec2_stub` unit test. |
+| `backend/tests/unit/infrastructure/test_internal_execution_nodes_routes.py` | Internal `register-catalog-ec2` route test. |
 | `docs/PHASE_3B_STEP4_CATALOG_REGISTRATION_NODE2.md` | This Step 4 catalog registration runbook. |
 
 ---

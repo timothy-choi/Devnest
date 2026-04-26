@@ -29,6 +29,7 @@ INTERNAL_HEADERS = {"X-Internal-API-Key": "unit-test-internal-key"}
 
 def test_internal_execution_nodes_router_registers_post_heartbeat() -> None:
     paths = [getattr(r, "path", "") for r in internal_execution_nodes_router.routes]
+    assert "/internal/execution-nodes/register-catalog-ec2" in paths
     assert "/internal/execution-nodes/heartbeat" in paths
     hb_routes = [r for r in internal_execution_nodes_router.routes if getattr(r, "path", "") == "/internal/execution-nodes/heartbeat"]
     assert hb_routes and "POST" in (getattr(hb_routes[0], "methods", set()) or set())
@@ -91,6 +92,36 @@ def test_drain_then_undrain_local_node_via_internal_api(
     assert data2["node_key"] == key
     assert data2["status"] == ExecutionNodeStatus.READY.value
     assert data2["schedulable"] is True
+
+
+def test_register_catalog_ec2_stub_via_internal_api(
+    internal_api_client: TestClient,
+    infrastructure_unit_engine: Engine,
+) -> None:
+    r = internal_api_client.post(
+        "/internal/execution-nodes/register-catalog-ec2",
+        json={
+            "node_key": "node-2",
+            "name": "catalog node 2",
+            "region": "us-east-1",
+            "private_ip": "10.0.2.20",
+            "public_ip": "198.51.100.2",
+            "provider_instance_id": "i-0catalogstub00001",
+            "execution_mode": "ssm_docker",
+            "status": "NOT_READY",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["node_key"] == "node-2"
+    assert data["schedulable"] is False
+    assert data["status"] == ExecutionNodeStatus.NOT_READY.value
+    assert data["provider_type"] == "ec2"
+    with Session(infrastructure_unit_engine) as session:
+        row = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "node-2")).first()
+        assert row is not None
+        assert row.schedulable is False
 
 
 def test_list_execution_nodes_with_capacity(internal_api_client: TestClient) -> None:
