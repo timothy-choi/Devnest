@@ -7,6 +7,7 @@ import logging
 from sqlmodel import Session
 
 from app.libs.common.config import get_settings
+from app.services.placement_service.node_heartbeat import execution_node_heartbeat_age_seconds
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
@@ -74,6 +75,7 @@ def schedule_workspace(
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
+            target_node_heartbeat_age_seconds=execution_node_heartbeat_age_seconds(node),
             **_placement_telemetry(),
         )
         try:
@@ -94,6 +96,7 @@ def schedule_workspace(
                     execution_node_id=node.id,
                     node_key=node.node_key,
                     placement_summary=digest,
+                    target_node_heartbeat_age_seconds=execution_node_heartbeat_age_seconds(node),
                 )
         except Exception:
             logger.debug("placement_decision_summary_skipped", exc_info=True)
@@ -111,6 +114,7 @@ def schedule_workspace(
             message=str(e),
         )
     except NoSchedulableNodeError as e:
+        settings = get_settings()
         log_event(
             logger,
             LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
@@ -120,6 +124,8 @@ def schedule_workspace(
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
             **_placement_telemetry(),
+            heartbeat_gate_enabled=bool(getattr(settings, "devnest_require_fresh_node_heartbeat", False)),
+            node_heartbeat_max_age_seconds=int(getattr(settings, "devnest_node_heartbeat_max_age_seconds", 300) or 300),
             detail=str(e)[:2000],
         )
         return WorkspaceScheduleResult(

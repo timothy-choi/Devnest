@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# DevNest ops helper: internal execution-node API (list, workspaces, drain, undrain).
+# DevNest ops helper: internal execution-node API (list, workspaces, drain, undrain, deregister).
 # Requires: curl, jq (optional for pretty print).
 #
 #   export DEVNEST_API_BASE="http://localhost:8000"
 #   export INTERNAL_API_KEY="your-infrastructure-key"
 #   ./scripts/devnest_ops_nodes.sh list
 #   ./scripts/devnest_ops_nodes.sh workspaces
-#   ./scripts/devnest_ops_nodes.sh drain '{"node_key":"node-2"}'
-#   ./scripts/devnest_ops_nodes.sh undrain '{"node_key":"node-2"}'
-#   ./scripts/devnest_ops_nodes.sh heartbeat '{"node_key":"node-2","docker_ok":true,"disk_free_mb":50000,"slots_in_use":0,"version":"phase3b"}'
-#   # Or with jq: NODE_KEY=node-2 ./scripts/devnest_ops_nodes.sh heartbeat
-#   ./scripts/devnest_ops_nodes.sh smoke '{"node_key":"node-2","read_only_command":"docker_info"}'
-#   ./scripts/devnest_ops_nodes.sh smoke   # jq + NODE_KEY=node-2 defaults to docker_info
+#   ./scripts/devnest_ops_nodes.sh drain '{"node_key":"<NODE_KEY>"}'
+#   ./scripts/devnest_ops_nodes.sh undrain '{"node_key":"<NODE_KEY>"}'
+#   ./scripts/devnest_ops_nodes.sh deregister '{"node_key":"<NODE_KEY>"}'
+#   ./scripts/devnest_ops_nodes.sh heartbeat '{"node_key":"<NODE_KEY>","docker_ok":true,"disk_free_mb":50000,"slots_in_use":0,"version":"phase3b"}'
+#   # With jq: export NODE_KEY=<your_execution_node_key>  (required when omitting JSON arg)
+#   ./scripts/devnest_ops_nodes.sh heartbeat
+#   ./scripts/devnest_ops_nodes.sh smoke '{"node_key":"<NODE_KEY>","read_only_command":"docker_info"}'
 
 set -euo pipefail
 
@@ -58,16 +59,21 @@ case "$cmd" in
     curl -sS -X POST "${BASE}/internal/execution-nodes/undrain" "${HDR[@]}" -d "${body}"
     echo
     ;;
+  deregister)
+    body="${1:?usage: deregister JSON body e.g. {\"node_key\":\"...\"} or {\"node_id\":2}}"
+    curl -sS -X POST "${BASE}/internal/execution-nodes/deregister" "${HDR[@]}" -d "${body}"
+    echo
+    ;;
   heartbeat)
     if [[ -n "${1:-}" ]]; then
       body="$1"
     else
       if ! command -v jq >/dev/null 2>&1; then
-        echo "usage: $0 heartbeat '<json>'  (or install jq and omit arg to use NODE_KEY defaults)" >&2
+        echo "usage: $0 heartbeat '<json>'  (or install jq and set NODE_KEY when omitting JSON)" >&2
         exit 2
       fi
-      nk="${NODE_KEY:-node-2}"
-      ver="${HEARTBEAT_VERSION:-phase3b-node2-ops}"
+      nk="${NODE_KEY:?set NODE_KEY for heartbeat (e.g. export NODE_KEY=your-node-key)}"
+      ver="${HEARTBEAT_VERSION:-devnest-ops-heartbeat}"
       disk="${DISK_FREE_MB:-}"
       slots="${SLOTS_IN_USE:-0}"
       docker_ok="${DOCKER_OK:-true}"
@@ -100,10 +106,10 @@ case "$cmd" in
       body="$1"
     else
       if ! command -v jq >/dev/null 2>&1; then
-        echo "usage: $0 smoke '<json>'  (or install jq: defaults NODE_KEY=node-2, read_only_command=docker_info)" >&2
+        echo "usage: $0 smoke '<json>'  (or install jq and set NODE_KEY when omitting JSON)" >&2
         exit 2
       fi
-      nk="${NODE_KEY:-node-2}"
+      nk="${NODE_KEY:?set NODE_KEY for smoke (e.g. export NODE_KEY=your-node-key)}"
       roc="${SMOKE_READ_ONLY_COMMAND:-docker_info}"
       body="$(jq -n --arg nk "$nk" --arg roc "$roc" '{node_key:$nk, read_only_command:$roc}')"
     fi
@@ -115,7 +121,7 @@ case "$cmd" in
     fi
     ;;
   *)
-    echo "usage: $0 list | workspaces [limit_per_node] | drain '<json>' | undrain '<json>' | heartbeat '<json>' | smoke '<json>'" >&2
+    echo "usage: $0 list | workspaces [limit_per_node] | drain '<json>' | undrain '<json>' | deregister '<json>' | heartbeat '<json>' | smoke '<json>'" >&2
     exit 2
     ;;
 esac

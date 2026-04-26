@@ -347,3 +347,16 @@ def heartbeat_fresh_sql_predicates() -> list:
         ExecutionNode.last_heartbeat_at.isnot(None),
         ExecutionNode.last_heartbeat_at >= cutoff,
     ]
+
+
+def execution_node_heartbeat_age_seconds(node: ExecutionNode | None) -> int | None:
+    """Seconds since ``last_heartbeat_at`` (UTC); ``None`` if never heartbeated (Phase 3b Step 12 ops logs)."""
+    if node is None:
+        return None
+    ts = node.last_heartbeat_at
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return max(0, int((now - ts).total_seconds()))

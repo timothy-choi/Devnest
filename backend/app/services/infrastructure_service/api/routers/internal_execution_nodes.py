@@ -26,6 +26,7 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 from app.services.placement_service.bootstrap import default_local_node_key, ensure_default_local_execution_node
 from app.services.placement_service.errors import ExecutionNodeNotFoundError
+from app.services.placement_service.node_heartbeat import execution_node_heartbeat_age_seconds
 from app.services.placement_service.models import ExecutionNode
 from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
 
@@ -244,9 +245,15 @@ def post_execution_node_heartbeat(
     session.commit()
     session.refresh(node)
 
-    _logger.info(
-        "execution_node_heartbeat_node_updated",
-        extra={"node_key": nk, "execution_node_id": node.id},
+    log_event(
+        _logger,
+        LogEvent.EXECUTION_NODE_HEARTBEAT_RECORDED,
+        node_key=nk,
+        execution_node_id=node.id,
+        heartbeat_age_seconds=execution_node_heartbeat_age_seconds(node),
+        docker_ok=bool(body.docker_ok),
+        disk_free_mb=body.disk_free_mb,
+        slots_in_use=body.slots_in_use,
     )
     return ExecutionNodeHeartbeatOutBody(
         id=node.id,

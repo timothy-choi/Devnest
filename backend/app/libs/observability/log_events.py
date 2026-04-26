@@ -119,6 +119,8 @@ class LogEvent:
 
     EC2_NODE_PROVISIONED = "ec2.node.provisioned"
     EC2_NODE_TERMINATED = "ec2.node.terminated"
+    # Phase 3b Step 12: structured heartbeat after DB commit (``heartbeat_age_seconds`` for ops / Loki).
+    EXECUTION_NODE_HEARTBEAT_RECORDED = "execution.node.heartbeat_recorded"
 
     # Internal control-plane audit (who triggered sensitive HTTP surfaces; no secrets in fields).
     AUDIT_INTERNAL_WORKSPACE_JOBS_PROCESS = "audit.internal.workspace_jobs.process"
