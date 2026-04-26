@@ -39,8 +39,8 @@ Set on **API** and **workspace job worker** (and any in-process worker):
 
 ```bash
 export DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT=true
-export DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS=<node_2_execution_node_id>
-# Optional: keep broad rollout off (Step 7)
+export DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS=<target_execution_node_id>
+# Optional: primary-node-only pool for normal creates (rollback / Step 7 off)
 # export DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false
 ```
 
@@ -68,7 +68,7 @@ Response **202** with `workspace_id`, `job_id`. Process the job with your normal
 3. **Node 2 disk:** project directory exists under your DevNest workspace root layout (same as node 1 bring-up).
 4. **Docker:** container running on node 2 (SSM/SSH `docker ps` or node agent).
 5. **Traefik:** with gateway enabled, route registered; open IDE URL with `Host: <workspace.public_host>` (or browser URL your product uses).
-6. **Node 1:** create another workspace via **normal** user API; it must still land on node 1 while Step 7 single-node gate remains default **off** for multi-node, or per your Step 7 policy.
+6. **Other nodes:** with normal **user** `POST /workspaces` (no pinned prefix), placement follows the **scheduler** (multi-node by default since Step 11); it is **not** forced onto the pinned node unless you use the internal pinned route.
 
 **Automated (CI):**
 
@@ -85,7 +85,7 @@ cd backend && python3 -m pytest \
 
 1. **Stop/delete the test workspace** (normal stop/delete intents) so the container exits and route-admin can deregister (best-effort deregister on stop/delete paths).
 2. Set **`DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT=false`** (or unset) and **clear** `DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS`; restart API + worker.
-3. Optionally set node 2 **`schedulable=false`** again and keep `DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false` (Step 7) until the next planned phase.
+3. Optionally set the target node **`schedulable=false`** again; disable pinned placement env flags when finished.
 4. **No DB migration rollback** for this feature; workspace rows remain historical unless deleted.
 
 ---

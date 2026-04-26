@@ -13,7 +13,8 @@ This document is **Step A** of Phase 3b: a **fleet runbook** and **network / IAM
 - [Phase 3b Step 3 — IAM for execution nodes](./PHASE_3B_STEP3_IAM_EXECUTION_NODES.md) — instance profile, S3/ECR/SSM/STS policies, example JSON, validation and rollback.
 - [Phase 3b Step 4 — Catalog registration (node 2)](./PHASE_3B_STEP4_CATALOG_REGISTRATION_NODE2.md) — `register-existing` + `schedulable=false`, validation, rollback (no routing changes).
 - [Phase 3b Step 5 — Heartbeat from node 2](./PHASE_3B_STEP5_HEARTBEAT_NODE2.md) — systemd/cron → `POST /internal/execution-nodes/heartbeat`, stay `schedulable=false`.
-- [Phase 3b Step 7 — Multi-node scheduling flag](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md) — `DEVNEST_ENABLE_MULTI_NODE_SCHEDULING` (default off), primary-node gate, placement logging.
+- [Phase 3b Step 7 — Multi-node scheduling flag](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md) — `DEVNEST_ENABLE_MULTI_NODE_SCHEDULING` (default **on** since Step 11), primary-node gate when **false**, placement logging.
+- [Phase 3b Step 11 — Two-node scheduling spread](./PHASE_3B_STEP11_TWO_NODE_SCHEDULING_SPREAD.md) — verification and rollback for generic fleet placement.
 - [Phase 3b Step 8 — Controlled test workspace on node 2](./PHASE_3B_STEP8_CONTROLLED_NODE2_TEST_WORKSPACE.md) — pinned internal CREATE, Traefik verification, rollback.
 
 ---

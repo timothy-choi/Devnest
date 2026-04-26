@@ -59,7 +59,11 @@ def _ready_schedulable_provider_predicates() -> list:
 
 
 def _single_node_primary_id_clause():
-    """When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false, restrict to ``MIN(id)`` in the ready pool."""
+    """When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false, restrict to ``MIN(id)`` in the ready pool.
+
+    When true (default), this clause is omitted so every READY+schedulable node in the provider pool
+    is a candidate (subject to capacity, slots, optional heartbeat gate).
+    """
     if bool(get_settings().devnest_enable_multi_node_scheduling):
         return None
     inner = _ready_schedulable_provider_predicates()
@@ -83,9 +87,10 @@ def _schedulable_base_predicates():
 def schedulable_placement_predicates() -> list:
     """Public: SQLAlchemy boolean clauses for the placement pool (READY + schedulable + provider filter).
 
-    When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false (default), also restricts candidates to the
-    primary node: lowest ``execution_node.id`` among rows matching the predicates above (heartbeat not
-    applied here; see :func:`select_node_for_workspace`).
+    When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false, also restricts candidates to the primary
+    node: lowest ``execution_node.id`` among rows matching the predicates above (heartbeat not
+    applied here; see :func:`select_node_for_workspace`). When true (default), all matching nodes
+    are listed.
 
     Does **not** include the optional heartbeat freshness gate; that applies only in
     :func:`select_node_for_workspace` when ``DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT`` is true.
@@ -171,10 +176,11 @@ def select_node_for_workspace(
     within ``DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS`` (default off so bootstrap without a worker
     still schedules).
 
-    When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false (default), only the **primary** execution
-    node — the one with the lowest ``id`` among READY+schedulable rows after the provider filter —
-    is eligible. Additional registered nodes (e.g. node 2 at ``schedulable=true``) are ignored until
-    the flag is enabled.
+    When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false, only the **primary** execution node —
+    the one with the lowest ``id`` among READY+schedulable rows after the provider filter — is
+    eligible. When true (default), every READY+schedulable node in the pool is eligible; the
+    scheduler picks using effective free resources, then fewer active workloads (spread), then
+    ``node_key`` for a stable tiebreak (no hardcoded node ids).
 
     Raises:
         InvalidPlacementParametersError: when request sizes are not positive.

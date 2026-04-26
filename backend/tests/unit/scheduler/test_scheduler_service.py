@@ -66,7 +66,7 @@ def test_schedule_workspace_invalid_request(mock_reserve: MagicMock) -> None:
 
 @patch("app.services.scheduler_service.service.log_event")
 @patch("app.services.scheduler_service.service.reserve_node_for_workspace")
-def test_schedule_workspace_success_logs_placement_gate_flags(
+def test_schedule_workspace_success_logs_single_node_gate_when_disabled(
     mock_reserve: MagicMock,
     mock_log: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
@@ -79,4 +79,22 @@ def test_schedule_workspace_success_logs_placement_gate_flags(
     assert kwargs["multi_node_scheduling_enabled"] is False
     assert kwargs["placement_single_node_gate"] is True
     assert kwargs["workspace_id"] == 42
+    get_settings.cache_clear()
+
+
+@patch("app.services.scheduler_service.service.log_event")
+@patch("app.services.scheduler_service.service.reserve_node_for_workspace")
+def test_schedule_workspace_success_logs_multi_node_pool_by_default(
+    mock_reserve: MagicMock,
+    mock_log: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", raising=False)
+    get_settings.cache_clear()
+    mock_reserve.return_value = _chosen()
+    schedule_workspace(MagicMock(), workspace_id=99)
+    kwargs = mock_log.call_args[1]
+    assert kwargs["multi_node_scheduling_enabled"] is True
+    assert kwargs["placement_single_node_gate"] is False
+    assert kwargs["workspace_id"] == 99
     get_settings.cache_clear()

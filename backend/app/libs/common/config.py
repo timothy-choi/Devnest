@@ -644,11 +644,12 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = ""
     # Placement filter: ``all`` (default) = local + EC2 nodes; ``local`` / ``ec2`` = restrict pool.
     devnest_node_provider: str = "all"
-    # When false (default), new placement is restricted to the primary node only: lowest ``execution_node.id``
-    # among READY+schedulable rows after the provider filter. Secondary nodes (e.g. fleet node 2) are ignored
-    # until this flag is true and they remain READY+schedulable. See docs/PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md.
+    # When false, new placement is restricted to the primary node only: lowest ``execution_node.id``
+    # among READY+schedulable rows after the provider filter. When true (default as of Phase 3b Step 11),
+    # all READY+schedulable nodes in the provider pool compete using capacity + spread ordering.
+    # See docs/PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md and docs/PHASE_3B_STEP11_TWO_NODE_SCHEDULING_SPREAD.md.
     devnest_enable_multi_node_scheduling: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices(
             "DEVNEST_ENABLE_MULTI_NODE_SCHEDULING",
             "devnest_enable_multi_node_scheduling",

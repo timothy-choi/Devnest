@@ -114,10 +114,7 @@ def _add_node(session: Session, *, key: str, alloc_cpu: float = 4.0, alloc_mem: 
     session.commit()
 
 
-def test_create_selects_highest_capacity_node(
-    bind_engine: Engine,
-    enable_multi_node_scheduling: None,
-) -> None:
+def test_create_selects_highest_capacity_node(bind_engine: Engine) -> None:
     with Session(bind_engine) as session:
         uid = _seed_user(session)
         _seed_topology(session, 1)
