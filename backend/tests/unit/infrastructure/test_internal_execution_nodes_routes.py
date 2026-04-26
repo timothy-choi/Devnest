@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -122,6 +123,57 @@ def test_register_catalog_ec2_stub_via_internal_api(
         row = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "node-2")).first()
         assert row is not None
         assert row.schedulable is False
+
+
+def test_post_heartbeat_node2_catalog_keeps_schedulable_false(
+    internal_api_client: TestClient,
+    infrastructure_unit_engine: Engine,
+) -> None:
+    """Phase 3b Step 5: heartbeat updates liveness for node-2 without flipping schedulable."""
+    r0 = internal_api_client.post(
+        "/internal/execution-nodes/register-catalog-ec2",
+        json={
+            "node_key": "node-2",
+            "name": "catalog node 2",
+            "region": "us-east-1",
+            "private_ip": "10.0.2.20",
+            "public_ip": "198.51.100.2",
+            "provider_instance_id": "i-0catalogstub00002",
+            "execution_mode": "ssm_docker",
+            "status": "NOT_READY",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r0.status_code == 200, r0.text
+    assert r0.json()["schedulable"] is False
+
+    r = internal_api_client.post(
+        "/internal/execution-nodes/heartbeat",
+        json={
+            "node_key": "node-2",
+            "docker_ok": True,
+            "disk_free_mb": 99_999,
+            "slots_in_use": 0,
+            "version": "phase3b-step5-unit",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["node_key"] == "node-2"
+    assert data["schedulable"] is False
+    assert data["last_heartbeat_at"] is not None
+
+    with Session(infrastructure_unit_engine) as session:
+        row = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "node-2")).first()
+        assert row is not None
+        assert row.schedulable is False
+        assert row.last_heartbeat_at is not None
+        hb = (row.metadata_json or {}).get("heartbeat") or {}
+        assert hb.get("version") == "phase3b-step5-unit"
+        assert hb.get("disk_free_mb") == 99_999
+        assert hb.get("slots_in_use") == 0
+        assert hb.get("docker_ok") is True
 
 
 def test_list_execution_nodes_with_capacity(internal_api_client: TestClient) -> None:
@@ -350,6 +402,94 @@ def test_post_heartbeat_unknown_node_returns_404(internal_api_client: TestClient
         headers=INTERNAL_HEADERS,
     )
     assert r.status_code == 404
+
+
+def test_post_smoke_read_only_node2_catalog_keeps_schedulable_false(
+    internal_api_client: TestClient,
+    infrastructure_unit_engine: Engine,
+) -> None:
+    """Phase 3b Step 6: smoke resolves node-2 from DB; does not flip schedulable."""
+    r0 = internal_api_client.post(
+        "/internal/execution-nodes/register-catalog-ec2",
+        json={
+            "node_key": "node-2",
+            "name": "catalog node 2 smoke",
+            "region": "us-east-1",
+            "private_ip": "10.0.2.21",
+            "public_ip": "198.51.100.3",
+            "provider_instance_id": "i-0catalogstubsmoke01",
+            "execution_mode": "ssm_docker",
+            "status": "NOT_READY",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r0.status_code == 200, r0.text
+    assert r0.json()["schedulable"] is False
+
+    with patch(
+        "app.services.infrastructure_service.execution_node_smoke.send_run_shell_script",
+        return_value=("Containers: 0\n", ""),
+    ):
+        r = internal_api_client.post(
+            "/internal/execution-nodes/smoke-read-only",
+            json={"node_key": "node-2", "read_only_command": "docker_ps"},
+            headers=INTERNAL_HEADERS,
+        )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["ok"] is True
+    assert data["node_key"] == "node-2"
+    assert data["schedulable"] is False
+    assert data["command_status"] == "Success"
+    assert data["execution_node_id"] is not None
+    assert data["execution_mode"] == ExecutionNodeExecutionMode.SSM_DOCKER.value
+    assert "Containers" in (data.get("output_preview") or "")
+
+    with Session(infrastructure_unit_engine) as session:
+        row = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "node-2")).first()
+        assert row is not None
+        assert row.schedulable is False
+        assert int(row.id) == int(data["execution_node_id"])
+
+
+def test_post_smoke_read_only_by_node_id(
+    internal_api_client: TestClient,
+    infrastructure_unit_engine: Engine,
+) -> None:
+    with Session(infrastructure_unit_engine) as session:
+        row = ExecutionNode(
+            node_key="smoke-by-id-node",
+            name="smoke-by-id-node",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            provider_instance_id="i-0smokebyidnode0001",
+            region="us-east-1",
+            private_ip="10.0.9.9",
+            execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+            status=ExecutionNodeStatus.READY.value,
+            schedulable=False,
+            total_cpu=2.0,
+            total_memory_mb=4096,
+            allocatable_cpu=2.0,
+            allocatable_memory_mb=4096,
+            metadata_json={},
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        node_pk = int(row.id)
+
+    with patch(
+        "app.services.infrastructure_service.execution_node_smoke.send_run_shell_script",
+        return_value=("Server: Docker\n", ""),
+    ):
+        r = internal_api_client.post(
+            "/internal/execution-nodes/smoke-read-only",
+            json={"node_id": node_pk},
+            headers=INTERNAL_HEADERS,
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["execution_node_id"] == node_pk
+    assert r.json()["node_key"] == "smoke-by-id-node"
 
 
 def test_sync_body_requires_selector(internal_api_client: TestClient) -> None:

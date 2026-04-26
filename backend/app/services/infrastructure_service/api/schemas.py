@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
@@ -126,6 +127,15 @@ class NodeKeyOrIdBody(BaseModel):
         return self
 
 
+class ExecutionNodeSmokeReadOnlyBody(NodeKeyOrIdBody):
+    """Body for ``POST /internal/execution-nodes/smoke-read-only`` (Phase 3b Step 6)."""
+
+    read_only_command: Literal["docker_info", "docker_ps"] = Field(
+        default="docker_info",
+        description="Fixed read-only docker invocation (no arbitrary shell).",
+    )
+
+
 class ExecutionNodeHeartbeatRequest(BaseModel):
     """Agent / worker payload for ``POST /internal/execution-nodes/heartbeat``."""
 
@@ -233,6 +243,7 @@ class ExecutionNodeSmokeResponse(BaseModel):
     """Sanitized result of ``POST /internal/execution-nodes/smoke-read-only`` (Phase 3b Step 6)."""
 
     ok: bool
+    execution_node_id: int | None = Field(default=None, description="ExecutionNode.id for the row that was resolved")
     node_key: str
     execution_mode: str
     schedulable: bool

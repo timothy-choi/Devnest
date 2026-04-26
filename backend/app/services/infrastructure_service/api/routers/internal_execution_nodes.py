@@ -48,6 +48,7 @@ from ...models import Ec2ProvisionRequest
 
 from ..schemas import (
     ExecutionNodeCapacityResponse,
+    ExecutionNodeSmokeReadOnlyBody,
     ExecutionNodeSmokeResponse,
     ExecutionNodeSummaryResponse,
     NodeKeyOrIdBody,
@@ -196,7 +197,11 @@ def post_execution_node_heartbeat(
     body: ExecutionNodeHeartbeatInBody,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeHeartbeatOutBody:
-    """Apply execution node heartbeat: update ``last_heartbeat_at`` and optional ``metadata_json['heartbeat']``."""
+    """Apply execution node heartbeat: update ``last_heartbeat_at`` and optional ``metadata_json['heartbeat']``.
+
+    Does **not** modify ``schedulable`` or ``status`` (Phase 3b: catalog node-2 can heartbeat while
+    ``schedulable=false``; placement still excludes it until undrain / explicit enable).
+    """
     nk = str(body.node_key).strip()
     _logger.info(
         "execution_node_heartbeat_received",
@@ -258,13 +263,21 @@ def post_execution_node_heartbeat(
     summary="Run read-only docker info on an EC2 execution node (SSM or SSH smoke, Phase 3b)",
 )
 def post_execution_node_smoke_read_only(
-    body: NodeKeyOrIdBody,
+    body: ExecutionNodeSmokeReadOnlyBody,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSmokeResponse:
-    """Operator smoke: verify control plane can reach node Docker without changing ``schedulable``."""
+    """Operator smoke: verify control plane can reach node Docker without changing ``schedulable`` or placement.
+
+    Runs in the API process (same AWS/SSH credentials as other control-plane mutations). Phase 3b Step 6:
+    use for catalog ``node-2`` while ``schedulable=false`` — no Traefik or workspace scheduling changes.
+    """
     _audit_mutation("smoke_read_only", **_select_kwargs(body))
     try:
-        payload = run_read_only_execution_node_smoke(session, **_select_kwargs(body))
+        payload = run_read_only_execution_node_smoke(
+            session,
+            read_only_command=body.read_only_command,
+            **_select_kwargs(body),
+        )
     except ExecutionNodeNotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
     except ExecutionNodeSmokeUnsupportedError as e:

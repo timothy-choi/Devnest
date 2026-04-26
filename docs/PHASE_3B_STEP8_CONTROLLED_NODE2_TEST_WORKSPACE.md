@@ -4,7 +4,7 @@ This document describes the **safest** way to run **exactly one** (or a small nu
 
 **Scope:** explicit env flags + **internal HTTP API** + optional allowlist of `execution_node.id`. Normal `POST /workspaces` behavior is unchanged.
 
-**Related:** [Fleet runbook](./PHASE_3B_FLEET_RUNBOOK.md), [Step 7 — Multi-node scheduling flag](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md), internal execution-node smoke (`POST /internal/execution-nodes/smoke-read-only`).
+**Related:** [Fleet runbook](./PHASE_3B_FLEET_RUNBOOK.md), [Step 7 — Multi-node scheduling flag](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md), [Step 6 — Read-only smoke to node 2](./PHASE_3B_STEP6_WORKER_NODE2_SMOKE.md) (`POST /internal/execution-nodes/smoke-read-only`).
 
 ---
 

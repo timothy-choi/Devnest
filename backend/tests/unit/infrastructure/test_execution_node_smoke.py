@@ -49,10 +49,12 @@ def test_smoke_ssm_ec2_success(infrastructure_unit_engine: Engine) -> None:
             out = run_read_only_execution_node_smoke(session, node_key="unit-smoke-ssm-node")
         send.assert_called_once()
         assert out["ok"] is True
+        assert out["execution_node_id"] is not None
         assert out["node_key"] == "unit-smoke-ssm-node"
         assert out["command_status"] == "Success"
         assert out["schedulable"] is False
         assert "Docker" in out["output_preview"]
+        assert "docker info" in send.call_args[0][2][0].lower()
 
 
 def test_smoke_ssm_returns_failure_payload_on_ssm_error(infrastructure_unit_engine: Engine) -> None:
@@ -78,6 +80,7 @@ def test_smoke_ssm_returns_failure_payload_on_ssm_error(infrastructure_unit_engi
         ):
             out = run_read_only_execution_node_smoke(session, node_key="unit-smoke-ssm-fail")
     assert out["ok"] is False
+    assert out["execution_node_id"] is not None
     assert out["command_status"] == "Failed"
     assert "Throttled" in out["output_preview"]
 
@@ -109,8 +112,36 @@ def test_smoke_ssh_ec2_success(infrastructure_unit_engine: Engine) -> None:
             out = run_read_only_execution_node_smoke(session, node_key="unit-smoke-ssh-node")
     mock_runner.run.assert_called_once()
     assert out["ok"] is True
+    assert out["execution_node_id"] is not None
     assert out["execution_mode"] == ExecutionNodeExecutionMode.SSH_DOCKER.value
     assert "Docker" in out["output_preview"]
+    assert "docker info" in mock_runner.run.call_args[0][0][2].lower()
+
+
+def test_smoke_ssm_docker_ps_command(infrastructure_unit_engine: Engine) -> None:
+    with Session(infrastructure_unit_engine) as session:
+        row = ExecutionNode(
+            node_key="unit-smoke-ssm-ps",
+            name="unit-smoke-ssm-ps",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            provider_instance_id="i-0pspspspspspsps0",
+            region="us-east-1",
+            private_ip="10.0.1.51",
+            execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+            schedulable=False,
+        )
+        session.add(row)
+        session.commit()
+
+    with Session(infrastructure_unit_engine) as session:
+        with patch(
+            "app.services.infrastructure_service.execution_node_smoke.send_run_shell_script",
+            return_value=("NAMES\n", ""),
+        ) as send:
+            out = run_read_only_execution_node_smoke(session, node_key="unit-smoke-ssm-ps", read_only_command="docker_ps")
+        send.assert_called_once()
+        assert "docker ps" in send.call_args[0][2][0].lower()
+    assert out["ok"] is True
 
 
 def test_smoke_ssh_missing_host_skipped(infrastructure_unit_engine: Engine) -> None:

@@ -1,6 +1,6 @@
-# Phase 3b Step 5 — Heartbeat from node 2 while unschedulable (documentation only)
+# Phase 3b Step 5 — Heartbeat from node 2 while unschedulable
 
-**Status:** Operator runbook. **No** application code changes, **no** route-admin or Traefik changes, **no** remote Docker/SSM **orchestration** for workspace jobs (only local `docker` checks on the node for heartbeat telemetry).
+**Status:** Operator runbook. Backend **`POST /internal/execution-nodes/heartbeat`** updates **`last_heartbeat_at`** and **`metadata_json.heartbeat`** only — it **never** sets **`schedulable`** (verified in code and **`test_post_heartbeat_node2_catalog_keeps_schedulable_false`**). **No** route-admin or Traefik changes, **no** remote Docker/SSM **orchestration** for workspace jobs (only local `docker` checks on the node for heartbeat telemetry).
 
 **Prerequisites:** [Step 4 — Catalog registration](./PHASE_3B_STEP4_CATALOG_REGISTRATION_NODE2.md) (node 2 in `execution_node` with **`schedulable=false`**), [Step 2 — Networking](./PHASE_3B_STEP2_SECURITY_GROUPS_NETWORKING.md) (node → API egress), [Step 3 — IAM](./PHASE_3B_STEP3_IAM_EXECUTION_NODES.md) (optional; heartbeat uses **internal API key**, not instance profile, unless you proxy via agent role).
 
@@ -48,7 +48,22 @@ Example values for the JSON body (adjust paths to match **`WORKSPACE_PROJECTS_BA
 - **`slots_in_use`:** `0` until this node runs workspace containers; optional later: count running devnest-related containers.  
 - **`version`:** static string or `uname -n`-suffixed tag for traceability.
 
-### 2.3 One-shot `curl` (manual test)
+### 2.3 Ops script (from laptop or bastion)
+
+With **`DEVNEST_API_BASE`** and **`INTERNAL_API_KEY`** set (same as other internal node routes):
+
+```bash
+./scripts/devnest_ops_nodes.sh heartbeat '{"node_key":"node-2","docker_ok":true,"disk_free_mb":50000,"slots_in_use":0,"version":"phase3b-node2-manual"}'
+```
+
+With **`jq`** installed, defaults **`NODE_KEY=node-2`**, optional **`DISK_FREE_MB`**, **`SLOTS_IN_USE`**, **`HEARTBEAT_VERSION`**, **`DOCKER_OK`**:
+
+```bash
+export NODE_KEY=node-2 DISK_FREE_MB=50000 HEARTBEAT_VERSION=phase3b-node2-1
+./scripts/devnest_ops_nodes.sh heartbeat
+```
+
+### 2.4 One-shot `curl` (manual test)
 
 ```bash
 curl -sS -o /tmp/hb.out -w "%{http_code}" \
@@ -67,7 +82,7 @@ curl -sS -o /tmp/hb.out -w "%{http_code}" \
 
 **Expect:** HTTP **200** and JSON with `node_key`, `last_heartbeat_at` non-null. If `disk_free_mb` parsing fails, omit it or send a literal integer.
 
-### 2.4 Systemd timer (recommended)
+### 2.5 Systemd timer (recommended)
 
 Install two units under `/etc/systemd/system/` on node 2 (paths illustrative).
 
@@ -145,7 +160,7 @@ test "$code" -ge 200 && test "$code" -lt 300
 
 **Note:** `printf` into JSON assumes `NODE_KEY` and `VER` are safe (no `"` or backslashes); use **`jq -n`** in production if values can contain special characters.
 
-### 2.5 Cron alternative
+### 2.6 Cron alternative
 
 ```cron
 * * * * * root /usr/local/bin/devnest-node-heartbeat.sh >>/var/log/devnest-heartbeat.log 2>&1
@@ -221,6 +236,9 @@ curl -sS -H "X-Internal-API-Key: <KEY>" "https://<API>/internal/execution-nodes/
 | **Docker always false** | Docker daemon down, wrong socket permissions, disk full | On node: `sudo systemctl status docker`, `sudo docker info`. |
 | **`disk_free_mb` wrong / jq errors** | Path missing or `df` parse | Ensure **`PROJECT_BASE`** exists (`Step 1`); fix script parsing; omit optional field temporarily. |
 | **Timer never runs** | Timer not enabled, clock skew | `systemctl list-timers | grep devnest`, `timedatectl`. |
+| **HTTP 422** | Invalid JSON types (e.g. string where bool expected) | Validate body with `jq .`; `docker_ok` must be boolean, `disk_free_mb` / `slots_in_use` integers or omitted. |
+| **New workspace on node-2** | **`schedulable` was set true** (undrain / SQL) or only node-2 schedulable | `SELECT node_key, schedulable FROM execution_node ORDER BY node_key;` — for Step 5, node-2 must stay **`false`**. To correct: `UPDATE execution_node SET schedulable=false WHERE node_key='node-2';` (then confirm placement policy). |
+| **Heartbeat OK but placement odd** | Multi-node scheduling and capacity | See Step 11 / fleet runbook; list nodes: `./scripts/devnest_ops_nodes.sh list`. |
 
 ---
 
@@ -245,6 +263,12 @@ Stopping heartbeat **does not** auto-set `schedulable=true`; placement policy un
 - [ ] New workspaces still bind to **node 1** (or other schedulable nodes).  
 - [ ] No route-admin, Traefik, or user-facing app behavior changes for this step.
 
+**Automated check (CI / local):**
+
+```bash
+cd backend && python3 -m pytest tests/unit/infrastructure/test_internal_execution_nodes_routes.py::test_post_heartbeat_node2_catalog_keeps_schedulable_false -q
+```
+
 ---
 
 ## 7. Files touched by this step
@@ -252,6 +276,9 @@ Stopping heartbeat **does not** auto-set `schedulable=true`; placement policy un
 | File | Role |
 |------|------|
 | `docs/PHASE_3B_STEP5_HEARTBEAT_NODE2.md` | This Step 5 heartbeat runbook. |
+| `scripts/devnest_ops_nodes.sh` | **`heartbeat`** subcommand for manual or scripted POSTs. |
+| `backend/.../internal_execution_nodes.py` | Heartbeat handler (documents invariant: no `schedulable` / `status` changes). |
+| `backend/tests/unit/infrastructure/test_internal_execution_nodes_routes.py` | **`test_post_heartbeat_node2_catalog_keeps_schedulable_false`**. |
 
 ---
 
@@ -263,4 +290,4 @@ Stopping heartbeat **does not** auto-set `schedulable=true`; placement policy un
 
 ---
 
-*Phase 3b Step 5 — node 2 heartbeat while unschedulable. Documentation only.*
+*Phase 3b Step 5 — node 2 heartbeat while unschedulable.*

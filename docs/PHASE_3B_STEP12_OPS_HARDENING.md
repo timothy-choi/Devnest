@@ -70,7 +70,7 @@ All routes require **`X-Internal-API-Key`** with infrastructure scope (same as e
 1. Identify node: `GET /internal/execution-nodes/workspaces-by-node` or DB `workspace_runtime.node_id`.  
 2. User flows: **stop** / **delete** workspace; optional **`POST /workspaces/{id}/reconcile-runtime`** if product exposes it.  
 3. If gateway stuck: reconcile path may **deregister** route; logs **`gateway.route.deregistered`** / **`reconcile.*`**.  
-4. Node-specific Docker/SSM issues: use **`POST /internal/execution-nodes/smoke-read-only`** for EC2 reachability.
+4. Node-specific Docker/SSM issues: use **`POST /internal/execution-nodes/smoke-read-only`** for EC2 reachability ([Step 6](./PHASE_3B_STEP6_WORKER_NODE2_SMOKE.md)).
 
 ---
 

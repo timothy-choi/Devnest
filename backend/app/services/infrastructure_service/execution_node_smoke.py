@@ -7,7 +7,7 @@ plane can reach a registered EC2 node's Docker via the same execution path used 
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from sqlmodel import Session
 
@@ -22,9 +22,18 @@ from app.services.placement_service.models import (
 )
 
 # Read-only, bounded output (no user-controlled command strings).
-_SMOKE_SHELL = "docker info 2>&1 | head -c 2000"
+_SMOKE_SHELL_DOCKER_INFO = "docker info 2>&1 | head -c 2000"
+_SMOKE_SHELL_DOCKER_PS = "docker ps --no-trunc 2>&1 | head -c 2000"
 _SMOKE_SSM_TIMEOUT_S = 120
 _OUTPUT_MAX = 2000
+
+ReadOnlySmokeCommand = Literal["docker_info", "docker_ps"]
+
+
+def _smoke_shell(read_only_command: ReadOnlySmokeCommand) -> str:
+    if read_only_command == "docker_ps":
+        return _SMOKE_SHELL_DOCKER_PS
+    return _SMOKE_SHELL_DOCKER_INFO
 
 
 class ExecutionNodeSmokeUnsupportedError(Exception):
@@ -55,13 +64,17 @@ def run_read_only_execution_node_smoke(
     *,
     node_id: int | None = None,
     node_key: str | None = None,
+    read_only_command: ReadOnlySmokeCommand = "docker_info",
 ) -> dict[str, Any]:
     """
-    Run a bounded ``docker info`` on the target node via SSM (``ssm_docker``) or SSH (``ssh_docker``).
+    Run a bounded read-only docker command on the target node via SSM (``ssm_docker``) or SSH (``ssh_docker``).
+
+    ``read_only_command`` must be one of the fixed literals (no arbitrary shell).
 
     Returns a dict suitable for :class:`~app.services.infrastructure_service.api.schemas.ExecutionNodeSmokeResponse`.
     """
     node = get_node(session, node_id=node_id, node_key=node_key)
+    shell = _smoke_shell(read_only_command)
 
     if (node.provider_type or "").strip().lower() != ExecutionNodeProviderType.EC2.value:
         raise ExecutionNodeSmokeUnsupportedError(
@@ -86,7 +99,7 @@ def run_read_only_execution_node_smoke(
             stdout, stderr = send_run_shell_script(
                 ssm,
                 instance_id,
-                [_SMOKE_SHELL],
+                [shell],
                 comment="DevNest-smoke-readonly",
                 timeout_seconds=_SMOKE_SSM_TIMEOUT_S,
             )
@@ -103,7 +116,7 @@ def run_read_only_execution_node_smoke(
         port = int(node.ssh_port or 22)
         runner = SshRemoteCommandRunner(ssh_user=user, ssh_host=host, ssh_port=port)
         try:
-            out = runner.run(["sh", "-c", _SMOKE_SHELL])
+            out = runner.run(["sh", "-c", shell])
         except Exception as e:  # noqa: BLE001 — return sanitized failure for operators
             return _failure_payload(node, command_status="Failed", message=str(e)[:500])
         return _success_payload(node, out)
@@ -116,6 +129,7 @@ def run_read_only_execution_node_smoke(
 def _success_payload(node: ExecutionNode, output: str) -> dict[str, Any]:
     return {
         "ok": True,
+        "execution_node_id": int(node.id) if getattr(node, "id", None) is not None else None,
         "node_key": node.node_key,
         "execution_mode": str(node.execution_mode or ""),
         "schedulable": bool(node.schedulable),
@@ -129,6 +143,7 @@ def _success_payload(node: ExecutionNode, output: str) -> dict[str, Any]:
 def _failure_payload(node: ExecutionNode, *, command_status: str, message: str) -> dict[str, Any]:
     return {
         "ok": False,
+        "execution_node_id": int(node.id) if getattr(node, "id", None) is not None else None,
         "node_key": node.node_key,
         "execution_mode": str(node.execution_mode or ""),
         "schedulable": bool(node.schedulable),
