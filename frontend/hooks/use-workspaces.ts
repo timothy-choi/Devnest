@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { browserApi } from "@/lib/api/browser-client";
 import { ApiError } from "@/lib/api/error";
+import { parseSnapshotArchiveFilename } from "@/lib/snapshot-archive-filename";
 import { WorkspaceFormValues } from "@/lib/validators";
 import { toWorkspace } from "@/lib/workspace-mappers";
 import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
@@ -434,11 +435,22 @@ export function useWorkspaces() {
       setActionError("Invalid workspace id.");
       return;
     }
+    const archiveUrl = `/api/workspaces/${workspaceId}/snapshot-archive`;
     setActionError(null);
     setSnapshotNotice(null);
     setSnapshotBusyWorkspaceId(workspaceId);
+    let objectUrl: string | null = null;
+    const revokeLater = (url: string) => {
+      window.setTimeout(() => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }, 60_000);
+    };
     try {
-      const res = await fetch(`/api/workspaces/${workspaceId}/snapshot-archive`, {
+      const res = await fetch(archiveUrl, {
         method: "GET",
         credentials: "same-origin",
       });
@@ -450,26 +462,49 @@ export function useWorkspaces() {
             detail = errBody.detail;
           }
         } catch {
-          // ignore
+          // ignore non-JSON error bodies
         }
         throw new ApiError(res.status, detail);
       }
-      const cd = res.headers.get("Content-Disposition");
-      let filename = `workspace-${workspaceId}-snapshot.tar.gz`;
-      const m = cd && /filename\*?=(?:UTF-8''|)([^;\s]+)|filename="([^"]+)"/i.exec(cd);
-      if (m) {
-        filename = decodeURIComponent((m[1] || m[2] || filename).replace(/^"|"$/g, ""));
-      }
+      const fallbackName = `workspace-${workspaceId}-snapshot.tar.gz`;
+      const filename = parseSnapshotArchiveFilename(res.headers.get("Content-Disposition"), fallbackName);
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+      if (blob.size === 0) {
+        throw new ApiError(502, "Snapshot archive was empty. Try saving the workspace again, then download.");
+      }
+      objectUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
-      anchor.href = url;
+      anchor.href = objectUrl;
       anchor.download = filename;
       anchor.rel = "noopener";
       document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      try {
+        anchor.click();
+      } catch (clickErr) {
+        const blockedProgrammaticDownload =
+          clickErr instanceof DOMException &&
+          (clickErr.name === "NotAllowedError" || clickErr.name === "SecurityError");
+        if (!blockedProgrammaticDownload) {
+          throw clickErr;
+        }
+        // After await, user activation can expire; same-tab GET still delivers the archive with cookies.
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {
+          // ignore
+        }
+        objectUrl = null;
+        window.location.assign(archiveUrl);
+        setActionError(null);
+        return;
+      } finally {
+        anchor.remove();
+      }
+      if (objectUrl) {
+        revokeLater(objectUrl);
+      }
+      setActionError(null);
+      setSnapshotNotice(null);
     } catch (error) {
       setSnapshotNotice(null);
       setActionError(error instanceof ApiError ? error.detail : "Could not download the snapshot archive.");
