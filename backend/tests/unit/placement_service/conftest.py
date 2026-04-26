@@ -9,7 +9,7 @@ from app.libs.common.config import get_settings
 
 @pytest.fixture
 def enable_multi_node_scheduling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force multi-node pool (same as default since Phase 3b Step 11); use for explicitness."""
+    """Force multi-node pool (``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=true``); default app setting is false (Step 7)."""
     monkeypatch.setenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", "true")
     get_settings.cache_clear()
     yield

@@ -106,8 +106,8 @@ class LogEvent:
     # Single-line digest from ``explain_placement_decision`` (newlines flattened) for Loki; max size bounded in code.
     PLACEMENT_DECISION_SUMMARY = "placement.decision.summary"
 
-    # Placement success/failure: include ``multi_node_scheduling_enabled`` and ``placement_single_node_gate``
-    # (inverse) on emitted records for Loki/Grafana correlation (Phase 3b Step 7).
+    # Placement success/failure: ``multi_node_scheduling_enabled``, ``placement_single_node_gate``,
+    # and ``placement_reason`` (Phase 3b Step 7).
     SCHEDULER_NODE_SELECTED = "scheduler.node.selected"
     SCHEDULER_FAIRNESS_SPREAD_APPLIED = "scheduler.fairness_spread_applied"
 

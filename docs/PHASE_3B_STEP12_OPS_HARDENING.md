@@ -80,7 +80,7 @@ Search by **`devnest_event`** (message) or your JSON `extra` field names.
 
 | Topic | Event / signal | Key `extra` fields |
 |-------|----------------|-------------------|
-| **Placement** | `scheduler.node.selected` | `workspace_id`, `execution_node_id`, `node_key`, `requested_*`, `multi_node_scheduling_enabled`, `placement_single_node_gate` |
+| **Placement** | `scheduler.node.selected` | `workspace_id`, `execution_node_id`, `node_key`, `requested_*`, `multi_node_scheduling_enabled`, `placement_single_node_gate`, `placement_reason` |
 | | `placement.decision.summary` | `placement_summary` (single line, truncated digest of pool + effective free + sort policy) |
 | | `placement.no_schedulable_node` | `detail` (truncated), same gate flags |
 | **Gateway route target** | `gateway.route.registered` | `gateway_upstream_target`, **`gateway_route_target`** (same value; Traefik upstream), `node_key`, `execution_node_id`, `workspace_id`, `public_host` |
@@ -91,7 +91,7 @@ Search by **`devnest_event`** (message) or your JSON `extra` field names.
 ## 4. Rollback (fleet stays on node 1)
 
 1. **Drain** secondary node: `POST /internal/execution-nodes/drain` with its `node_key`.  
-2. **Disable multi-node scheduling:** set **`DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false`** on API + worker; restart — new placements use **primary** (`min(execution_node.id)` among READY+schedulable). See [Step 7](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md).  
+2. **Disable multi-node scheduling:** set **`DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false`** or unset (default **false** since Step 7); restart API + worker — new placements use **primary** (`min(execution_node.id)` among READY+schedulable). See [Step 7](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md).  
 3. **Keep node 1 serving:** ensure node 1 is **READY**, **`schedulable=true`**, heartbeats healthy if gating is on.
 
 ---

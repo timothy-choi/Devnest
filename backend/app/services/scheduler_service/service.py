@@ -28,6 +28,22 @@ from .policy import can_fit_workspace_effective, rank_candidate_nodes
 logger = logging.getLogger(__name__)
 
 
+def _placement_telemetry() -> dict[str, bool | str]:
+    """Structured fields for placement logs (Step 7): gate + human-readable selection reason."""
+    mns = bool(get_settings().devnest_enable_multi_node_scheduling)
+    gate = not mns
+    reason = (
+        "primary_only:min_execution_node_id_among_ready_schedulable_after_provider_filter"
+        if gate
+        else "multi_node:rank_by_effective_free_resources_then_spread_then_node_key_stable_tiebreak"
+    )
+    return {
+        "multi_node_scheduling_enabled": mns,
+        "placement_single_node_gate": gate,
+        "placement_reason": reason,
+    }
+
+
 def schedule_workspace(
     session: Session,
     *,
@@ -58,8 +74,7 @@ def schedule_workspace(
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
-            multi_node_scheduling_enabled=bool(get_settings().devnest_enable_multi_node_scheduling),
-            placement_single_node_gate=not bool(get_settings().devnest_enable_multi_node_scheduling),
+            **_placement_telemetry(),
         )
         try:
             explain = explain_placement_decision(
@@ -104,8 +119,7 @@ def schedule_workspace(
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
-            multi_node_scheduling_enabled=bool(get_settings().devnest_enable_multi_node_scheduling),
-            placement_single_node_gate=not bool(get_settings().devnest_enable_multi_node_scheduling),
+            **_placement_telemetry(),
             detail=str(e)[:2000],
         )
         return WorkspaceScheduleResult(

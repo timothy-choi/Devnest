@@ -2,7 +2,7 @@
 
 **Goal:** Normal scheduler behavior across every **READY** + **`schedulable=true`** node in the provider pool (no hardcoded node ids). Capacity-first ordering, then **active workload count** (spread), then **`node_key`** tiebreak.
 
-**Related:** [Step 7 — Multi-node flag](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md) (now **defaults to multi-node on**), [WORKSPACE_NODES.md](./WORKSPACE_NODES.md), [Step 8 — Optional pinned operator CREATE](./PHASE_3B_STEP8_CONTROLLED_NODE2_TEST_WORKSPACE.md) (default **off**; not required for fleet spread).
+**Related:** [Step 7 — Multi-node flag](./PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md) (defaults **off**; set **`DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=true`** for spread), [WORKSPACE_NODES.md](./WORKSPACE_NODES.md), [Step 8 — Optional pinned operator CREATE](./PHASE_3B_STEP8_CONTROLLED_NODE2_TEST_WORKSPACE.md) (default **off**; not required for fleet spread).
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## 2. Verification (manual / staging)
 
-Prerequisites: API + worker share DB; both execution nodes **READY**, **`schedulable=true`**, heartbeats fresh if **`DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT=true`**.
+Prerequisites: API + worker share DB; set **`DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=true`** on both; both execution nodes **READY**, **`schedulable=true`**, heartbeats fresh if **`DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT=true`**.
 
 1. **Baseline pool**  
    `GET /internal/execution-nodes/` (infrastructure key) — confirm two rows with `schedulable: true`, distinct `node_key`, and non-zero `available_workspace_slots`.
@@ -70,13 +70,13 @@ psql "${DATABASE_URL}" -c "
 "
 ```
 
-Optional: **force primary-only** for a rollback test — set `DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false` on API + worker, restart, repeat a create; only **min(`execution_node.id`)** among READY+schedulable should receive new placements.
+**Primary-only (default):** with `DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false` (default), only **min(`execution_node.id`)** among READY+schedulable receives new placements. Set the flag **true** to exercise multi-node spread.
 
 ---
 
 ## 4. Rollback
 
-1. Set **`DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false`** on **API** and **workspace job worker** (and any other process that calls `schedule_workspace` / `reserve_node_for_workspace`).  
+1. Set **`DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false`** on **API** and **workspace job worker** (or unset; default is **false** since Step 7).  
 2. Restart those processes.  
 3. No DB migration. Existing workspace pins are unchanged.  
 4. Keep optional Step 8 pinned routes **disabled** (`DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT=false`) unless you explicitly need pinned diagnostics.

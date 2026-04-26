@@ -81,6 +81,7 @@ def test_schedule_workspace_success_logs_single_node_gate_when_disabled(
     assert kwargs["multi_node_scheduling_enabled"] is False
     assert kwargs["placement_single_node_gate"] is True
     assert kwargs["workspace_id"] == 42
+    assert "primary_only" in str(kwargs.get("placement_reason", ""))
     get_settings.cache_clear()
 
 
@@ -101,12 +102,12 @@ def test_schedule_workspace_logs_placement_decision_summary(
 
 @patch("app.services.scheduler_service.service.log_event")
 @patch("app.services.scheduler_service.service.reserve_node_for_workspace")
-def test_schedule_workspace_success_logs_multi_node_pool_by_default(
+def test_schedule_workspace_success_logs_multi_node_when_env_true(
     mock_reserve: MagicMock,
     mock_log: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", raising=False)
+    monkeypatch.setenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", "true")
     get_settings.cache_clear()
     mock_reserve.return_value = _chosen()
     schedule_workspace(MagicMock(), workspace_id=99)
@@ -115,4 +116,24 @@ def test_schedule_workspace_success_logs_multi_node_pool_by_default(
     assert kwargs["multi_node_scheduling_enabled"] is True
     assert kwargs["placement_single_node_gate"] is False
     assert kwargs["workspace_id"] == 99
+    assert "multi_node" in str(kwargs.get("placement_reason", ""))
+    get_settings.cache_clear()
+
+
+@patch("app.services.scheduler_service.service.log_event")
+@patch("app.services.scheduler_service.service.reserve_node_for_workspace")
+def test_schedule_workspace_default_env_logs_primary_gate(
+    mock_reserve: MagicMock,
+    mock_log: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", raising=False)
+    get_settings.cache_clear()
+    mock_reserve.return_value = _chosen()
+    schedule_workspace(MagicMock(), workspace_id=7)
+    sel = next(c for c in mock_log.call_args_list if len(c.args) > 1 and c.args[1] == LogEvent.SCHEDULER_NODE_SELECTED)
+    kwargs = sel.kwargs
+    assert kwargs["multi_node_scheduling_enabled"] is False
+    assert kwargs["placement_single_node_gate"] is True
+    assert "primary_only" in str(kwargs.get("placement_reason", ""))
     get_settings.cache_clear()
