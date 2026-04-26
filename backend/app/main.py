@@ -27,7 +27,9 @@ from app.services.auth_service.api.routers.auth import router as auth_router
 from app.services.notification_service.api.routers import internal_notifications_router, notifications_router
 from app.services.user_service.api.routers import users_router
 from app.services.autoscaler_service.api.routers import internal_autoscaler_router
-from app.services.infrastructure_service.api.routers import internal_execution_nodes_router
+from app.services.infrastructure_service.api.routers.internal_execution_nodes import (
+    router as internal_execution_nodes_router,
+)
 from app.services.policy_service.api.routers import router as policy_router
 from app.services.policy_service.errors import PolicyViolationError
 from app.services.quota_service.api.routers import router as quota_router
@@ -112,6 +114,16 @@ async def lifespan(_app: FastAPI):
             "the browser-visible UI origin so OAuth redirects and frontend links are correct."
         )
     init_db()
+    for _route in _app.routes:
+        p = getattr(_route, "path", None) or ""
+        if p.endswith("/internal/execution-nodes/heartbeat"):
+            _lifespan_logger.info(
+                "devnest_phase3a_execution_node_heartbeat_route_registered",
+                extra={"path": p, "methods": sorted(getattr(_route, "methods", None) or [])},
+            )
+            break
+    else:
+        _lifespan_logger.warning("devnest_phase3a_execution_node_heartbeat_route_not_found_in_app_routes")
     # Attach the event loop to the in-process SSE event bus so worker threads can
     # signal SSE generators via call_soon_threadsafe.
     get_event_bus().attach_event_loop(asyncio.get_event_loop())
@@ -167,6 +179,7 @@ app.include_router(notifications_router)
 app.include_router(internal_notifications_router)
 app.include_router(internal_workspace_jobs_router)
 app.include_router(internal_workspace_reconcile_router)
+# Infrastructure execution-node admin (``internal_execution_nodes.router``: list, heartbeat, EC2 lifecycle).
 app.include_router(internal_execution_nodes_router)
 app.include_router(internal_autoscaler_router)
 app.include_router(audit_router)

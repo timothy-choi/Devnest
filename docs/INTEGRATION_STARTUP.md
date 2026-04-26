@@ -27,6 +27,10 @@ For `backend` / `workspace-worker`, Docker Compose **`environment:` overrides `e
 
 3. Wait for `backend` health (uses `GET /ready`, which checks database connectivity after Alembic migrations).
 
+### Execution node heartbeat
+
+Integration Compose enables a **dedicated heartbeat thread** in `workspace-worker` (`DEVNEST_NODE_HEARTBEAT_ENABLED=true`, `INTERNAL_API_BASE_URL=http://backend:8000`). Look for `execution_node_heartbeat_emitter_started` and `execution_node_heartbeat_success` in worker logs. `./scripts/deploy_integration.sh` **warns** (non-fatal) if none of those lines appear yet. Ops runbook: [Execution node heartbeat](./EXECUTION_NODE_HEARTBEAT.md).
+
 ## EC2 / remote browsers (RDS + public DNS)
 
 ### Required environment (host / CI before `compose up`)

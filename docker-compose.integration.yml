@@ -229,6 +229,11 @@ services:
       DEVNEST_ENV: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
+      # Phase 3a: dedicated heartbeat thread POSTs /internal/execution-nodes/heartbeat on an interval.
+      INTERNAL_API_BASE_URL: "http://backend:8000"
+      DEVNEST_NODE_HEARTBEAT_ENABLED: "true"
+      DEVNEST_NODE_KEY: "node-1"
+      DEVNEST_NODE_HEARTBEAT_INTERVAL_SECONDS: "30"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
       <<: *workspace_snapshot_env
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects

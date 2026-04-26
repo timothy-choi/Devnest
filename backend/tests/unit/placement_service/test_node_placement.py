@@ -7,6 +7,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.libs.common.config import get_settings
 from app.services.placement_service.errors import (
     ExecutionNodeNotFoundError,
     InvalidPlacementParametersError,
@@ -19,6 +20,12 @@ from app.services.placement_service.node_placement import (
     reserve_node_for_workspace,
     select_node_for_workspace,
 )
+
+
+@pytest.fixture(autouse=True)
+def _refresh_get_settings_cache_after_each_placement_test() -> None:
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -136,6 +143,51 @@ def test_select_node_insufficient_capacity(placement_engine: Engine) -> None:
                 requested_memory_mb=512,
                 requested_disk_mb=4096,
             )
+
+
+def test_select_node_stale_heartbeat_still_schedulable_when_gating_off(placement_engine: Engine) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    stale = datetime.now(timezone.utc) - timedelta(days=1)
+    with Session(placement_engine) as session:
+        n = _add_node(session, key="stale")
+        n.last_heartbeat_at = stale
+        session.add(n)
+        session.commit()
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "stale"
+
+
+def test_select_node_require_fresh_heartbeat_excludes_stale(monkeypatch: pytest.MonkeyPatch, placement_engine: Engine) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT", "true")
+    monkeypatch.setenv("DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS", "60")
+    get_settings.cache_clear()
+    stale = datetime.now(timezone.utc) - timedelta(seconds=120)
+    with Session(placement_engine) as session:
+        n = _add_node(session, key="stale")
+        n.last_heartbeat_at = stale
+        session.add(n)
+        session.commit()
+        with pytest.raises(NoSchedulableNodeError):
+            select_node_for_workspace(session, workspace_id=1)
+
+
+def test_select_node_require_fresh_heartbeat_allows_recent(monkeypatch: pytest.MonkeyPatch, placement_engine: Engine) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT", "true")
+    monkeypatch.setenv("DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS", "60")
+    get_settings.cache_clear()
+    fresh = datetime.now(timezone.utc) - timedelta(seconds=10)
+    with Session(placement_engine) as session:
+        n = _add_node(session, key="fresh")
+        n.last_heartbeat_at = fresh
+        session.add(n)
+        session.commit()
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "fresh"
 
 
 def test_get_node_by_key_and_id(placement_engine: Engine) -> None:

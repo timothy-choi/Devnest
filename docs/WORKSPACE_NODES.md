@@ -19,7 +19,7 @@ The `execution_node` row already carries the information Phase 1 needs:
 | Host hints | `hostname`, `private_ip`, `public_ip` |
 | Slot ceiling | `max_workspaces` |
 | Status | `status` (`READY`, `DRAINING`, `NOT_READY`, …) and `schedulable` |
-| Heartbeat | `last_heartbeat_at` (optional; future agents) |
+| Heartbeat | `last_heartbeat_at` plus `metadata_json["heartbeat"]` (see [Execution node heartbeat](./EXECUTION_NODE_HEARTBEAT.md)) |
 
 Mapping to informal “healthy / draining / unavailable”: **`READY` + `schedulable`** ≈ healthy; **`DRAINING`** ≈ draining; other statuses or `schedulable=false` ≈ unavailable for new placement.
 
@@ -41,6 +41,8 @@ Revision **`0011_workspace_execution_node_fk`**:
 
 `GET /internal/execution-nodes/` (scoped `X-Internal-API-Key` for **infrastructure**) returns each node plus **`active_workspace_slots`** and **`available_workspace_slots**`, using the same capacity cohort as placement (`count_active_workloads_on_node_key`). Responses intentionally **omit** `metadata_json` and SSH-related columns so operator JSON does not carry opaque config blobs or connection secrets.
 
+`POST /internal/execution-nodes/heartbeat` records liveness and a small metrics snapshot; see [Execution node heartbeat](./EXECUTION_NODE_HEARTBEAT.md).
+
 ## Phase 2 (single-node scheduling)
 
 Workspace **create** selects an execution node via ``schedule_workspace`` → ``reserve_node_for_workspace`` (same policy as bring-up jobs): **READY**, **schedulable**, CPU/memory/disk headroom, and **slot limits**. Slots use both:
@@ -49,6 +51,10 @@ Workspace **create** selects an execution node via ``schedule_workspace`` → ``
 - **Runtime pins:** ``WorkspaceRuntime.node_key`` with the same non-terminal cohort (covers legacy rows without an FK).
 
 Both counts must stay **below** ``execution_node.max_workspaces``. If no node qualifies, the API returns **503** with a **short, user-facing** ``detail`` string and **does not** insert a workspace row. Verbose placement diagnostics remain in application logs (``placement.no_schedulable_node`` / scheduler events), not in the HTTP body.
+
+## Phase 3a (heartbeat only)
+
+Single-node (and future multi-node) **liveness** without changing Traefik or Docker placement rules. Optional placement gating behind `DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT` — default off. Details: [Execution node heartbeat](./EXECUTION_NODE_HEARTBEAT.md).
 
 ## Later phases
 

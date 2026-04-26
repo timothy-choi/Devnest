@@ -194,6 +194,8 @@ class Settings(BaseSettings):
     internal_api_key_autoscaler: str = ""
     internal_api_key_infrastructure: str = ""
     internal_api_key_notifications: str = ""
+    # Workers / sidecars: base URL for calling FastAPI internal routes (e.g. http://backend:8000). Env: INTERNAL_API_BASE_URL.
+    internal_api_base_url: str = ""
     # When > 0, every non-empty internal API secret (legacy + scoped) must be at least this many characters.
     # Default 0 disables (local/CI). Production: set via DEVNEST_INTERNAL_API_KEY_MIN_LENGTH (e.g. 24).
     devnest_internal_api_key_min_length: int = 0
@@ -698,6 +700,21 @@ class Settings(BaseSettings):
     devnest_worker_poll_interval_seconds: int = 5
     # Max workspace jobs to dequeue and process per tick.
     devnest_worker_batch_size: int = 5
+    # Phase 3a: workspace-worker (or in-process worker tick) writes execution_node.last_heartbeat_at.
+    devnest_worker_emit_execution_node_heartbeat: bool = True
+    devnest_execution_node_heartbeat_emitter_version: str = "worker-embedded"
+    # When true, new placement skips nodes whose last_heartbeat_at is NULL or older than max age.
+    devnest_require_fresh_node_heartbeat: bool = False
+    devnest_node_heartbeat_max_age_seconds: int = 300
+    # Dedicated workspace-worker heartbeat loop: POST /internal/execution-nodes/heartbeat on an interval.
+    devnest_node_heartbeat_enabled: bool = False
+    # Heartbeat ``node_key`` when the dedicated emitter is enabled; empty uses DEVNEST_NODE_ID / node-1.
+    devnest_node_key: str = ""
+    devnest_node_heartbeat_interval_seconds: int = 30
+    # When set (e.g. http://backend:8000 in Docker Compose), workspace-worker POSTs heartbeats to
+    # ``{base}/internal/execution-nodes/heartbeat`` so ``last_heartbeat_at`` is written via the API
+    # (same INTERNAL_API_KEY / infrastructure scope as other internal routes). Empty = direct DB write.
+    devnest_worker_heartbeat_internal_api_base_url: str = ""
 
     # ── Automated reconcile loop ─────────────────────────────────────────────
     # When true, the FastAPI process runs a background reconcile tick that enqueues
@@ -825,6 +842,59 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 5
         return max(1, min(n, 50))
+
+    @field_validator(
+        "devnest_worker_emit_execution_node_heartbeat",
+        "devnest_require_fresh_node_heartbeat",
+        "devnest_node_heartbeat_enabled",
+        mode="before",
+    )
+    @classmethod
+    def _parse_execution_node_heartbeat_flags(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @field_validator("devnest_node_heartbeat_interval_seconds", mode="before")
+    @classmethod
+    def _coerce_node_heartbeat_interval_seconds(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 30
+        return max(5, min(n, 3600))
+
+    @field_validator("devnest_node_heartbeat_max_age_seconds", mode="before")
+    @classmethod
+    def _coerce_node_heartbeat_max_age_seconds(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 300
+        return max(30, min(n, 86_400))
+
+    @field_validator("devnest_node_key", mode="before")
+    @classmethod
+    def _strip_devnest_node_key(cls, v):  # noqa: ANN001
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @field_validator("internal_api_base_url", mode="before")
+    @classmethod
+    def _strip_internal_api_base_url(cls, v):  # noqa: ANN001
+        if v is None:
+            return ""
+        return str(v).strip().rstrip("/")
+
+    @field_validator("devnest_worker_heartbeat_internal_api_base_url", mode="before")
+    @classmethod
+    def _strip_worker_heartbeat_internal_api_base_url(cls, v):  # noqa: ANN001
+        if v is None:
+            return ""
+        return str(v).strip().rstrip("/")
 
     @field_validator(
         "devnest_autoscaler_enabled",

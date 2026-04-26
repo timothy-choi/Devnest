@@ -104,6 +104,7 @@ def get_db() -> Generator[Session, None, None]:
 def init_db() -> None:
     engine = get_engine()
     from app.services.placement_service.bootstrap import ensure_default_local_execution_node
+    from app.services.placement_service.node_heartbeat import log_default_execution_node_heartbeat_diagnostics
 
     settings = get_settings()
     if settings.devnest_db_auto_create:
@@ -118,3 +119,5 @@ def init_db() -> None:
             )
             prune_orphaned_workspace_project_dirs(settings.workspace_projects_base, live_refs)
         session.commit()
+    with Session(engine) as diag_session:
+        log_default_execution_node_heartbeat_diagnostics(diag_session)

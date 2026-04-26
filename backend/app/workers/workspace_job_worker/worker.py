@@ -61,6 +61,7 @@ from app.services.placement_service.constants import (
 )
 from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
 from app.services.placement_service.models import ExecutionNode
+from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
@@ -2277,3 +2278,4 @@ def poll_workspace_jobs_tick(
         return run_pending_jobs(holder, get_orchestrator=get_orchestrator, limit=limit)
     finally:
         holder.close()
+        try_emit_default_local_execution_node_heartbeat(bind)
