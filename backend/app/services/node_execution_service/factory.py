@@ -113,6 +113,13 @@ def _topology_ip_should_use_host_nsenter() -> bool:
     )
 
 
+def _ec2_traefik_routing_host(node: ExecutionNode) -> str | None:
+    if (node.provider_type or "").strip().lower() != ExecutionNodeProviderType.EC2.value:
+        return None
+    h = _execution_connect_host(node)
+    return h or None
+
+
 def _bundle_local_docker() -> NodeExecutionBundle:
     try:
         client = docker.from_env()
@@ -136,6 +143,7 @@ def _bundle_local_docker() -> NodeExecutionBundle:
         service_reachability_runner=service_runner,
         _ensure_project_dir=default_local_ensure_workspace_project_dir,
         runtime_adapter=None,
+        traefik_routing_host=None,
     )
 
 
@@ -187,6 +195,7 @@ def _bundle_ssm_docker(node: ExecutionNode) -> NodeExecutionBundle:
         service_reachability_runner=ssm_runner,
         _ensure_project_dir=_ensure,
         runtime_adapter=runtime,
+        traefik_routing_host=_ec2_traefik_routing_host(node),
     )
 
 
@@ -238,4 +247,5 @@ def _bundle_ssh_docker(node: ExecutionNode) -> NodeExecutionBundle:
         service_reachability_runner=ssh_runner,
         _ensure_project_dir=_ensure,
         runtime_adapter=None,
+        traefik_routing_host=_ec2_traefik_routing_host(node),
     )

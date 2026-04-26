@@ -67,8 +67,8 @@ def test_archive_path_returns_local_staging_path():
         path = p.archive_path(workspace_id=WS_ID, snapshot_id=SNAP_ID)
         assert path.endswith(f"snapshot-{SNAP_ID}.tar.gz")
         assert f"ws-{WS_ID}" in path
-        # archive_path should be under the temp_dir
-        assert path.startswith(tmp)
+        # archive_path should be under the temp_dir (compare resolved paths for macOS /var → /private/var)
+        assert str(Path(path).resolve()).startswith(str(Path(tmp).resolve()))
 
 
 def test_bucket_required():
@@ -103,6 +103,35 @@ def test_upload_and_download_round_trip():
         p.download_archive(workspace_id=WS_ID, snapshot_id=SNAP_ID)
         assert staging.exists()
         assert staging.read_bytes() == b"fake-tar-content"
+
+
+@mock_aws
+def test_upload_archive_sets_object_metadata_for_source_node():
+    import boto3 as _boto3
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _provider(tmp)
+        cli = _boto3.client("s3", region_name=REGION)
+        _create_bucket(cli)
+
+        staging = Path(p.archive_path(workspace_id=WS_ID, snapshot_id=SNAP_ID))
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        staging.write_bytes(b"x")
+
+        p.upload_archive(
+            workspace_id=WS_ID,
+            snapshot_id=SNAP_ID,
+            source_node_key="node-worker-2",
+            source_execution_node_id=42,
+        )
+
+        key = f"{PREFIX}/ws-{WS_ID}/snapshot-{SNAP_ID}.tar.gz"
+        head = cli.head_object(Bucket=BUCKET, Key=key)
+        meta = head.get("Metadata") or {}
+        assert meta.get("devnest-workspace-id") == str(WS_ID)
+        assert meta.get("devnest-snapshot-id") == str(SNAP_ID)
+        assert meta.get("devnest-source-node-key") == "node-worker-2"
+        assert meta.get("devnest-source-execution-node-id") == "42"
 
 
 # ---------------------------------------------------------------------------

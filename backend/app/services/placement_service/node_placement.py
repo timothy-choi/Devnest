@@ -46,7 +46,8 @@ def _provider_type_clause():
     return None
 
 
-def _schedulable_base_predicates():
+def _ready_schedulable_provider_predicates() -> list:
+    """READY + schedulable + optional ``DEVNEST_NODE_PROVIDER`` filter (no heartbeat / no single-node gate)."""
     preds = [
         ExecutionNode.schedulable == True,  # noqa: E712
         ExecutionNode.status == ExecutionNodeStatus.READY.value,
@@ -57,8 +58,34 @@ def _schedulable_base_predicates():
     return preds
 
 
+def _single_node_primary_id_clause():
+    """When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false, restrict to ``MIN(id)`` in the ready pool."""
+    if bool(get_settings().devnest_enable_multi_node_scheduling):
+        return None
+    inner = _ready_schedulable_provider_predicates()
+    min_id_sq = (
+        select(func.min(ExecutionNode.id))
+        .select_from(ExecutionNode)
+        .where(and_(*inner))
+        .scalar_subquery()
+    )
+    return ExecutionNode.id == min_id_sq
+
+
+def _schedulable_base_predicates():
+    preds = list(_ready_schedulable_provider_predicates())
+    sng = _single_node_primary_id_clause()
+    if sng is not None:
+        preds.append(sng)
+    return preds
+
+
 def schedulable_placement_predicates() -> list:
-    """Public: SQLAlchemy boolean clauses for READY + schedulable (+ ``devnest_node_provider`` filter).
+    """Public: SQLAlchemy boolean clauses for the placement pool (READY + schedulable + provider filter).
+
+    When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false (default), also restricts candidates to the
+    primary node: lowest ``execution_node.id`` among rows matching the predicates above (heartbeat not
+    applied here; see :func:`select_node_for_workspace`).
 
     Does **not** include the optional heartbeat freshness gate; that applies only in
     :func:`select_node_for_workspace` when ``DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT`` is true.
@@ -144,6 +171,11 @@ def select_node_for_workspace(
     within ``DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS`` (default off so bootstrap without a worker
     still schedules).
 
+    When ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` is false (default), only the **primary** execution
+    node — the one with the lowest ``id`` among READY+schedulable rows after the provider filter —
+    is eligible. Additional registered nodes (e.g. node 2 at ``schedulable=true``) are ignored until
+    the flag is enabled.
+
     Raises:
         InvalidPlacementParametersError: when request sizes are not positive.
         NoSchedulableNodeError: when no node qualifies.
@@ -208,6 +240,13 @@ def select_node_for_workspace(
                 "candidates also need a recent last_heartbeat_at (see DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS "
                 "and docs/EXECUTION_NODE_HEARTBEAT.md)."
             )
+        single_hint = ""
+        if not bool(get_settings().devnest_enable_multi_node_scheduling):
+            single_hint = (
+                " Single-node scheduling gate is on (DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false): "
+                "only the primary execution node (lowest id among READY+schedulable after the provider "
+                "filter) is eligible for new placement; see docs/PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md."
+            )
         raise NoSchedulableNodeError(
             "no execution node matches placement policy "
             f"(need status=READY, schedulable=true, effective_free_cpu>={req_cpu}, "
@@ -218,7 +257,7 @@ def select_node_for_workspace(
             f"effective capacity — check execution_node, workspace_runtime reservations, and bootstrap; "
             f"diagnostic max_effective_free_cpu≈{max_cpu:.4f}, "
             f"max_effective_free_memory_mb≈{max_mem} in that pool)"
-            f"{pool_hint}{hb_hint}",
+            f"{pool_hint}{hb_hint}{single_hint}",
         )
     return row
 

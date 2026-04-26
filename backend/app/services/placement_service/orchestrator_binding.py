@@ -8,7 +8,8 @@ bring-up. New placement for bring-up class jobs goes through :mod:`app.services.
 
 **Production:** placement is authoritative — :class:`~app.services.workspace_service.models.WorkspaceRuntime`
 must carry ``node_id`` and ``topology_id`` for every job that mutates or inspects runtime state,
-except ``CREATE`` (which schedules fresh) and ``START`` on a workspace with no runtime row yet (first start).
+except ``CREATE`` (which schedules fresh, or uses **operator pinned** placement when
+:mod:`app.services.placement_service.operator_pinned_create` matches) and ``START`` on a workspace with no runtime row yet (first start).
 ``REPO_IMPORT`` also requires that persisted runtime (it runs git in the placed container via the node
 execution bundle; the worker resolves placement but does not build a full orchestrator for that job).
 New scheduling in staging/production requires ``ExecutionNode.default_topology_id``; env-based
@@ -25,10 +26,12 @@ import os
 from sqlmodel import Session, select
 
 from app.libs.topology.models import Topology
+from app.services.placement_service.models import ExecutionNode, ExecutionNodeStatus
 from app.services.scheduler_service.service import schedule_workspace
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceJobType, WorkspaceRuntime
 
 from .errors import AuthoritativePlacementError, InvalidPlacementParametersError, NoSchedulableNodeError
+from .operator_pinned_create import workspace_uses_operator_pinned_create
 from .runtime_policy import placement_strict_enforced, runtime_env_fallback_allowed, runtime_placement_row_complete
 
 
@@ -82,6 +85,39 @@ def _schedule_workspace_placement(session: Session, workspace_id: int) -> tuple[
     return node.node_key, tid
 
 
+def _pinned_operator_create_placement(session: Session, ws: Workspace) -> tuple[str, int]:
+    """Placement for operator pinned test workspaces (no scheduler)."""
+    assert ws.execution_node_id is not None
+    node = session.get(ExecutionNode, int(ws.execution_node_id))
+    if node is None:
+        raise InvalidPlacementParametersError(
+            f"pinned CREATE: execution_node id={int(ws.execution_node_id)} not found",
+        )
+    if (node.status or "").strip() != ExecutionNodeStatus.READY.value:
+        raise InvalidPlacementParametersError(
+            f"pinned CREATE: execution_node {node.node_key!r} is not READY (status={node.status!r})",
+        )
+    if not bool(node.schedulable):
+        raise InvalidPlacementParametersError(
+            f"pinned CREATE: execution_node {node.node_key!r} is not schedulable",
+        )
+    if placement_strict_enforced():
+        if node.default_topology_id is None:
+            raise InvalidPlacementParametersError(
+                "Strict production/staging placement requires execution_node.default_topology_id for "
+                "pinned operator CREATE; set it on the target ExecutionNode.",
+            )
+        topo = int(node.default_topology_id)
+    else:
+        topo = node.default_topology_id if node.default_topology_id is not None else _topology_id_from_env()
+    tid = int(topo)
+    _validate_topology_catalog_exists(session, tid)
+    nk = (node.node_key or "").strip()
+    if not nk:
+        raise InvalidPlacementParametersError("pinned CREATE: execution_node has empty node_key")
+    return nk, tid
+
+
 _JOBS_NEED_RUNTIME_PLACEMENT = frozenset(
     {
         WorkspaceJobType.START.value,
@@ -118,6 +154,8 @@ def resolve_orchestrator_placement(
     strict = placement_strict_enforced()
 
     if jt == WorkspaceJobType.CREATE.value:
+        if workspace_uses_operator_pinned_create(ws):
+            return _pinned_operator_create_placement(session, ws)
         return _schedule_workspace_placement(session, wid)
 
     if jt not in _JOBS_NEED_RUNTIME_PLACEMENT:

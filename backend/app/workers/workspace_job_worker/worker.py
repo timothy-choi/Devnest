@@ -63,6 +63,7 @@ from app.services.placement_service.errors import NoSchedulableNodeError, Placem
 from app.services.placement_service.models import ExecutionNode
 from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
+from app.services.gateway_client.workspace_route_upstream import traefik_upstream_for_registration
 from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
@@ -372,6 +373,7 @@ def _apply_runtime_bringup_like(
     internal_endpoint: str | None,
     config_version: int,
     probe_healthy: bool | None,
+    gateway_route_target: str | None = None,
     reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
     reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
     reserved_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
@@ -384,6 +386,7 @@ def _apply_runtime_bringup_like(
     rt.container_id = container_id
     rt.container_state = container_state
     rt.internal_endpoint = internal_endpoint
+    rt.gateway_route_target = gateway_route_target
     rt.config_version = config_version
     nk = (node_id or "").strip()
     if nk:
@@ -417,6 +420,7 @@ def _sync_runtime_after_failed_bringup(session: Session, workspace_id: int, resu
         if result.container_state is not None:
             rt.container_state = result.container_state
         rt.internal_endpoint = result.internal_endpoint
+        rt.gateway_route_target = result.gateway_route_target
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
         rt.reserved_disk_mb = 0
@@ -449,6 +453,7 @@ def _sync_runtime_after_bringup_exception(session: Session, workspace_id: int, e
         if exc.rollback_container_state is not None:
             rt.container_state = exc.rollback_container_state
         rt.internal_endpoint = None
+        rt.gateway_route_target = None
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
         rt.reserved_disk_mb = 0
@@ -476,6 +481,7 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
     if result.topology_detached is not False:
         rt.topology_id = None
     rt.internal_endpoint = None
+    rt.gateway_route_target = None
     rt.reserved_cpu = 0.0
     rt.reserved_memory_mb = 0
     rt.reserved_disk_mb = 0
@@ -498,6 +504,7 @@ def _clear_runtime_after_delete(session: Session, workspace_id: int) -> None:
     row.container_id = None
     row.container_state = "deleted"
     row.internal_endpoint = None
+    row.gateway_route_target = None
     row.reserved_cpu = 0.0
     row.reserved_memory_mb = 0
     row.reserved_disk_mb = 0
@@ -585,27 +592,46 @@ def _gateway_default_public_host(workspace_id: int, base_domain: str) -> str:
     return f"ws-{workspace_id}.{dom}"
 
 
-def _gateway_try_register_running(ws: Workspace, internal_endpoint: str | None) -> None:
+def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
     """Notify route-admin after RUNNING; failures are logged only (control plane stays authoritative)."""
     try:
         settings = get_settings()
         if not settings.devnest_gateway_enabled:
             return
-        ep = (internal_endpoint or "").strip()
-        if not ep:
-            logger.debug(
-                "gateway_register_skipped_no_internal_endpoint",
-                extra={"workspace_id": ws.workspace_id},
-            )
-            return
         wid = ws.workspace_id
         if wid is None:
+            return
+        rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+        if rt is None:
+            return
+        upstream = traefik_upstream_for_registration(rt)
+        if not upstream:
+            logger.debug(
+                "gateway_register_skipped_no_upstream",
+                extra={"workspace_id": wid},
+            )
             return
         public = (ws.public_host or "").strip() or _gateway_default_public_host(
             int(wid),
             settings.devnest_base_domain,
         )
-        DevnestGatewayClient.from_settings(settings).register_route(str(wid), ep, public)
+        nk = ((rt.node_id or "").strip() or None)
+        logger.info(
+            "gateway_route_register_attempt",
+            extra={
+                "workspace_id": wid,
+                "node_key": nk,
+                "execution_node_id": ws.execution_node_id,
+                "gateway_upstream_target": upstream,
+            },
+        )
+        DevnestGatewayClient.from_settings(settings).register_route(
+            str(wid),
+            upstream,
+            public,
+            node_key=nk,
+            execution_node_id=ws.execution_node_id,
+        )
     except Exception as e:
         logger.warning(
             "gateway_register_failed_best_effort",
@@ -717,6 +743,7 @@ def _finalize_runtime_running_success(
     container_state: str | None,
     internal_endpoint: str | None,
     probe_healthy: bool | None,
+    gateway_route_target: str | None = None,
     reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
     reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
     reserved_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
@@ -737,6 +764,7 @@ def _finalize_runtime_running_success(
         internal_endpoint=internal_endpoint,
         config_version=config_version,
         probe_healthy=probe_healthy,
+        gateway_route_target=gateway_route_target,
         reserved_cpu=reserved_cpu,
         reserved_memory_mb=reserved_memory_mb,
         reserved_disk_mb=reserved_disk_mb,
@@ -754,7 +782,7 @@ def _finalize_runtime_running_success(
         reason="worker.runtime_running",
         correlation_id=job.correlation_id,
     )
-    _gateway_try_register_running(ws, internal_endpoint)
+    _gateway_try_register_running(session, ws)
     record_audit(
         session,
         action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
@@ -802,6 +830,7 @@ def _finalize_bringup_result(
             container_state=result.container_state,
             internal_endpoint=result.internal_endpoint,
             probe_healthy=result.probe_healthy,
+            gateway_route_target=result.gateway_route_target,
         )
         return
 
@@ -952,6 +981,7 @@ def _finalize_restart_result(
             container_state=result.container_state,
             internal_endpoint=result.internal_endpoint,
             probe_healthy=result.probe_healthy,
+            gateway_route_target=result.gateway_route_target,
         )
         return
 
@@ -987,6 +1017,7 @@ def _finalize_update_result(
             container_state=result.container_state,
             internal_endpoint=result.internal_endpoint,
             probe_healthy=result.probe_healthy,
+            gateway_route_target=result.gateway_route_target,
         )
         return
 
@@ -1000,6 +1031,7 @@ def _finalize_update_result(
         rt.container_id = result.container_id
         rt.container_state = result.container_state
         rt.internal_endpoint = result.internal_endpoint
+        rt.gateway_route_target = result.gateway_route_target
         rt.config_version = cfg_v
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
@@ -1074,10 +1106,18 @@ def _execute_snapshot_create_job(
 
     storage = get_snapshot_storage_provider()
     archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
+    rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    snapshot_cid: str | None = None
+    if ws.status == WorkspaceStatus.RUNNING.value and rt is not None:
+        st = (rt.container_state or "").strip().lower()
+        if st == "running" and (rt.container_id or "").strip():
+            snapshot_cid = str(rt.container_id).strip()
+
     res = orchestrator.export_workspace_filesystem_snapshot(
         workspace_id=wid_str,
         project_storage_key=ws.project_storage_key,
         archive_path=archive_path,
+        container_id=snapshot_cid,
     )
 
     if res.success:
@@ -1092,7 +1132,14 @@ def _execute_snapshot_create_job(
                     workspace_id=wid,
                     workspace_snapshot_id=sid,
                 )
-                storage.upload_archive(workspace_id=wid, snapshot_id=sid)
+                upload_kw: dict[str, object] = {}
+                if rt is not None:
+                    nk = (rt.node_id or "").strip() or None
+                    if nk:
+                        upload_kw["source_node_key"] = nk
+                if ws.execution_node_id is not None:
+                    upload_kw["source_execution_node_id"] = int(ws.execution_node_id)
+                storage.upload_archive(workspace_id=wid, snapshot_id=sid, **upload_kw)
                 log_event(
                     logger,
                     LogEvent.SNAPSHOT_STORAGE_UPLOAD_SUCCEEDED,

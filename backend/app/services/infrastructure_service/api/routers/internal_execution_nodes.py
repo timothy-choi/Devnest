@@ -36,10 +36,12 @@ from ...lifecycle import (
     sync_node_state,
     terminate_ec2_node,
 )
+from ...execution_node_smoke import ExecutionNodeSmokeUnsupportedError, run_read_only_execution_node_smoke
 from ...models import Ec2ProvisionRequest
 
 from ..schemas import (
     ExecutionNodeCapacityResponse,
+    ExecutionNodeSmokeResponse,
     ExecutionNodeSummaryResponse,
     NodeKeyOrIdBody,
     ProvisionExecutionNodeRequest,
@@ -173,6 +175,26 @@ def post_execution_node_heartbeat(
         schedulable=bool(node.schedulable),
         last_heartbeat_at=node.last_heartbeat_at,
     )
+
+
+@router.post(
+    "/smoke-read-only",
+    response_model=ExecutionNodeSmokeResponse,
+    summary="Run read-only docker info on an EC2 execution node (SSM or SSH smoke, Phase 3b)",
+)
+def post_execution_node_smoke_read_only(
+    body: NodeKeyOrIdBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSmokeResponse:
+    """Operator smoke: verify control plane can reach node Docker without changing ``schedulable``."""
+    _audit_mutation("smoke_read_only", **_select_kwargs(body))
+    try:
+        payload = run_read_only_execution_node_smoke(session, **_select_kwargs(body))
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except ExecutionNodeSmokeUnsupportedError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=e.message) from e
+    return ExecutionNodeSmokeResponse.model_validate(payload)
 
 
 def _merge_provision_request(body: ProvisionExecutionNodeRequest) -> Ec2ProvisionRequest:

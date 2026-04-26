@@ -143,19 +143,42 @@ class S3SnapshotStorageProvider:
         except OSError:
             pass
 
-    def upload_archive(self, *, workspace_id: int, snapshot_id: int) -> None:
+    def upload_archive(
+        self,
+        *,
+        workspace_id: int,
+        snapshot_id: int,
+        source_node_key: str | None = None,
+        source_execution_node_id: int | None = None,
+    ) -> None:
         """Upload the local staging archive to S3 after a successful export.
+
+        Optional ``source_*`` fields are stored as S3 object metadata (ASCII) for ops/debugging.
 
         Raises :class:`RuntimeError` on upload failure (caller should treat the snapshot as FAILED).
         """
         local_path = self._staging_path(workspace_id=workspace_id, snapshot_id=snapshot_id)
         key = self._s3_key(workspace_id=workspace_id, snapshot_id=snapshot_id)
+        meta: dict[str, str] = {
+            "devnest-workspace-id": str(int(workspace_id)),
+            "devnest-snapshot-id": str(int(snapshot_id)),
+        }
+        nk = (source_node_key or "").strip()
+        if nk:
+            meta["devnest-source-node-key"] = nk[:256]
+        if source_execution_node_id is not None:
+            meta["devnest-source-execution-node-id"] = str(int(source_execution_node_id))
         _logger.info(
             "s3_storage.upload_started",
-            extra={"bucket": self._bucket, "key": key, "local_path": str(local_path)},
+            extra={"bucket": self._bucket, "key": key, "local_path": str(local_path), "metadata_keys": list(meta)},
         )
         try:
-            self._client().upload_file(str(local_path), self._bucket, key)
+            self._client().upload_file(
+                str(local_path),
+                self._bucket,
+                key,
+                ExtraArgs={"Metadata": meta},
+            )
         except Exception as exc:
             _logger.error(
                 "s3_storage.upload_failed",

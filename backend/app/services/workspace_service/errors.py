@@ -59,3 +59,21 @@ class WorkspaceSchedulingInvalidError(WorkspaceServiceError):
     """Placement parameters are invalid for scheduling (e.g. non-positive resource request)."""
 
     pass
+
+
+class WorkspaceOperatorPinnedDisabledError(WorkspaceServiceError):
+    """Pinned operator test workspace path is disabled in settings."""
+
+    pass
+
+
+class WorkspaceOperatorPinnedNotAllowlistedError(WorkspaceServiceError):
+    """Target execution_node.id is not listed in DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS."""
+
+    pass
+
+
+class WorkspaceOperatorPinnedNodeInvalidError(WorkspaceServiceError):
+    """Pinned target node is missing or not READY+schedulable."""
+
+    pass

@@ -36,6 +36,7 @@ def gateway_route_needs_repair(
     observed_internal_endpoint: str | None,
     expected_public_host: str | None = None,
 ) -> bool:
+    """``observed_internal_endpoint`` is the desired route-admin ``target`` (Traefik upstream), not necessarily the topology IP."""
     ep = (observed_internal_endpoint or "").strip()
     if not ep:
         return False

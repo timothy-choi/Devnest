@@ -155,3 +155,16 @@ class RegisterExistingEc2Body(BaseModel):
 
 class SyncExecutionNodeBody(NodeKeyOrIdBody):
     promote_provisioning_when_ready: bool = True
+
+
+class ExecutionNodeSmokeResponse(BaseModel):
+    """Sanitized result of ``POST /internal/execution-nodes/smoke-read-only`` (Phase 3b Step 6)."""
+
+    ok: bool
+    node_key: str
+    execution_mode: str
+    schedulable: bool
+    status: str
+    command_status: str = Field(..., description="Success, Failed, or Skipped")
+    output_preview: str = Field(default="", max_length=2500, description="Truncated stdout/stderr or error text")
+    provider_instance_id: str | None = None

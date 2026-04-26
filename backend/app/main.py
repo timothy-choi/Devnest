@@ -37,6 +37,7 @@ from app.services.quota_service.errors import QuotaExceededError
 from app.services.usage_service.api.routers import router as usage_router
 from app.services.workspace_service.api.routers import (
     internal_gateway_auth_router,
+    internal_operator_test_workspaces_router,
     internal_workspace_jobs_router,
     internal_workspace_reconcile_router,
     snapshots_router,
@@ -181,6 +182,8 @@ app.include_router(internal_workspace_jobs_router)
 app.include_router(internal_workspace_reconcile_router)
 # Infrastructure execution-node admin (``internal_execution_nodes.router``: list, heartbeat, EC2 lifecycle).
 app.include_router(internal_execution_nodes_router)
+# Phase 3b Step 8: operator pinned test workspace (same internal API scope as execution nodes).
+app.include_router(internal_operator_test_workspaces_router)
 app.include_router(internal_autoscaler_router)
 app.include_router(audit_router)
 app.include_router(usage_router)

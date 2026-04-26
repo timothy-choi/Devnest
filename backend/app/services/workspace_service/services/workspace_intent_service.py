@@ -31,6 +31,9 @@ from app.services.workspace_service.errors import (
     WorkspaceGatewayUnavailableError,
     WorkspaceInvalidStateError,
     WorkspaceNotFoundError,
+    WorkspaceOperatorPinnedDisabledError,
+    WorkspaceOperatorPinnedNodeInvalidError,
+    WorkspaceOperatorPinnedNotAllowlistedError,
     WorkspaceSchedulingCapacityError,
     WorkspaceSchedulingInvalidError,
 )
@@ -59,6 +62,7 @@ from app.services.workspace_service.services.workspace_session_service import (
 )
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
+from app.services.gateway_client.workspace_route_upstream import registration_upstream
 from app.services.node_execution_service.workspace_project_dir import (
     workspace_bundle_project_data_present,
     workspace_project_dir_name,
@@ -69,6 +73,11 @@ from app.services.audit_service.service import record_audit
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
 from app.services.placement_service.bootstrap import ensure_default_local_execution_node
+from app.services.placement_service.models import ExecutionNode, ExecutionNodeStatus
+from app.services.placement_service.operator_pinned_create import (
+    PINNED_OPERATOR_TEST_WORKSPACE_NAME_PREFIX,
+    parse_pinned_create_execution_node_ids,
+)
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
@@ -500,8 +509,8 @@ def _ensure_gateway_route_ready_for_open(
 
     wid = ws.workspace_id
     assert wid is not None
-    internal_endpoint = (rt.internal_endpoint or "").strip()
-    if not internal_endpoint:
+    observed_upstream = registration_upstream(rt.gateway_route_target, rt.internal_endpoint)
+    if not observed_upstream:
         _best_effort_enqueue_reconcile_for_access_drift(
             session,
             workspace_id=wid,
@@ -528,7 +537,7 @@ def _ensure_gateway_route_ready_for_open(
     route_row = route_row_for_workspace(routes, wid)
     if not gateway_route_needs_repair(
         route_row=route_row,
-        observed_internal_endpoint=internal_endpoint,
+        observed_internal_endpoint=observed_upstream,
         expected_public_host=expected_public_host,
     ):
         host_probe = (expected_public_host or "").strip()
@@ -546,10 +555,13 @@ def _ensure_gateway_route_ready_for_open(
         public_host = (expected_public_host or "").strip()
         if not public_host:
             raise WorkspaceInvalidStateError("Workspace public host is not ready for gateway routing.")
+        nk = ((rt.node_id or "").strip() or None)
         client.register_route(
             str(wid),
-            internal_endpoint,
+            observed_upstream,
             public_host,
+            node_key=nk,
+            execution_node_id=ws.execution_node_id,
         )
     except (GatewayClientError, ValueError) as exc:
         _best_effort_enqueue_reconcile_for_access_drift(
@@ -584,7 +596,7 @@ def _ensure_gateway_route_ready_for_open(
         observed_row = route_row_for_workspace(routes_observed, wid)
         if not gateway_route_needs_repair(
             route_row=observed_row,
-            observed_internal_endpoint=internal_endpoint,
+            observed_internal_endpoint=observed_upstream,
             expected_public_host=expected_public_host,
         ):
             host_probe = (expected_public_host or "").strip()
@@ -1466,6 +1478,211 @@ def create_workspace(
         job_id=job.workspace_job_id,
         correlation_id=cid,
         metadata={"name": ws.name},
+    )
+    record_usage(
+        session,
+        workspace_id=int(ws.workspace_id),
+        owner_user_id=owner_user_id,
+        event_type=UsageEventType.WORKSPACE_CREATED.value,
+        correlation_id=cid,
+    )
+
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    session.refresh(ws)
+    session.refresh(job)
+
+    assert ws.workspace_id is not None
+    assert job.workspace_job_id is not None
+
+    return CreateWorkspaceResult(
+        workspace_id=ws.workspace_id,
+        job_id=job.workspace_job_id,
+        config_version=1,
+        status=ws.status,
+    )
+
+
+def create_operator_pinned_test_workspace(
+    session: Session,
+    *,
+    owner_user_id: int,
+    execution_node_id: int,
+    runtime: WorkspaceRuntimeSpecSchema | None = None,
+    description: str | None = None,
+    correlation_id: str | None = None,
+) -> CreateWorkspaceResult:
+    """
+    Queue CREATE for a workspace pinned to ``execution_node_id`` (operator / Phase 3b Step 8).
+
+    Requires ``DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT=true`` and ``execution_node_id`` listed in
+    ``DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS``. The workspace name is always prefixed with
+    ``devnest-op-pinned-test-`` so :func:`~app.services.placement_service.orchestrator_binding.resolve_orchestrator_placement`
+    can skip the scheduler on CREATE.
+    """
+    from app.libs.common.config import get_settings
+
+    settings = get_settings()
+    if not settings.devnest_allow_pinned_create_placement:
+        raise WorkspaceOperatorPinnedDisabledError(
+            "Pinned operator CREATE is disabled (set DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT=true).",
+        )
+    allow = parse_pinned_create_execution_node_ids(settings)
+    if not allow:
+        raise WorkspaceOperatorPinnedNotAllowlistedError(
+            "Set DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS to a comma-separated list of execution_node.id "
+            "values permitted for pinned operator test workspaces.",
+        )
+    eid = int(execution_node_id)
+    if eid not in allow:
+        raise WorkspaceOperatorPinnedNotAllowlistedError(
+            f"execution_node_id={eid} is not listed in DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS.",
+        )
+    chosen = session.get(ExecutionNode, eid)
+    if chosen is None:
+        raise WorkspaceOperatorPinnedNodeInvalidError(f"execution_node id={eid} not found.")
+    if (chosen.status or "").strip() != ExecutionNodeStatus.READY.value:
+        raise WorkspaceOperatorPinnedNodeInvalidError(
+            f"execution_node {chosen.node_key!r} must be READY (got status={chosen.status!r}).",
+        )
+    if not bool(chosen.schedulable):
+        raise WorkspaceOperatorPinnedNodeInvalidError(
+            f"execution_node {chosen.node_key!r} must be schedulable=true for pinned bring-up.",
+        )
+    assert chosen.id is not None
+
+    name = f"{PINNED_OPERATOR_TEST_WORKSPACE_NAME_PREFIX}{uuid4().hex[:12]}"
+    rt = runtime if runtime is not None else WorkspaceRuntimeSpecSchema()
+    body = CreateWorkspaceRequest(
+        name=name,
+        description=description,
+        is_private=True,
+        runtime=rt,
+    )
+
+    cid_pre = _effective_correlation_id(correlation_id)
+    check_workspace_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
+    check_running_workspace_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
+    check_monthly_runtime_hours_quota(session, owner_user_id=owner_user_id, correlation_id=cid_pre)
+    rt_cpu = float(body.runtime.cpu_limit_cores or DEFAULT_WORKSPACE_REQUEST_CPU)
+    rt_mem = int(body.runtime.memory_limit_mib or DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
+    check_owner_compute_quota(
+        session,
+        owner_user_id=owner_user_id,
+        proposed_cpu=rt_cpu,
+        proposed_memory_mb=rt_mem,
+        ignore_workspace_id=None,
+        correlation_id=cid_pre,
+    )
+    evaluate_workspace_creation(
+        session,
+        owner_user_id=owner_user_id,
+        image=body.runtime.image if body.runtime else None,
+        is_private=body.is_private if body.is_private is not None else True,
+        correlation_id=cid_pre,
+    )
+
+    now = datetime.now(timezone.utc)
+    config_json = body.runtime.to_config_dict()
+
+    ensure_default_local_execution_node(session)
+
+    ws = Workspace(
+        name=body.name,
+        description=body.description,
+        owner_user_id=owner_user_id,
+        project_storage_key=uuid4().hex,
+        status=WorkspaceStatus.CREATING.value,
+        is_private=body.is_private,
+        created_at=now,
+        updated_at=now,
+        execution_node_id=int(chosen.id),
+    )
+    session.add(ws)
+    session.flush()
+    if settings.devnest_gateway_enabled and ws.workspace_id is not None:
+        ws.public_host = _gateway_unique_public_host(
+            int(ws.workspace_id),
+            settings.devnest_base_domain,
+            project_storage_key=ws.project_storage_key,
+        )
+        session.add(ws)
+        session.flush()
+
+    cfg = WorkspaceConfig(workspace_id=ws.workspace_id, version=1, config_json=config_json)
+    session.add(cfg)
+    session.flush()
+
+    cid = _effective_correlation_id(correlation_id)
+    job = WorkspaceJob(
+        workspace_id=ws.workspace_id,
+        job_type=WorkspaceJobType.CREATE.value,
+        status=WorkspaceJobStatus.QUEUED.value,
+        requested_by_user_id=owner_user_id,
+        requested_config_version=1,
+        attempt=0,
+        correlation_id=cid,
+    )
+    session.add(job)
+    session.flush()
+
+    record_job_queued(job_type=WorkspaceJobType.CREATE.value)
+    assert job.workspace_job_id is not None
+    assert ws.workspace_id is not None
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_INTENT_CREATED,
+        correlation_id=cid,
+        workspace_id=ws.workspace_id,
+        workspace_job_id=job.workspace_job_id,
+        job_type=WorkspaceJobType.CREATE.value,
+        pinned_operator_create=True,
+        pinned_execution_node_id=int(chosen.id),
+        pinned_node_key=str(chosen.node_key or ""),
+    )
+    log_event(
+        logger,
+        LogEvent.WORKSPACE_JOB_QUEUED,
+        correlation_id=cid,
+        workspace_id=ws.workspace_id,
+        workspace_job_id=job.workspace_job_id,
+        job_type=WorkspaceJobType.CREATE.value,
+    )
+
+    record_workspace_event(
+        session,
+        workspace_id=ws.workspace_id,
+        event_type=WorkspaceStreamEventType.INTENT_QUEUED,
+        status=ws.status,
+        message="Pinned operator test workspace creation accepted; job queued",
+        payload={
+            "job_id": job.workspace_job_id,
+            "job_type": WorkspaceJobType.CREATE.value,
+            "requested_config_version": 1,
+            "pinned_operator_create": True,
+            "execution_node_id": int(chosen.id),
+        },
+    )
+
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_CREATE_REQUESTED.value,
+        resource_type="workspace",
+        resource_id=ws.workspace_id,
+        actor_user_id=owner_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=ws.workspace_id,
+        job_id=job.workspace_job_id,
+        correlation_id=cid,
+        metadata={
+            "name": ws.name,
+            "pinned_operator_create": True,
+            "execution_node_id": int(chosen.id),
+        },
     )
     record_usage(
         session,

@@ -33,6 +33,8 @@ class NodeExecutionBundle:
     service_reachability_runner: CommandRunner | None
     _ensure_project_dir: Callable[..., str]
     runtime_adapter: RuntimeAdapter | None = None
+    # When set (typically EC2), Traefik targets ``http://{traefik_routing_host}:{published_ide_host_port}``.
+    traefik_routing_host: str | None = None
 
     def ensure_workspace_project_dir(
         self,

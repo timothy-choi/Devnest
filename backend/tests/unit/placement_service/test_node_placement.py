@@ -80,7 +80,27 @@ def test_list_schedulable_nodes_filters_status_and_flag(placement_engine: Engine
         assert [r.node_key for r in rows] == ["a"]
 
 
-def test_select_node_deterministic_highest_allocatable_cpu(placement_engine: Engine) -> None:
+def test_list_schedulable_nodes_single_node_gate_excludes_secondary(placement_engine: Engine) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="primary-row")
+        _add_node(session, key="secondary-row")
+        rows = list_schedulable_nodes(session)
+        assert len(rows) == 1
+        assert rows[0].node_key == "primary-row"
+
+
+def test_select_prefers_primary_by_id_when_multi_node_disabled(placement_engine: Engine) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="weaker-first", alloc_cpu=2.0)
+        _add_node(session, key="stronger-second", alloc_cpu=16.0)
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "weaker-first"
+
+
+def test_select_node_deterministic_highest_allocatable_cpu(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     with Session(placement_engine) as session:
         _add_node(session, key="low", alloc_cpu=2.0, alloc_mem=4096)
         _add_node(session, key="high", alloc_cpu=8.0, alloc_mem=4096)
@@ -89,7 +109,10 @@ def test_select_node_deterministic_highest_allocatable_cpu(placement_engine: Eng
         assert picked.node_key == "high"
 
 
-def test_select_node_tie_breaker_node_key(placement_engine: Engine) -> None:
+def test_select_node_tie_breaker_node_key(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     with Session(placement_engine) as session:
         _add_node(session, key="z-node", alloc_cpu=4.0)
         _add_node(session, key="a-node", alloc_cpu=4.0)
@@ -358,7 +381,10 @@ def test_select_node_rejects_when_free_disk_insufficient(placement_engine: Engin
             )
 
 
-def test_select_node_chooses_other_node_when_first_is_full(placement_engine: Engine) -> None:
+def test_select_node_chooses_other_node_when_first_is_full(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     from app.services.auth_service.models.user_auth import UserAuth
     from app.services.workspace_service.models import Workspace, WorkspaceRuntime
     from app.services.workspace_service.models.enums import WorkspaceStatus
@@ -400,7 +426,10 @@ def test_select_node_chooses_other_node_when_first_is_full(placement_engine: Eng
         assert picked.node_key == "roomy"
 
 
-def test_select_node_reports_no_capacity_when_all_nodes_ineligible(placement_engine: Engine) -> None:
+def test_select_node_reports_no_capacity_when_all_nodes_ineligible(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     from app.services.auth_service.models.user_auth import UserAuth
     from app.services.workspace_service.models import Workspace, WorkspaceRuntime
     from app.services.workspace_service.models.enums import WorkspaceStatus

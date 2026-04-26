@@ -227,7 +227,13 @@ def test_attach_repairs_missing_gateway_route(workspace_unit_engine, owner_user_
         def get_registered_routes(self) -> list[dict]:
             return list(self.routes)
 
-        def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
+        def register_route(
+            self,
+            workspace_id: str,
+            internal_endpoint: str,
+            public_host: str,
+            **kwargs: object,
+        ) -> None:
             self.register_calls.append((workspace_id, internal_endpoint, public_host))
             self.routes.append(
                 {
@@ -282,7 +288,13 @@ def test_attach_waits_until_gateway_route_observable_after_register(
                 return []
             return list(self.routes)
 
-        def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
+        def register_route(
+            self,
+            workspace_id: str,
+            internal_endpoint: str,
+            public_host: str,
+            **kwargs: object,
+        ) -> None:
             self.register_calls.append((workspace_id, internal_endpoint, public_host))
             self.routes = [
                 {
@@ -681,7 +693,13 @@ def test_attach_gateway_url_includes_public_port(
         def get_registered_routes(self) -> list[dict]:
             return list(self.routes)
 
-        def register_route(self, workspace_id: str, internal_endpoint: str, public_host: str) -> None:
+        def register_route(
+            self,
+            workspace_id: str,
+            internal_endpoint: str,
+            public_host: str,
+            **kwargs: object,
+        ) -> None:
             self.routes.append(
                 {
                     "workspace_id": workspace_id,

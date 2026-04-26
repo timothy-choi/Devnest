@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.libs.topology.models import Topology  # noqa: F401 — register metadata for create_all
 from app.services.auth_service.models import UserAuth
@@ -114,7 +114,10 @@ def _add_node(session: Session, *, key: str, alloc_cpu: float = 4.0, alloc_mem: 
     session.commit()
 
 
-def test_create_selects_highest_capacity_node(bind_engine: Engine) -> None:
+def test_create_selects_highest_capacity_node(
+    bind_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     with Session(bind_engine) as session:
         uid = _seed_user(session)
         _seed_topology(session, 1)
@@ -170,3 +173,55 @@ def test_fallback_to_env_when_no_runtime_and_not_placement_job(bind_engine: Engi
             node_key, tid = resolve_orchestrator_placement(session, ws, job)
         assert node_key == "env-node"
         assert tid == 7
+
+
+def test_create_operator_pinned_skips_scheduler(
+    bind_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CREATE uses pinned node when flag + allowlist + name prefix match (Phase 3b Step 8)."""
+    monkeypatch.setenv("DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT", "true")
+    monkeypatch.setenv("DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS", "2")
+    from app.libs.common.config import get_settings
+
+    get_settings.cache_clear()
+    from app.services.placement_service.operator_pinned_create import PINNED_OPERATOR_TEST_WORKSPACE_NAME_PREFIX
+
+    with Session(bind_engine) as session:
+        uid = _seed_user(session)
+        _seed_topology(session, 1)
+        _add_node(session, key="n-big", alloc_cpu=8.0)
+        _add_node(session, key="n-small", alloc_cpu=1.0)
+        n_small = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "n-small")).first()
+        assert n_small is not None
+        assert int(n_small.id) == 2
+        now = datetime.now(timezone.utc)
+        ws = Workspace(
+            name=f"{PINNED_OPERATOR_TEST_WORKSPACE_NAME_PREFIX}x",
+            description="",
+            owner_user_id=uid,
+            status=WorkspaceStatus.CREATING.value,
+            is_private=True,
+            created_at=now,
+            updated_at=now,
+            execution_node_id=2,
+        )
+        session.add(ws)
+        session.flush()
+        job = WorkspaceJob(
+            workspace_id=ws.workspace_id,
+            job_type=WorkspaceJobType.CREATE.value,
+            status=WorkspaceJobStatus.QUEUED.value,
+            requested_by_user_id=uid,
+            requested_config_version=1,
+            attempt=0,
+            correlation_id=None,
+        )
+        session.add(job)
+        session.commit()
+        session.refresh(ws)
+        session.refresh(job)
+        nk, tid = resolve_orchestrator_placement(session, ws, job)
+        assert nk == "n-small"
+        assert tid == 1
+    get_settings.cache_clear()

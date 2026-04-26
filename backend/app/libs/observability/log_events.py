@@ -104,6 +104,8 @@ class LogEvent:
 
     PLACEMENT_NO_SCHEDULABLE_NODE = "placement.no_schedulable_node"
 
+    # Placement success/failure: include ``multi_node_scheduling_enabled`` and ``placement_single_node_gate``
+    # (inverse) on emitted records for Loki/Grafana correlation (Phase 3b Step 7).
     SCHEDULER_NODE_SELECTED = "scheduler.node.selected"
     SCHEDULER_FAIRNESS_SPREAD_APPLIED = "scheduler.fairness_spread_applied"
 

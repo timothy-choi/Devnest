@@ -6,6 +6,7 @@ import logging
 
 from sqlmodel import Session
 
+from app.libs.common.config import get_settings
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
@@ -57,6 +58,8 @@ def schedule_workspace(
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
+            multi_node_scheduling_enabled=bool(get_settings().devnest_enable_multi_node_scheduling),
+            placement_single_node_gate=not bool(get_settings().devnest_enable_multi_node_scheduling),
         )
         return WorkspaceScheduleResult(
             execution_node=node,
@@ -80,6 +83,8 @@ def schedule_workspace(
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
+            multi_node_scheduling_enabled=bool(get_settings().devnest_enable_multi_node_scheduling),
+            placement_single_node_gate=not bool(get_settings().devnest_enable_multi_node_scheduling),
             detail=str(e)[:2000],
         )
         return WorkspaceScheduleResult(
@@ -119,6 +124,12 @@ def explain_placement_decision(
     free_m = max(0, int(chosen.allocatable_memory_mb or 0) - used_m)
     free_d = max(0, int(chosen.allocatable_disk_mb or 0) - used_d)
     wcount = count_active_workloads_on_node_key(session, k)
+    mns = bool(get_settings().devnest_enable_multi_node_scheduling)
+    pool_note = (
+        "READY+schedulable pool (after devnest_node_provider filter"
+        + ("" if mns else "; DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false → primary node=min(id) only")
+        + ")"
+    )
     lines: list[str] = [
         f"selected node_key={chosen.node_key!r} allocatable_cpu={chosen.allocatable_cpu} "
         f"allocatable_memory_mb={chosen.allocatable_memory_mb} allocatable_disk_mb={chosen.allocatable_disk_mb} "
@@ -128,7 +139,7 @@ def explain_placement_decision(
         f"(reservations from workspace_runtime; STOPPED/DELETED/ERROR workspaces excluded)",
         f"sort_policy: capacity-first (effective_free_cpu desc, effective_free_memory_mb desc), "
         f"then active_workload_count asc (spread/anti-concentration), then node_key asc (stable tiebreak)",
-        f"READY+schedulable pool size (after devnest_node_provider filter): {len(pool)}",
+        f"{pool_note}: {len(pool)} node(s)",
         f"pool nodes satisfying effective capacity for "
         f"cpu>={req.requested_cpu}, memory_mb>={req.requested_memory_mb}, "
         f"disk_mb>={req.requested_disk_mb}, and workspace slots: {len(ranked)}",

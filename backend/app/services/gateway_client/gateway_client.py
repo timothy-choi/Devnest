@@ -62,17 +62,23 @@ class DevnestGatewayClient:
         workspace_id: str,
         internal_endpoint: str,
         public_host: str,
+        *,
+        node_key: str | None = None,
+        execution_node_id: int | None = None,
     ) -> None:
         wid = str(workspace_id).strip()
         host = (public_host or "").strip()
         if not wid or not host:
             raise ValueError("workspace_id and public_host are required")
         target = _normalize_target(internal_endpoint)
+        nk = (node_key or "").strip() or None
         payload = GatewayRouteRegisterPayload(
             workspace_id=wid,
             public_host=host,
             target=target,
-        ).model_dump()
+            node_key=nk,
+            execution_node_id=execution_node_id,
+        ).model_dump(exclude_none=True)
         c = httpx.Client(**self._client_kwargs())
         try:
             try:
@@ -104,6 +110,9 @@ class DevnestGatewayClient:
                 LogEvent.GATEWAY_ROUTE_REGISTERED,
                 workspace_id=wid,
                 public_host=host,
+                node_key=nk,
+                execution_node_id=execution_node_id,
+                gateway_upstream_target=target,
             )
         finally:
             c.close()
