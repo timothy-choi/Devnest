@@ -118,7 +118,14 @@ class DevnestGatewayClient:
         finally:
             c.close()
 
-    def deregister_route(self, workspace_id: str) -> None:
+    def deregister_route(
+        self,
+        workspace_id: str,
+        *,
+        public_host: str | None = None,
+        node_key: str | None = None,
+        gateway_upstream_target: str | None = None,
+    ) -> None:
         wid = str(workspace_id).strip()
         if not wid:
             raise ValueError("workspace_id is empty")
@@ -148,7 +155,14 @@ class DevnestGatewayClient:
                 )
                 raise GatewayClientTransportError(f"route-admin unreachable: {e}") from e
             record_gateway_operation(operation="deregister", success=True)
-            log_event(logger, LogEvent.GATEWAY_ROUTE_DEREGISTERED, workspace_id=wid)
+            log_event(
+                logger,
+                LogEvent.GATEWAY_ROUTE_DEREGISTERED,
+                workspace_id=wid,
+                public_host=public_host,
+                node_key=node_key,
+                gateway_upstream_target=gateway_upstream_target,
+            )
         finally:
             c.close()
 

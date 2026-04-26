@@ -1,14 +1,23 @@
 """Derive Traefik/route-admin upstream from workspace runtime (Phase 3b Step 9).
 
-Topology ``internal_endpoint`` remains ``{workspace_ip}:{ide_port}`` for on-node probes.
-``gateway_route_target`` stores ``http://{execution_host}:{published_host_port}`` when the
-workspace runs on EC2 (reachable from Traefik via the node's private IP / SSH host and Docker
-published port).
+Route-admin ``target`` (Traefik upstream) is derived **only** from persisted placement — no
+hardcoded execution node ids:
+
+1. ``WorkspaceRuntime.gateway_route_target`` — e.g. ``http://{node_private_ip}:{published_port}`` for EC2.
+2. ``WorkspaceRuntime.internal_endpoint`` — topology/container address (often ``ip:port``).
+3. ``Workspace.endpoint_ref`` — control-plane copy of the last known attach endpoint (fallback).
+
+``Workspace.public_host`` is used for the Traefik **Host** rule (via route-admin ``public_host``),
+not for upstream IP selection.
+
+Topology ``internal_endpoint`` remains ``{workspace_ip}:{ide_port}`` for on-node probes; when
+distinct from the Traefik-reachable URL, persist ``gateway_route_target`` from bring-up.
 """
 
 from __future__ import annotations
 
-from app.services.workspace_service.models import WorkspaceRuntime
+from app.services.workspace_service.models.workspace import Workspace
+from app.services.workspace_service.models.workspace_runtime import WorkspaceRuntime
 
 
 def compose_traefik_upstream_target(
@@ -49,6 +58,18 @@ def registration_upstream(
     return ""
 
 
+def traefik_upstream_for_workspace_gateway(ws: Workspace | None, rt: WorkspaceRuntime) -> str:
+    """Traefik upstream ``target`` for route-admin from runtime + optional workspace fallback (Step 9)."""
+    u = registration_upstream(rt.gateway_route_target, rt.internal_endpoint)
+    if u:
+        return u
+    if ws is not None:
+        er = (ws.endpoint_ref or "").strip()
+        if er:
+            return er
+    return ""
+
+
 def traefik_upstream_for_registration(rt: WorkspaceRuntime) -> str:
-    """URL or host:port string to register with route-admin (never secrets)."""
-    return registration_upstream(rt.gateway_route_target, rt.internal_endpoint)
+    """URL or host:port string to register with route-admin when no ``Workspace`` row is loaded."""
+    return traefik_upstream_for_workspace_gateway(None, rt)

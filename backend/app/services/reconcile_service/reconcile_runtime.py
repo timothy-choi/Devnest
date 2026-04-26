@@ -12,7 +12,10 @@ from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import LogEvent, log_event
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
-from app.services.gateway_client.workspace_route_upstream import registration_upstream
+from app.services.gateway_client.workspace_route_upstream import (
+    registration_upstream,
+    traefik_upstream_for_workspace_gateway,
+)
 from app.services.orchestrator_service.errors import (
     WorkspaceBringUpError,
     WorkspaceStopError,
@@ -713,7 +716,12 @@ def _reconcile_running(
 
     settings = get_settings()
     fixed_route = False
-    observed_upstream = registration_upstream(health.gateway_route_target, health.internal_endpoint)
+    rt_cur = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    observed_upstream = (
+        traefik_upstream_for_workspace_gateway(ws, rt_cur)
+        if rt_cur is not None
+        else registration_upstream(health.gateway_route_target, health.internal_endpoint)
+    )
     if settings.devnest_gateway_enabled and observed_upstream:
         try:
             routes = _strict_list_routes()

@@ -63,7 +63,7 @@ from app.services.placement_service.errors import NoSchedulableNodeError, Placem
 from app.services.placement_service.models import ExecutionNode
 from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
-from app.services.gateway_client.workspace_route_upstream import traefik_upstream_for_registration
+from app.services.gateway_client.workspace_route_upstream import traefik_upstream_for_workspace_gateway
 from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
@@ -604,7 +604,7 @@ def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
         rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
         if rt is None:
             return
-        upstream = traefik_upstream_for_registration(rt)
+        upstream = traefik_upstream_for_workspace_gateway(ws, rt)
         if not upstream:
             logger.debug(
                 "gateway_register_skipped_no_upstream",
@@ -620,6 +620,7 @@ def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
             "gateway_route_register_attempt",
             extra={
                 "workspace_id": wid,
+                "public_host": public,
                 "node_key": nk,
                 "execution_node_id": ws.execution_node_id,
                 "gateway_upstream_target": upstream,
@@ -639,13 +640,40 @@ def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
         )
 
 
-def _gateway_try_deregister(workspace_id: int) -> None:
+def _gateway_route_telemetry_before_runtime_clear(session: Session, ws: Workspace, wid: int) -> dict[str, str | None]:
+    """Snapshot ``public_host`` / ``node_key`` / upstream for deregister logs (Step 9)."""
+    rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    settings = get_settings()
+    public = (ws.public_host or "").strip() or _gateway_default_public_host(
+        int(wid),
+        settings.devnest_base_domain,
+    )
+    nk = ((rt.node_id or "").strip() if rt else None) or None
+    if rt is None:
+        up = (ws.endpoint_ref or "").strip() or None
+    else:
+        up = traefik_upstream_for_workspace_gateway(ws, rt) or None
+    return {"public_host": public, "node_key": nk, "gateway_upstream_target": up}
+
+
+def _gateway_try_deregister(
+    workspace_id: int,
+    *,
+    public_host: str | None = None,
+    node_key: str | None = None,
+    gateway_upstream_target: str | None = None,
+) -> None:
     """Remove route on stop/delete; failures are logged only."""
     try:
         settings = get_settings()
         if not settings.devnest_gateway_enabled:
             return
-        DevnestGatewayClient.from_settings(settings).deregister_route(str(workspace_id))
+        DevnestGatewayClient.from_settings(settings).deregister_route(
+            str(workspace_id),
+            public_host=public_host,
+            node_key=node_key,
+            gateway_upstream_target=gateway_upstream_target,
+        )
     except Exception as e:
         logger.warning(
             "gateway_deregister_failed_best_effort",
@@ -852,6 +880,7 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
     wid = ws.workspace_id
     assert wid is not None
     if result.success:
+        gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
         _apply_runtime_stop(session, wid, result)
         _mark_job_succeeded(session, job)
         ws.status = WorkspaceStatus.STOPPED.value
@@ -864,7 +893,12 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
             reason="worker.stop",
             correlation_id=job.correlation_id,
         )
-        _gateway_try_deregister(wid)
+        _gateway_try_deregister(
+            wid,
+            public_host=gw_meta.get("public_host"),
+            node_key=gw_meta.get("node_key"),
+            gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
+        )
         record_audit(
             session,
             action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
@@ -916,6 +950,7 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
         _mark_job_succeeded(session, job)
         ws.status = WorkspaceStatus.DELETED.value
         _workspace_clear_errors(ws)
+        gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
         _clear_runtime_after_delete(session, wid)
         _touch_workspace(session, ws)
         revoke_all_workspace_sessions(
@@ -924,7 +959,12 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
             reason="worker.delete",
             correlation_id=job.correlation_id,
         )
-        _gateway_try_deregister(wid)
+        _gateway_try_deregister(
+            wid,
+            public_host=gw_meta.get("public_host"),
+            node_key=gw_meta.get("node_key"),
+            gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
+        )
         record_audit(
             session,
             action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,

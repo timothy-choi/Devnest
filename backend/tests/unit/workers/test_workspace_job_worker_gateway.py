@@ -86,6 +86,11 @@ def test_gateway_try_deregister_swallows_client_error(monkeypatch: pytest.Monkey
         with patch.object(wmod, "DevnestGatewayClient") as cls:
             cls.from_settings.return_value = mock_client
             wmod._gateway_try_deregister(101)  # should not raise
-            mock_client.deregister_route.assert_called_once_with("101")
+            mock_client.deregister_route.assert_called_once_with(
+                "101",
+                public_host=None,
+                node_key=None,
+                gateway_upstream_target=None,
+            )
     finally:
         get_settings.cache_clear()

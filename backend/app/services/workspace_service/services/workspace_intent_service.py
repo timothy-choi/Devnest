@@ -62,7 +62,7 @@ from app.services.workspace_service.services.workspace_session_service import (
 )
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
-from app.services.gateway_client.workspace_route_upstream import registration_upstream
+from app.services.gateway_client.workspace_route_upstream import traefik_upstream_for_workspace_gateway
 from app.services.node_execution_service.workspace_project_dir import (
     workspace_bundle_project_data_present,
     workspace_project_dir_name,
@@ -509,7 +509,7 @@ def _ensure_gateway_route_ready_for_open(
 
     wid = ws.workspace_id
     assert wid is not None
-    observed_upstream = registration_upstream(rt.gateway_route_target, rt.internal_endpoint)
+    observed_upstream = traefik_upstream_for_workspace_gateway(ws, rt)
     if not observed_upstream:
         _best_effort_enqueue_reconcile_for_access_drift(
             session,
