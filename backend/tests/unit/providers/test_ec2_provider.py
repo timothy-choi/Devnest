@@ -424,6 +424,69 @@ def test_register_ec2_instance_inserts_row(sqlite_engine) -> None:
     stubber.deactivate()
 
 
+def test_register_ec2_instance_catalog_only_running_ready_not_schedulable(sqlite_engine) -> None:
+    """Phase 3b Step 4: catalog_only forces schedulable=false while status stays READY for running EC2."""
+    client = _stub_ec2_client()
+    stubber = Stubber(client)
+    iid = "i-0a1b2c3d4e5f6799"
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": iid,
+                            "State": {"Name": "running"},
+                            "InstanceType": "t3.micro",
+                            "PrivateIpAddress": "10.0.0.88",
+                            "PublicIpAddress": "1.2.3.4",
+                            "Placement": {"AvailabilityZone": "us-east-1b"},
+                            "Tags": [{"Key": "Name", "Value": "node-2"}],
+                        },
+                    ],
+                },
+            ],
+        },
+        {"InstanceIds": [iid]},
+    )
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    sm = MagicMock()
+    sm.devnest_ec2_default_execution_mode = "ssm_docker"
+    sm.devnest_ec2_ssh_user_default = "ubuntu"
+    with patch("app.services.providers.ec2_provider.get_settings", return_value=sm):
+        with Session(sqlite_engine) as session:
+            node = register_ec2_instance(
+                session,
+                iid,
+                ec2_client=client,
+                node_key="node-2",
+                catalog_only=True,
+            )
+            session.commit()
+            assert node.node_key == "node-2"
+            assert node.status == ExecutionNodeStatus.READY.value
+            assert node.schedulable is False
+            assert node.private_ip == "10.0.0.88"
+            assert node.public_ip == "1.2.3.4"
+            assert node.provider_instance_id == iid
+            assert (node.metadata_json or {}).get("ec2", {}).get("catalog_only") is True
+    stubber.deactivate()
+
+
 def test_register_ec2_instance_stopped_not_schedulable(sqlite_engine) -> None:
     client = _stub_ec2_client()
     stubber = Stubber(client)

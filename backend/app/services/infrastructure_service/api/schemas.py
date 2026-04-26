@@ -179,6 +179,13 @@ class RegisterExistingEc2Body(BaseModel):
     node_key: str | None = None
     ssh_user: str | None = None
     execution_mode: str | None = Field(default=None, description="ssm_docker or ssh_docker")
+    catalog_only: bool = Field(
+        default=False,
+        description=(
+            "Phase 3b Step 4: after EC2-derived status is set, force schedulable=false so the scheduler "
+            "never selects this node (catalog / warm pool). Does not create routes or change node 1."
+        ),
+    )
 
 
 class SyncExecutionNodeBody(NodeKeyOrIdBody):

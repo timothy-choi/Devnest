@@ -281,6 +281,7 @@ def register_existing_ec2_node(
     node_key: str | None = None,
     ssh_user: str | None = None,
     execution_mode: str | None = None,
+    catalog_only: bool = False,
 ) -> ExecutionNode:
     """Register a pre-existing EC2 instance (delegates to :func:`register_ec2_instance`)."""
     return register_ec2_instance(
@@ -290,6 +291,7 @@ def register_existing_ec2_node(
         node_key=node_key,
         ssh_user=ssh_user,
         execution_mode=execution_mode,
+        catalog_only=catalog_only,
     )
 
 

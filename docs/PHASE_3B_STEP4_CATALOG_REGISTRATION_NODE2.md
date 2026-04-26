@@ -1,6 +1,6 @@
-# Phase 3b Step 4 — Catalog-only registration for node 2 (documentation only)
+# Phase 3b Step 4 — Catalog-only registration for node 2
 
-**Status:** Operator runbook. **No** application code changes in this step, **no** route-admin or Traefik changes, **no** requirement to exercise remote Docker/SSM for placements.
+**Status:** Operator runbook + **implemented** catalog-only flag on register paths. **No** route-admin or Traefik changes for this step; **no** requirement to exercise remote Docker/SSM for placements.
 
 **Prerequisites:** [Step 1](./PHASE_3B_STEP1_EXECUTION_NODE_EC2.md), [Step 2](./PHASE_3B_STEP2_SECURITY_GROUPS_NETWORKING.md), [Step 3](./PHASE_3B_STEP3_IAM_EXECUTION_NODES.md), [Fleet runbook](./PHASE_3B_FLEET_RUNBOOK.md).
 
@@ -18,6 +18,21 @@ Therefore:
 - **`status=READY`** + **`schedulable=false`** is a valid **catalog-only** posture: row looks “healthy” for operators but **cannot** receive workloads.
 
 **No scheduler code change** is required for Step 4: the existing predicate already ignores non-schedulable nodes.
+
+---
+
+## 1b. Implemented: `catalog_only` (single step)
+
+Use **`catalog_only`** so you do **not** need a follow-up SQL `UPDATE` when the instance is already **running** (which would otherwise set `schedulable=true`).
+
+- **HTTP:** `POST /internal/execution-nodes/register-existing` JSON field **`"catalog_only": true`** (with `node_key`, `instance_id`, etc.).
+- **CLI:** `PYTHONPATH=. python scripts/register_ec2_instance.py <INSTANCE_ID> --node-key node-2 --execution-mode ssm_docker --catalog-only`
+
+Behavior:
+
+- **Status** still follows EC2 describe (e.g. **`READY`** if `running`, **`NOT_READY`** if stopped/pending).
+- **`schedulable`** is always **`false`** when `catalog_only` is true (insert and upsert).
+- **`metadata_json.ec2.catalog_only`** is set to **`true`** for audit.
 
 ---
 
@@ -55,21 +70,22 @@ Content-Type: application/json
   "instance_id": "<INSTANCE_ID>",
   "node_key": "node-2",
   "execution_mode": "ssm_docker",
-  "ssh_user": "ubuntu"
+  "ssh_user": "ubuntu",
+  "catalog_only": true
 }
 ```
 
 **B. CLI script** (from `backend/` with `DATABASE_URL` and AWS credentials configured):
 
 ```bash
-PYTHONPATH=. python scripts/register_ec2_instance.py <INSTANCE_ID> --node-key node-2 --execution-mode ssm_docker
+PYTHONPATH=. python scripts/register_ec2_instance.py <INSTANCE_ID> --node-key node-2 --execution-mode ssm_docker --catalog-only
 ```
 
-The script prints **`status`** and **`schedulable`** at the end — **read them**.
+The command prints **`status`** and **`schedulable`** at the end — with **`catalog_only`**, **`schedulable`** must be **`False`**.
 
-### 3.3 Step B — Force **catalog-only**: set `schedulable = false`
+### 3.3 Step B — Force **catalog-only**: set `schedulable = false` (legacy)
 
-If Step A printed **`schedulable=True`** (typical when the instance is **running**), you **must** apply Step B **before** any traffic validation that could create workspaces.
+If you registered **without** `catalog_only` and Step A printed **`schedulable=True`** (typical when the instance is **running**), apply Step B **before** any traffic validation that could create workspaces. Prefer **`catalog_only`** in §1b instead.
 
 **Option 1 — SQL (explicit, common for one-shot ops)**
 
@@ -112,7 +128,7 @@ Confirm the row matches EC2 (either via `GET /internal/execution-nodes/` or SQL)
 | `execution_mode` | `ssm_docker` or `ssh_docker` (matches future worker path) |
 | Capacity (`total_*`, `allocatable_*`, `max_workspaces`, …) | Filled from instance type defaults / describe |
 | `status` | Often `READY` after register when running — **allowed** with `schedulable=false` |
-| **`schedulable`** | **`false`** after Step B |
+| **`schedulable`** | **`false`** when using **`catalog_only`** (§1b) or after legacy Step B |
 
 ### 3.5 Heartbeat (optional in Step 4)
 
@@ -193,11 +209,12 @@ UPDATE execution_node SET schedulable = true WHERE node_key = 'node-2';
 
 ## 6. Definition of done (Step 4 only)
 
-- [ ] Node 2 row exists in **`execution_node`** with correct **EC2-linked** fields.  
-- [ ] **`schedulable = false`** on node 2 after the catalog-only lock (§3.3).  
-- [ ] **`GET /internal/execution-nodes/`** shows node 2 with **`schedulable: false`**.  
+- [ ] Node 2 row exists in **`execution_node`** with **`node_key=node-2`** and correct **EC2-linked** fields (`private_ip`, `public_ip`, `provider_instance_id`, `region`, `execution_mode`, capacity).  
+- [ ] **`schedulable = false`** on node 2 (use **`catalog_only`** in §1b, or legacy §3.3 SQL).  
+- [ ] **`status`** is **`READY`** if the instance is **running**, else **`NOT_READY`** (from EC2 at register time; heartbeats are optional in Step 4).  
+- [ ] **`GET /internal/execution-nodes/`** shows **node-1** and **node-2**; node-2 has **`schedulable: false`**.  
 - [ ] Creating a **new** workspace still results in placement on **node 1** (or other schedulable nodes), **not** node 2.  
-- [ ] No route-admin / Traefik / worker execution-path changes were required for this step.  
+- [ ] No route-admin / Traefik routing to node 2 for this step.  
 - [ ] Rollback path in **§5** is understood by operators.
 
 ---
@@ -208,8 +225,7 @@ UPDATE execution_node SET schedulable = true WHERE node_key = 'node-2';
 
 ## 7. Follow-up (not Step 4)
 
-- Add a first-class **`register-catalog`** or **`PATCH`** internal field for `schedulable` without SQL (future PR) to avoid the **register-then-SQL** gap documented in §2–§3.  
-- When ready for workloads: set **`schedulable=true`** (and ensure **READY** + capacity + heartbeat policy) in a **later** gated step.
+- When ready for workloads on node 2: set **`schedulable=true`** on the row (if it was **DRAINING**, prefer **`POST /internal/execution-nodes/undrain`**; for **READY** + catalog-only, use controlled SQL or a future **PATCH** internal API per policy) and ensure capacity + heartbeat policy in a **later** gated step.
 
 ---
 
@@ -217,8 +233,14 @@ UPDATE execution_node SET schedulable = true WHERE node_key = 'node-2';
 
 | File | Role |
 |------|------|
+| `backend/app/services/providers/ec2_provider.py` | `register_ec2_instance(..., catalog_only=...)` forces `schedulable=false`; sets `metadata_json.ec2.catalog_only`. |
+| `backend/app/services/infrastructure_service/lifecycle.py` | `register_existing_ec2_node(..., catalog_only=...)`. |
+| `backend/app/services/infrastructure_service/api/schemas.py` | `RegisterExistingEc2Body.catalog_only`. |
+| `backend/app/services/infrastructure_service/api/routers/internal_execution_nodes.py` | Passes `catalog_only` to registration. |
+| `backend/scripts/register_ec2_instance.py` | `--catalog-only` CLI flag. |
+| `backend/tests/unit/providers/test_ec2_provider.py` | Unit test for catalog-only running instance. |
 | `docs/PHASE_3B_STEP4_CATALOG_REGISTRATION_NODE2.md` | This Step 4 catalog registration runbook. |
 
 ---
 
-*Phase 3b Step 4 — catalog-only registration. Documentation only.*
+*Phase 3b Step 4 — catalog-only registration.*

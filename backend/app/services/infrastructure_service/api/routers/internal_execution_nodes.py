@@ -340,13 +340,17 @@ def post_provision_execution_node(
     "/register-existing",
     response_model=ExecutionNodeSummaryResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a pre-existing EC2 instance (immediate READY if running, unless lifecycle state blocks)",
+    summary="Register a pre-existing EC2 instance (optional catalog_only forces schedulable=false, Step 4)",
 )
 def post_register_existing_ec2(
     body: RegisterExistingEc2Body,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
-    _audit_mutation("register_existing", instance_id=body.instance_id.strip())
+    _audit_mutation(
+        "register_existing",
+        instance_id=body.instance_id.strip(),
+        catalog_only=bool(body.catalog_only),
+    )
     try:
         node = register_existing_ec2_node(
             session,
@@ -354,6 +358,7 @@ def post_register_existing_ec2(
             node_key=body.node_key,
             ssh_user=body.ssh_user,
             execution_mode=body.execution_mode,
+            catalog_only=bool(body.catalog_only),
         )
         record_audit(
             session,
