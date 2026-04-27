@@ -51,7 +51,7 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
             "SubnetId": "subnet-aaaabbbb",
             "SecurityGroupIds": ["sg-test123"],
             "TagSpecifications": ANY,
-            "UserData": "#!/bin/bash\necho devnest",
+            "UserData": "#!/bin/bash\necho devnest\n",
         },
     )
     stubber.add_response(
@@ -154,6 +154,57 @@ def test_provision_run_instances_throttle_retry_then_success(
             node = provision_ec2_node(session, req, ec2_client=client, wait_until_running=False)
             session.commit()
             assert node.provider_instance_id == iid
+    finally:
+        stubber.deactivate()
+
+
+def test_provision_ec2_node_sends_user_data_to_run_instances(infrastructure_unit_engine) -> None:
+    iid = "i-0a1b2c3d4e5f6789"
+    region = "us-east-1"
+    user_data = "#!/bin/bash\necho bootstrap\n"
+    client = boto3.client("ec2", region_name=region)
+    stubber = Stubber(client)
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": iid}]},
+        {
+            "ImageId": "ami-12345678",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "InstanceType": "t3.micro",
+            "SubnetId": "subnet-aaaabbbb",
+            "SecurityGroupIds": ["sg-test123"],
+            "TagSpecifications": ANY,
+            "UserData": user_data,
+        },
+    )
+    stubber.add_response("create_tags", {}, {"Resources": [iid], "Tags": ANY})
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    req = Ec2ProvisionRequest(
+        ami_id="ami-12345678",
+        instance_type="t3.micro",
+        subnet_id="subnet-aaaabbbb",
+        security_group_ids=["sg-test123"],
+        region=region,
+        node_key="user-data-node",
+        user_data=user_data,
+    )
+    try:
+        with Session(infrastructure_unit_engine) as session:
+            provision_ec2_node(session, req, ec2_client=client, wait_until_running=False)
     finally:
         stubber.deactivate()
 

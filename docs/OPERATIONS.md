@@ -385,7 +385,7 @@ docker --version
 systemctl status docker --no-pager
 test -d /opt/devnest
 test -d /var/lib/devnest/workspace-projects
-systemctl status devnest-execution-node-heartbeat --no-pager
-journalctl -u devnest-execution-node-heartbeat -n 50 --no-pager
+systemctl status devnest-node-heartbeat --no-pager
+journalctl -u devnest-node-heartbeat -n 50 --no-pager
 tail -n 100 /var/log/devnest/bootstrap.log
 ```

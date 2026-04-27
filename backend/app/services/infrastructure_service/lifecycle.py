@@ -109,11 +109,23 @@ def provision_ec2_node(
 
     client = ec2_client or build_ec2_client(region=req.region)
     region = client.meta.region_name or (req.region or settings.aws_region or "").strip() or "unknown"
+    run_instances_params = _run_instances_params(req, settings)
+    user_data_bytes = len((run_instances_params.get("UserData") or "").encode("utf-8"))
+    logger.info(
+        "ec2_run_instances_request_prepared",
+        extra={
+            "node_key": explicit_key or None,
+            "instance_type": req.instance_type,
+            "region": region,
+            "user_data_present": "UserData" in run_instances_params,
+            "user_data_bytes": user_data_bytes,
+        },
+    )
 
     try:
         resp = client_call_with_throttle_retry(
             "ec2.RunInstances",
-            lambda: client.run_instances(**_run_instances_params(req, settings)),
+            lambda: client.run_instances(**run_instances_params),
         )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
@@ -274,8 +286,8 @@ def _run_instances_params(req: Ec2ProvisionRequest, settings: Any) -> dict[str, 
     key = (req.key_name or "").strip()
     if key:
         params["KeyName"] = key
-    user_data = (req.user_data or "").strip()
-    if user_data:
+    user_data = req.user_data or ""
+    if user_data.strip():
         params["UserData"] = user_data
     return params
 

@@ -95,6 +95,7 @@ def build_default_amazon_linux_2023_user_data(
     q_base = shlex.quote(base)
     q_secret = shlex.quote(secret)
     q_projects = shlex.quote(projects)
+    service_name = "devnest-node-heartbeat"
     return f"""#!/bin/bash
 set -Eeuo pipefail
 
@@ -116,7 +117,7 @@ HEARTBEAT_INTERVAL_SECONDS={interval}
 ENV
 chmod 0600 /opt/devnest/heartbeat.env
 
-cat >/opt/devnest/execution-node-heartbeat.sh <<'SCRIPT'
+cat >/opt/devnest/node-heartbeat.sh <<'SCRIPT'
 #!/bin/bash
 set -Eeuo pipefail
 source /opt/devnest/heartbeat.env
@@ -138,9 +139,9 @@ while true; do
   sleep "${{HEARTBEAT_INTERVAL_SECONDS:-30}}"
 done
 SCRIPT
-chmod 0755 /opt/devnest/execution-node-heartbeat.sh
+chmod 0755 /opt/devnest/node-heartbeat.sh
 
-cat >/etc/systemd/system/devnest-execution-node-heartbeat.service <<'UNIT'
+cat >/etc/systemd/system/{service_name}.service <<'UNIT'
 [Unit]
 Description=DevNest execution node heartbeat
 After=network-online.target docker.service
@@ -149,7 +150,7 @@ Wants=network-online.target docker.service
 [Service]
 Type=simple
 EnvironmentFile=/opt/devnest/heartbeat.env
-ExecStart=/opt/devnest/execution-node-heartbeat.sh
+ExecStart=/opt/devnest/node-heartbeat.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -160,7 +161,7 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now devnest-execution-node-heartbeat.service
+systemctl enable --now {service_name}.service
 
 # Values quoted for shellcheck/readability; heartbeat.env is authoritative.
 printf 'DevNest bootstrap complete for node %s using API %s and projects base %s\\n' {q_node} {q_base} {q_projects}

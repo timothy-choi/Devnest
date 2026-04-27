@@ -404,7 +404,8 @@ def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(au
                 assert request is not None
                 assert request.node_key.startswith("ec2-autoscale-")
                 assert "dnf install -y docker curl" in (request.user_data or "")
-                assert "devnest-execution-node-heartbeat.service" in (request.user_data or "")
+                assert "devnest-node-heartbeat.service" in (request.user_data or "")
+                assert request.node_key in (request.user_data or "")
                 assert "/var/lib/devnest/workspace-projects" in (request.user_data or "")
                 assert "/var/log/devnest/bootstrap.log" in (request.user_data or "")
                 assert "StandardOutput=journal" in (request.user_data or "")

@@ -140,8 +140,9 @@ services:
     env_file:
       - path: ./backend/.env
         required: false
+      # Optional for CI: deploy_integration.sh may pass a temp env file via ``docker compose --env-file``.
       - path: ./.env.integration
-        required: true
+        required: false
     ports:
       - "8000:8000"
     environment:
@@ -237,8 +238,9 @@ services:
     env_file:
       - path: ./backend/.env
         required: false
+      # Optional for CI: deploy_integration.sh may pass a temp env file via ``docker compose --env-file``.
       - path: ./.env.integration
-        required: true
+        required: false
     environment:
       DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
       DEVNEST_DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}

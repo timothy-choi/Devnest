@@ -332,12 +332,14 @@ def _build_autoscaler_ec2_provision_request(settings: object) -> Ec2ProvisionReq
     req.node_key = _autoscaler_node_key()
     req.name_tag = req.node_key
     has_custom_user_data = bool((req.user_data or "").strip())
+    user_data_source = "none"
     if has_custom_user_data:
         req.user_data = (
             (req.user_data or "")
             .replace("{{NODE_KEY}}", req.node_key)
             .replace("{{DEVNEST_NODE_KEY}}", req.node_key)
         )
+        user_data_source = "custom"
     elif not _config_bool(settings, "devnest_ec2_bootstrap_prebaked", False):
         req.user_data = build_default_amazon_linux_2023_user_data(
             node_key=req.node_key,
@@ -346,6 +348,18 @@ def _build_autoscaler_ec2_provision_request(settings: object) -> Ec2ProvisionReq
             workspace_projects_base=_workspace_projects_base_for_ec2(settings),
             heartbeat_interval_seconds=_config_int(settings, "devnest_node_heartbeat_interval_seconds", 30),
         )
+        user_data_source = "generated_amazon_linux_2023"
+    else:
+        user_data_source = "prebaked_ami"
+    logger.info(
+        "autoscaler_ec2_user_data_prepared",
+        extra={
+            "node_key": req.node_key,
+            "user_data_source": user_data_source,
+            "user_data_present": bool((req.user_data or "").strip()),
+            "user_data_bytes": len((req.user_data or "").encode("utf-8")),
+        },
+    )
     return req
 
 
