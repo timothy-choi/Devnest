@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { browserApi } from "@/lib/api/browser-client";
 import { ApiError } from "@/lib/api/error";
+import { getApiBaseUrl } from "@/lib/env";
 import { WorkspaceFormValues } from "@/lib/validators";
 import { toWorkspace } from "@/lib/workspace-mappers";
 import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
@@ -438,38 +439,62 @@ export function useWorkspaces() {
     setSnapshotNotice(null);
     setSnapshotBusyWorkspaceId(workspaceId);
     try {
-      const res = await fetch(`/api/workspaces/${workspaceId}/snapshot-archive`, {
+      const metaRes = await fetch(`/api/workspaces/${workspaceId}/snapshot-archive-download`, {
         method: "GET",
         credentials: "same-origin",
       });
-      if (!res.ok) {
-        let detail = res.statusText;
+      if (!metaRes.ok) {
+        let detail = metaRes.statusText;
         try {
-          const errBody = (await res.json()) as { detail?: string };
+          const errBody = (await metaRes.json()) as { detail?: string };
           if (typeof errBody.detail === "string") {
             detail = errBody.detail;
           }
         } catch {
-          // ignore
+          // ignore non-JSON error bodies
         }
-        throw new ApiError(res.status, detail);
+        throw new ApiError(metaRes.status, detail);
       }
-      const cd = res.headers.get("Content-Disposition");
-      let filename = `workspace-${workspaceId}-snapshot.tar.gz`;
-      const m = cd && /filename\*?=(?:UTF-8''|)([^;\s]+)|filename="([^"]+)"/i.exec(cd);
-      if (m) {
-        filename = decodeURIComponent((m[1] || m[2] || filename).replace(/^"|"$/g, ""));
+      const offer = (await metaRes.json()) as {
+        mode: "presigned_s3" | "backend_direct";
+        filename: string;
+        expires_in: number;
+        presigned_url?: string | null;
+        relative_url?: string | null;
+      };
+
+      let downloadHref: string;
+      if (offer.mode === "presigned_s3" && offer.presigned_url) {
+        downloadHref = offer.presigned_url;
+      } else if (offer.mode === "backend_direct" && offer.relative_url) {
+        const base = getApiBaseUrl().replace(/\/$/, "");
+        const path = offer.relative_url.startsWith("/") ? offer.relative_url : `/${offer.relative_url}`;
+        downloadHref = `${base}${path}`;
+      } else {
+        throw new ApiError(502, "Invalid download offer from server.");
       }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+
       const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = filename;
-      anchor.rel = "noopener";
+      anchor.href = downloadHref;
+      anchor.download = offer.filename;
+      anchor.rel = "noopener noreferrer";
+      anchor.target = "_blank";
       document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      try {
+        anchor.click();
+      } catch (clickErr) {
+        const blockedProgrammaticDownload =
+          clickErr instanceof DOMException &&
+          (clickErr.name === "NotAllowedError" || clickErr.name === "SecurityError");
+        if (!blockedProgrammaticDownload) {
+          throw clickErr;
+        }
+        window.open(downloadHref, "_blank", "noopener,noreferrer");
+      } finally {
+        anchor.remove();
+      }
+      setActionError(null);
+      setSnapshotNotice(null);
     } catch (error) {
       setSnapshotNotice(null);
       setActionError(error instanceof ApiError ? error.detail : "Could not download the snapshot archive.");

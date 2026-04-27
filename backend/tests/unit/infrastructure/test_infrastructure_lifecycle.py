@@ -10,11 +10,14 @@ import pytest
 from botocore.stub import ANY, Stubber
 from sqlmodel import Session, select
 
+from app.services.infrastructure_service.errors import NodeLifecycleError
 from app.services.infrastructure_service.lifecycle import (
     mark_node_draining,
     provision_ec2_node,
+    register_catalog_ec2_stub,
     sync_node_state,
     terminate_ec2_node,
+    undrain_node,
 )
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
 from app.services.placement_service.errors import NoSchedulableNodeError
@@ -182,6 +185,80 @@ def test_mark_node_draining_idempotent(infrastructure_unit_engine) -> None:
     assert meta1.get("lifecycle", {}).get("draining_marked_at") == meta2.get("lifecycle", {}).get(
         "draining_marked_at",
     )
+
+
+def test_undrain_after_drain_restores_ready(infrastructure_unit_engine) -> None:
+    with Session(infrastructure_unit_engine) as session:
+        row = ExecutionNode(
+            node_key="undrain-me",
+            name="undrain-me",
+            provider_type=ExecutionNodeProviderType.LOCAL.value,
+            execution_mode=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
+            status=ExecutionNodeStatus.READY.value,
+            schedulable=True,
+            total_cpu=2.0,
+            total_memory_mb=4096,
+            allocatable_cpu=2.0,
+            allocatable_memory_mb=4096,
+            metadata_json={},
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        mark_node_draining(session, node_key="undrain-me")
+        session.commit()
+        out = undrain_node(session, node_key="undrain-me")
+        session.commit()
+        session.refresh(out)
+    assert out.status == ExecutionNodeStatus.READY.value
+    assert out.schedulable is True
+
+
+def test_register_catalog_ec2_stub_inserts_node2_like_row(infrastructure_unit_engine) -> None:
+    with Session(infrastructure_unit_engine) as session:
+        node = register_catalog_ec2_stub(
+            session,
+            node_key="node-2",
+            name="staging node 2 catalog",
+            provider_instance_id="i-placeholder00000000",
+            private_ip="10.0.2.10",
+            public_ip="203.0.113.50",
+            region="us-east-1",
+            execution_mode="ssm_docker",
+            status="NOT_READY",
+        )
+        session.commit()
+        session.refresh(node)
+        assert node.node_key == "node-2"
+        assert node.provider_type == ExecutionNodeProviderType.EC2.value
+        assert node.schedulable is False
+        assert node.status == ExecutionNodeStatus.NOT_READY.value
+        assert node.provider_instance_id == "i-placeholder00000000"
+        assert node.private_ip == "10.0.2.10"
+        assert node.public_ip == "203.0.113.50"
+        assert node.region == "us-east-1"
+        assert node.execution_mode == ExecutionNodeExecutionMode.SSM_DOCKER.value
+
+
+def test_undrain_terminated_raises(infrastructure_unit_engine) -> None:
+    with Session(infrastructure_unit_engine) as session:
+        row = ExecutionNode(
+            node_key="no-undrain-term",
+            name="no-undrain-term",
+            provider_type=ExecutionNodeProviderType.LOCAL.value,
+            execution_mode=ExecutionNodeExecutionMode.LOCAL_DOCKER.value,
+            status=ExecutionNodeStatus.TERMINATED.value,
+            schedulable=False,
+            total_cpu=2.0,
+            total_memory_mb=4096,
+            allocatable_cpu=2.0,
+            allocatable_memory_mb=4096,
+            metadata_json={},
+        )
+        session.add(row)
+        session.commit()
+        with pytest.raises(NodeLifecycleError, match="cannot undrain TERMINATED"):
+            undrain_node(session, node_key="no-undrain-term")
 
 
 def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit_engine) -> None:

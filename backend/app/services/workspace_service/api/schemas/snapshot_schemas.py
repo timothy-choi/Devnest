@@ -54,3 +54,13 @@ class RestoreSnapshotAcceptedResponse(BaseModel):
     snapshot_id: int
     job_id: int
     workspace_status: str
+
+
+class SnapshotArchiveDownloadOfferResponse(BaseModel):
+    """JSON-only download instructions (presigned S3 or backend URL + token for local)."""
+
+    mode: Literal["presigned_s3", "backend_direct"]
+    filename: str
+    expires_in: int
+    presigned_url: str | None = None
+    relative_url: str | None = None

@@ -149,6 +149,8 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-integration-change-me-use-secrets-in-real-deploys}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-integration-internal-api-key}
       DEVNEST_WORKER_ENABLED: "false"
+      # Phase 3b Step 11: spread across READY+schedulable pool (capacity + workload spread). Set false for primary-only.
+      DEVNEST_ENABLE_MULTI_NODE_SCHEDULING: "${DEVNEST_ENABLE_MULTI_NODE_SCHEDULING:-true}"
       DEVNEST_RATE_LIMIT_ENABLED: "false"
       <<: *workspace_snapshot_env
       # Optional fail-fast for EC2/RDS (see header + docs/INTEGRATION_STARTUP.md). deploy-ec2.sh sets when using RDS.
@@ -232,6 +234,7 @@ services:
       # Phase 3a: dedicated heartbeat thread POSTs /internal/execution-nodes/heartbeat on an interval.
       INTERNAL_API_BASE_URL: "http://backend:8000"
       DEVNEST_NODE_HEARTBEAT_ENABLED: "true"
+      DEVNEST_ENABLE_MULTI_NODE_SCHEDULING: "${DEVNEST_ENABLE_MULTI_NODE_SCHEDULING:-true}"
       DEVNEST_NODE_KEY: "node-1"
       DEVNEST_NODE_HEARTBEAT_INTERVAL_SECONDS: "30"
       DEVNEST_RATE_LIMIT_ENABLED: "false"

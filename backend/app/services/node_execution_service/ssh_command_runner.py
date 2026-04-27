@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from typing import Any
+
 from app.libs.topology.system.command_runner import CommandRunner
 
 
@@ -31,7 +34,11 @@ class SshRemoteCommandRunner(CommandRunner):
         if not cmd:
             raise ValueError("cmd must be a non-empty list of strings")
         remote = f"{self._ssh_user}@{self._ssh_host}"
-        prefixed: list[str] = [
+        prefixed: list[str] = self._ssh_prefix_argv(remote) + [str(x) for x in cmd]
+        return super().run(prefixed)
+
+    def _ssh_prefix_argv(self, remote_user_host: str) -> list[str]:
+        return [
             "ssh",
             "-o",
             "BatchMode=yes",
@@ -41,7 +48,18 @@ class SshRemoteCommandRunner(CommandRunner):
             "StrictHostKeyChecking=accept-new",
             "-p",
             str(self._ssh_port),
-            remote,
+            remote_user_host,
             "--",
-        ] + [str(x) for x in cmd]
-        return super().run(prefixed)
+        ]
+
+    def popen_for_remote_command(self, remote_argv: list[str], **popen_kwargs: Any) -> subprocess.Popen:
+        """Run ``remote_argv`` on the SSH host via ``subprocess.Popen`` (for binary tar streams).
+
+        ``remote_argv`` is executed as a single remote argv list after ``ssh … --`` (no shell).
+        Pass ``["sh", "-c", "..."]`` when shell features are required.
+        """
+        if not remote_argv:
+            raise ValueError("remote_argv must be a non-empty list of strings")
+        remote = f"{self._ssh_user}@{self._ssh_host}"
+        prefixed = self._ssh_prefix_argv(remote) + [str(x) for x in remote_argv]
+        return subprocess.Popen(prefixed, **popen_kwargs)

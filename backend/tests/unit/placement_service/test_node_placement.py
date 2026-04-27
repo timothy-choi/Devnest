@@ -80,7 +80,67 @@ def test_list_schedulable_nodes_filters_status_and_flag(placement_engine: Engine
         assert [r.node_key for r in rows] == ["a"]
 
 
-def test_select_node_deterministic_highest_allocatable_cpu(placement_engine: Engine) -> None:
+def test_list_schedulable_nodes_single_node_gate_excludes_secondary(
+    placement_engine: Engine,
+    disable_multi_node_scheduling: None,
+) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="primary-row")
+        _add_node(session, key="secondary-row")
+        rows = list_schedulable_nodes(session)
+        assert len(rows) == 1
+        assert rows[0].node_key == "primary-row"
+
+
+def test_list_schedulable_nodes_includes_all_ready_when_multi_node_enabled(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
+    """With flag true: both READY+schedulable nodes appear (sorted by node_key)."""
+    with Session(placement_engine) as session:
+        _add_node(session, key="node-b")
+        _add_node(session, key="node-a")
+        rows = list_schedulable_nodes(session)
+        assert [r.node_key for r in rows] == ["node-a", "node-b"]
+
+
+def test_select_prefers_primary_by_id_when_multi_node_disabled(
+    placement_engine: Engine,
+    disable_multi_node_scheduling: None,
+) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="weaker-first", alloc_cpu=2.0)
+        _add_node(session, key="stronger-second", alloc_cpu=16.0)
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "weaker-first"
+
+
+def test_step7_default_multi_node_off_primary_wins_over_higher_cpu_secondary(
+    placement_engine: Engine,
+) -> None:
+    """Without env override, app default is primary-only (lower id) even if secondary has more CPU."""
+    with Session(placement_engine) as session:
+        _add_node(session, key="node-1", alloc_cpu=4.0)
+        _add_node(session, key="node-2", alloc_cpu=16.0)
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "node-1"
+
+
+def test_step7_multi_node_on_can_select_secondary_when_it_ranks_first(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="node-1", alloc_cpu=4.0)
+        _add_node(session, key="node-2", alloc_cpu=16.0)
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "node-2"
+
+
+def test_select_node_deterministic_highest_allocatable_cpu(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     with Session(placement_engine) as session:
         _add_node(session, key="low", alloc_cpu=2.0, alloc_mem=4096)
         _add_node(session, key="high", alloc_cpu=8.0, alloc_mem=4096)
@@ -89,12 +149,54 @@ def test_select_node_deterministic_highest_allocatable_cpu(placement_engine: Eng
         assert picked.node_key == "high"
 
 
-def test_select_node_tie_breaker_node_key(placement_engine: Engine) -> None:
+def test_select_node_tie_breaker_node_key(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     with Session(placement_engine) as session:
         _add_node(session, key="z-node", alloc_cpu=4.0)
         _add_node(session, key="a-node", alloc_cpu=4.0)
         picked = select_node_for_workspace(session, workspace_id=99)
         assert picked.node_key == "a-node"
+
+
+def test_select_prefers_node_with_fewer_active_workloads_when_capacity_equal(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
+    """Equal allocatable CPU/memory → active_workload_count asc prefers the less-loaded node."""
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    with Session(placement_engine) as session:
+        n_a = _add_node(session, key="node-a-spread", alloc_cpu=8.0, alloc_mem=8192)
+        _add_node(session, key="node-z-spread", alloc_cpu=8.0, alloc_mem=8192)
+        u = UserAuth(username="spr1", password_hash="x", email="spr1@e.com")
+        session.add(u)
+        session.commit()
+        session.refresh(u)
+        ws = Workspace(
+            name="on-node-a",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(n_a.id),
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=ws.workspace_id,
+                node_id="node-a-spread",
+                reserved_cpu=0.5,
+                reserved_memory_mb=512,
+                reserved_disk_mb=1024,
+            ),
+        )
+        session.commit()
+        picked = select_node_for_workspace(session, workspace_id=777)
+        assert picked.node_key == "node-z-spread"
 
 
 def test_select_node_no_node_raises(placement_engine: Engine) -> None:
@@ -358,7 +460,10 @@ def test_select_node_rejects_when_free_disk_insufficient(placement_engine: Engin
             )
 
 
-def test_select_node_chooses_other_node_when_first_is_full(placement_engine: Engine) -> None:
+def test_select_node_chooses_other_node_when_first_is_full(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     from app.services.auth_service.models.user_auth import UserAuth
     from app.services.workspace_service.models import Workspace, WorkspaceRuntime
     from app.services.workspace_service.models.enums import WorkspaceStatus
@@ -400,7 +505,22 @@ def test_select_node_chooses_other_node_when_first_is_full(placement_engine: Eng
         assert picked.node_key == "roomy"
 
 
-def test_select_node_reports_no_capacity_when_all_nodes_ineligible(placement_engine: Engine) -> None:
+def test_drained_node_not_in_pool_remaining_node_receives_placement(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
+    """Non-schedulable (drained) nodes are excluded; placement lands on the other READY node (Step 11)."""
+    with Session(placement_engine) as session:
+        _add_node(session, key="alpha", alloc_cpu=8.0)
+        _add_node(session, key="zeta", alloc_cpu=16.0, schedulable=False)
+        picked = select_node_for_workspace(session, workspace_id=1)
+        assert picked.node_key == "alpha"
+
+
+def test_select_node_reports_no_capacity_when_all_nodes_ineligible(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
     from app.services.auth_service.models.user_auth import UserAuth
     from app.services.workspace_service.models import Workspace, WorkspaceRuntime
     from app.services.workspace_service.models.enums import WorkspaceStatus

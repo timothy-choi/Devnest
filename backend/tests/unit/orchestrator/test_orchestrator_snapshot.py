@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.libs.probes.interfaces import ProbeRunner
+from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology.interfaces import TopologyAdapter
 from app.services.node_execution_service.workspace_project_dir import WORKSPACE_USER_PROJECT_SUBDIR
@@ -93,3 +94,41 @@ def test_export_import_roundtrip_uses_project_subdir_when_present(
     assert imp.success is True
     assert (proj / "tracked.txt").read_text(encoding="utf-8") == "in-project"
     assert cs_noise.read_text(encoding="utf-8") == "internal"
+
+
+def test_export_running_uses_docker_exec_before_resolving_host_project_path(
+    tmp_path: Path,
+    mock_topology: MagicMock,
+    mock_probe: MagicMock,
+) -> None:
+    """RUNNING + container_id: stream from engine first (multi-node); do not touch host project paths."""
+    ws_root = tmp_path / "wsroot"
+    dc = MagicMock()
+    ctr = MagicMock()
+    ctr.attrs = {"State": {"Status": "running", "Pid": 1}, "Id": "abc", "Config": {"Labels": {}}, "Mounts": []}
+    dc.containers.get.return_value = ctr
+    adapter = DockerRuntimeAdapter(client=dc)
+    svc = DefaultOrchestratorService(
+        adapter,
+        mock_topology,
+        mock_probe,
+        topology_id=TOPOLOGY_ID,
+        node_id=NODE_ID,
+        workspace_projects_base=str(ws_root),
+    )
+    out = tmp_path / "snap.tgz"
+    with (
+        patch.object(svc, "_workspace_project_path_for_snapshot") as mock_host_path,
+        patch(
+            "app.services.orchestrator_service.service.export_running_workspace_tar_from_container",
+            return_value=(True, []),
+        ) as mock_exec,
+    ):
+        res = svc.export_workspace_filesystem_snapshot(
+            workspace_id=WORKSPACE_ID,
+            archive_path=str(out),
+            container_id="cid-1",
+        )
+    assert res.success is True
+    mock_exec.assert_called_once()
+    mock_host_path.assert_not_called()

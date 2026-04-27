@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.libs.topology.models import Topology  # noqa: F401 — register metadata for create_all
 from app.services.auth_service.models import UserAuth
@@ -259,3 +259,98 @@ def test_create_requires_default_topology_on_node_when_strict(bind_engine: Engin
         with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
             with pytest.raises(InvalidPlacementParametersError, match="default_topology_id"):
                 resolve_orchestrator_placement(session, ws, job)
+
+
+def test_snapshot_create_uses_workspace_execution_node_when_no_runtime(bind_engine: Engine) -> None:
+    """Phase 3b Step 10: snapshot jobs must not fall back to control-plane DEVNEST_NODE_ID."""
+    with Session(bind_engine) as session:
+        uid = _seed_user(session)
+        _seed_topology(session, 99)
+        session.add(
+            ExecutionNode(
+                node_key="n-remote",
+                name="n-remote",
+                provider_type=ExecutionNodeProviderType.LOCAL.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                default_topology_id=99,
+            ),
+        )
+        session.commit()
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "n-remote")).first()
+        assert node is not None and node.id is not None
+        now = datetime.now(timezone.utc)
+        ws = Workspace(
+            name="snap_ws",
+            description="",
+            owner_user_id=uid,
+            status=WorkspaceStatus.RUNNING.value,
+            is_private=True,
+            created_at=now,
+            updated_at=now,
+            execution_node_id=int(node.id),
+        )
+        session.add(ws)
+        session.flush()
+        job = WorkspaceJob(
+            workspace_id=ws.workspace_id,
+            job_type=WorkspaceJobType.SNAPSHOT_CREATE.value,
+            status=WorkspaceJobStatus.QUEUED.value,
+            requested_by_user_id=uid,
+            requested_config_version=1,
+            attempt=0,
+            workspace_snapshot_id=1,
+        )
+        session.add(job)
+        session.commit()
+        ws_id = ws.workspace_id
+        job_id = job.workspace_job_id
+
+    fake_settings = type(
+        "S",
+        (),
+        {
+            "devnest_env": "production",
+            "devnest_allow_runtime_env_fallback": False,
+        },
+    )()
+
+    with Session(bind_engine) as session:
+        ws2 = session.get(Workspace, ws_id)
+        job2 = session.get(WorkspaceJob, job_id)
+        assert ws2 is not None and job2 is not None
+        with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
+            nk, tid = resolve_orchestrator_placement(session, ws2, job2)
+        assert nk == "n-remote"
+        assert tid == 99
+
+
+def test_snapshot_create_raises_without_runtime_or_execution_node(bind_engine: Engine) -> None:
+    with Session(bind_engine) as session:
+        uid = _seed_user(session)
+        _seed_topology(session, 99)
+        _add_node(session, default_topology_id=99)
+        ws, job = _ws_job(session, uid, WorkspaceJobType.SNAPSHOT_CREATE.value)
+        ws_id = ws.workspace_id
+        job_id = job.workspace_job_id
+
+    fake_settings = type(
+        "S",
+        (),
+        {
+            "devnest_env": "development",
+            "devnest_allow_runtime_env_fallback": True,
+        },
+    )()
+
+    with Session(bind_engine) as session:
+        ws2 = session.get(Workspace, ws_id)
+        job2 = session.get(WorkspaceJob, job_id)
+        assert ws2 is not None and job2 is not None
+        with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
+            with pytest.raises(AuthoritativePlacementError, match="Snapshot job requires placement"):
+                resolve_orchestrator_placement(session, ws2, job2)

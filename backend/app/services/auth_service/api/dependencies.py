@@ -37,3 +37,17 @@ def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
         ) from None
+
+
+def get_optional_bearer_user(
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    session: Annotated[Session, Depends(get_db)],
+) -> UserAuth | None:
+    """Like :func:`get_current_user` but returns ``None`` when no/invalid Bearer token."""
+    if creds is None or creds.scheme.lower() != "bearer":
+        return None
+    try:
+        user_id = decode_access_user_id(creds.credentials)
+        return get_user_auth_entry(session, user_id=user_id)
+    except Exception:
+        return None

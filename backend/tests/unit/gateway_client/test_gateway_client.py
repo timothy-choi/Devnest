@@ -45,6 +45,27 @@ def test_register_route_posts_expected_json() -> None:
     }
 
 
+def test_register_route_posts_optional_node_metadata() -> None:
+    captured: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(_parse_request_json(request))
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    client = DevnestGatewayClient("http://route-admin.test", transport=transport)
+    client.register_route(
+        "7",
+        "10.0.0.7:8080",
+        "7.app.devnest.local",
+        node_key="node-ec2-a",
+        execution_node_id=42,
+    )
+    assert captured[0]["workspace_id"] == "7"
+    assert captured[0]["node_key"] == "node-ec2-a"
+    assert captured[0]["execution_node_id"] == 42
+
+
 def test_deregister_route_deletes_path() -> None:
     paths: list[str] = []
 

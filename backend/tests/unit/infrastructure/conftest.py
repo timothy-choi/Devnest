@@ -8,6 +8,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
 # Register all models for metadata.create_all
+from app.libs.topology.models import Topology  # noqa: F401
 from app.services.auth_service.models import UserAuth  # noqa: F401
 from app.services.placement_service.models import ExecutionNode  # noqa: F401
 from app.services.workspace_service.models import (  # noqa: F401

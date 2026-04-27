@@ -31,6 +31,10 @@ from app.libs.common.config import get_settings
 from app.libs.observability.log_events import LogEvent, log_event
 from app.services.node_execution_service.ssm_send_command import build_ssm_client
 from app.services.placement_service import get_node
+from app.services.placement_service.constants import (
+    DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
+    DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+)
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeExecutionMode,
@@ -281,6 +285,7 @@ def register_existing_ec2_node(
     node_key: str | None = None,
     ssh_user: str | None = None,
     execution_mode: str | None = None,
+    catalog_only: bool = False,
 ) -> ExecutionNode:
     """Register a pre-existing EC2 instance (delegates to :func:`register_ec2_instance`)."""
     return register_ec2_instance(
@@ -290,7 +295,178 @@ def register_existing_ec2_node(
         node_key=node_key,
         ssh_user=ssh_user,
         execution_mode=execution_mode,
+        catalog_only=catalog_only,
     )
+
+
+def register_catalog_ec2_stub(
+    session: Session,
+    *,
+    node_key: str,
+    name: str | None = None,
+    provider_instance_id: str | None = None,
+    private_ip: str | None = None,
+    public_ip: str | None = None,
+    region: str | None = None,
+    availability_zone: str | None = None,
+    instance_type: str | None = None,
+    execution_mode: str | None = None,
+    ssh_user: str | None = None,
+    status: str | None = None,
+    total_cpu: float | None = None,
+    total_memory_mb: int | None = None,
+    allocatable_cpu: float | None = None,
+    allocatable_memory_mb: int | None = None,
+    max_workspaces: int | None = None,
+    allocatable_disk_mb: int | None = None,
+    align_status_with_heartbeat: bool = False,
+) -> ExecutionNode:
+    """
+    Insert or update an **EC2** execution-node catalog row **without** calling AWS (Phase 3b Step 4).
+
+    Always sets ``schedulable=False`` so the scheduler never selects this node. Does not register
+    Traefik routes or change placement predicates.
+
+    Use :func:`register_existing_ec2_node` with ``catalog_only=True`` when you have a real instance id
+    and want fields hydrated from ``describe_instances``.
+    """
+    nk = (node_key or "").strip()
+    if not nk:
+        raise NodeLifecycleError("node_key is required")
+
+    settings = get_settings()
+    default_em = settings.devnest_ec2_default_execution_mode.strip().lower()
+    raw_em = (execution_mode or default_em).strip().lower()
+    allowed_em = (
+        ExecutionNodeExecutionMode.SSH_DOCKER.value,
+        ExecutionNodeExecutionMode.SSM_DOCKER.value,
+    )
+    if raw_em not in allowed_em:
+        raw_em = default_em if default_em in allowed_em else ExecutionNodeExecutionMode.SSM_DOCKER.value
+
+    user = (ssh_user or "").strip() or settings.devnest_ec2_ssh_user_default.strip() or "ubuntu"
+    reg = (region or (settings.aws_region or "").strip() or "us-east-1").strip() or "us-east-1"
+    pid = (provider_instance_id or "").strip() or f"catalog-pending:{nk}"
+    if len(pid) > 255:
+        raise NodeLifecycleError("provider_instance_id exceeds 255 characters")
+
+    vcpu = float(total_cpu) if total_cpu is not None and float(total_cpu) > 0 else 4.0
+    mem = int(total_memory_mb) if total_memory_mb is not None and int(total_memory_mb) > 0 else 8192
+    acpu = float(allocatable_cpu) if allocatable_cpu is not None and float(allocatable_cpu) > 0 else vcpu
+    amem = int(allocatable_memory_mb) if allocatable_memory_mb is not None and int(allocatable_memory_mb) > 0 else mem
+    mxw = int(max_workspaces) if max_workspaces is not None and int(max_workspaces) > 0 else int(
+        DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+    )
+    adisk = (
+        int(allocatable_disk_mb)
+        if allocatable_disk_mb is not None and int(allocatable_disk_mb) > 0
+        else int(DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB)
+    )
+
+    st_in = (status or "").strip().upper() or None
+    if st_in is not None and st_in not in (
+        ExecutionNodeStatus.READY.value,
+        ExecutionNodeStatus.NOT_READY.value,
+    ):
+        raise NodeLifecycleError(
+            "catalog stub status must be READY or NOT_READY "
+            f"(got {st_in!r}); omit status for default NOT_READY",
+        )
+
+    now = _now()
+    stmt = select(ExecutionNode).where(ExecutionNode.node_key == nk)
+    row = session.exec(stmt).first()
+
+    def _resolve_status(r: ExecutionNode | None) -> str:
+        if align_status_with_heartbeat:
+            hb = r.last_heartbeat_at if r is not None else None
+            if hb is None:
+                return ExecutionNodeStatus.NOT_READY.value
+            s = get_settings()
+            max_age = int(s.devnest_node_heartbeat_max_age_seconds or 300)
+            age = (now - hb).total_seconds()
+            if age >= 0 and age <= max_age:
+                return ExecutionNodeStatus.READY.value
+            return ExecutionNodeStatus.NOT_READY.value
+        if st_in is not None:
+            return st_in
+        if r is not None and (r.status or "").strip():
+            return str(r.status).strip()
+        return ExecutionNodeStatus.NOT_READY.value
+
+    meta_patch = {"catalog_ec2_stub": {"updated_at": now.isoformat()}}
+
+    if row is not None:
+        if row.provider_type == ExecutionNodeProviderType.LOCAL.value:
+            raise NodeLifecycleError(
+                f"node_key {nk!r} is already a local execution node; choose another key or remove the row",
+            )
+        row.name = (name or "").strip() or row.name or nk
+        row.provider_type = ExecutionNodeProviderType.EC2.value
+        row.provider_instance_id = pid
+        row.region = reg
+        row.availability_zone = (availability_zone or "").strip() or row.availability_zone
+        row.instance_type = (instance_type or "").strip() or row.instance_type
+        row.private_ip = (private_ip or "").strip() or row.private_ip
+        row.public_ip = (public_ip or "").strip() or row.public_ip
+        row.execution_mode = raw_em
+        row.ssh_user = user
+        row.total_cpu = vcpu
+        row.total_memory_mb = mem
+        row.allocatable_cpu = acpu
+        row.allocatable_memory_mb = amem
+        row.max_workspaces = mxw
+        row.allocatable_disk_mb = adisk
+        row.schedulable = False
+        row.status = _resolve_status(row)
+        row.updated_at = now
+        merged = dict(row.metadata_json or {})
+        inner = dict(merged.get("catalog_ec2_stub") or {})
+        inner.update(meta_patch["catalog_ec2_stub"])
+        merged["catalog_ec2_stub"] = inner
+        row.metadata_json = merged
+        session.add(row)
+        session.flush()
+        logger.info(
+            "execution_node_catalog_ec2_stub_upserted",
+            extra={"node_key": nk, "node_id": row.id, "status": row.status},
+        )
+        return row
+
+    st_new = _resolve_status(None)
+    row = ExecutionNode(
+        node_key=nk,
+        name=(name or "").strip() or nk,
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=pid,
+        region=reg,
+        availability_zone=(availability_zone or "").strip() or None,
+        instance_type=(instance_type or "").strip() or None,
+        hostname=None,
+        private_ip=(private_ip or "").strip() or None,
+        public_ip=(public_ip or "").strip() or None,
+        execution_mode=raw_em,
+        ssh_host=None,
+        ssh_port=22,
+        ssh_user=user,
+        status=st_new,
+        schedulable=False,
+        total_cpu=vcpu,
+        total_memory_mb=mem,
+        allocatable_cpu=acpu,
+        allocatable_memory_mb=amem,
+        max_workspaces=mxw,
+        allocatable_disk_mb=adisk,
+        metadata_json=meta_patch,
+        last_synced_at=None,
+    )
+    session.add(row)
+    session.flush()
+    logger.info(
+        "execution_node_catalog_ec2_stub_inserted",
+        extra={"node_key": nk, "node_id": row.id, "status": row.status},
+    )
+    return row
 
 
 def mark_node_draining(
@@ -322,6 +498,57 @@ def mark_node_draining(
             "node_id": row.id,
             "provider_type": row.provider_type,
             "provider_instance_id": (row.provider_instance_id or "").strip() or None,
+        },
+    )
+    return row
+
+
+def undrain_node(
+    session: Session,
+    *,
+    node_id: int | None = None,
+    node_key: str | None = None,
+) -> ExecutionNode:
+    """Re-admit a node for placement after drain or catalog-only ``schedulable=false``.
+
+    - **DRAINING** → ``READY`` + ``schedulable=True``.
+    - **READY** with ``schedulable=False`` → ``schedulable=True`` (status unchanged).
+    - **TERMINATED** / **PROVISIONING** / **NOT_READY** (etc.) → :class:`NodeLifecycleError` — use
+      ``POST /internal/execution-nodes/sync`` or ``register-existing`` / provisioning flows instead.
+
+    Idempotent when already ``READY`` and ``schedulable=True``.
+    """
+    row = get_node(session, node_id=node_id, node_key=node_key)
+    if row.status == ExecutionNodeStatus.TERMINATED.value:
+        raise NodeLifecycleError(
+            f"cannot undrain TERMINATED node (node_key={row.node_key!r}); re-register the instance or restore from backup",
+        )
+    if row.status == ExecutionNodeStatus.READY.value and bool(row.schedulable):
+        return row
+    if row.status == ExecutionNodeStatus.DRAINING.value:
+        row.status = ExecutionNodeStatus.READY.value
+        row.schedulable = True
+    elif row.status == ExecutionNodeStatus.READY.value and not bool(row.schedulable):
+        row.schedulable = True
+    else:
+        raise NodeLifecycleError(
+            f"undrain supports DRAINING or READY+schedulable=false (node_key={row.node_key!r}, "
+            f"status={row.status!r}); for NOT_READY/PROVISIONING use POST /internal/execution-nodes/sync",
+        )
+    row.updated_at = _now()
+    row.metadata_json = _merge_metadata(
+        row,
+        {"lifecycle": {"undrained_at": _now().isoformat()}},
+    )
+    session.add(row)
+    session.flush()
+    logger.info(
+        "execution_node_undrained",
+        extra={
+            "node_key": row.node_key,
+            "node_id": row.id,
+            "status": row.status,
+            "schedulable": bool(row.schedulable),
         },
     )
     return row

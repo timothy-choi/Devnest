@@ -38,6 +38,7 @@ class WorkspaceBringUpResult:
     netns_ref: Optional[str] = None
     workspace_ip: Optional[str] = None
     internal_endpoint: Optional[str] = None
+    gateway_route_target: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
     # Compensating rollback after failed bring-up (probe unhealthy or exception path in caller).
@@ -79,6 +80,7 @@ class WorkspaceRestartResult:
     topology_id: Optional[str] = None
     workspace_ip: Optional[str] = None
     internal_endpoint: Optional[str] = None
+    gateway_route_target: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
 
@@ -99,6 +101,7 @@ class WorkspaceUpdateResult:
     topology_id: Optional[str] = None
     workspace_ip: Optional[str] = None
     internal_endpoint: Optional[str] = None
+    gateway_route_target: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
 

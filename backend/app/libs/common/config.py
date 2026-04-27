@@ -644,6 +644,35 @@ class Settings(BaseSettings):
     aws_secret_access_key: str = ""
     # Placement filter: ``all`` (default) = local + EC2 nodes; ``local`` / ``ec2`` = restrict pool.
     devnest_node_provider: str = "all"
+    # When false, new placement is restricted to the primary node only: lowest ``execution_node.id``
+    # among READY+schedulable rows after the provider filter. When true (recommended for multi-node
+    # fleets; integration Compose defaults this on), all READY+schedulable nodes in the provider pool
+    # compete using capacity + spread ordering (and optional heartbeat freshness when
+    # DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT is set).
+    # See docs/PHASE_3B_STEP7_MULTI_NODE_SCHEDULING_FLAG.md and docs/PHASE_3B_STEP11_TWO_NODE_SCHEDULING_SPREAD.md.
+    devnest_enable_multi_node_scheduling: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_ENABLE_MULTI_NODE_SCHEDULING",
+            "devnest_enable_multi_node_scheduling",
+        ),
+    )
+    # Phase 3b Step 8: internal pinned CREATE for allowlisted execution_node.id (operator test workspace).
+    devnest_allow_pinned_create_placement: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_ALLOW_PINNED_CREATE_PLACEMENT",
+            "devnest_allow_pinned_create_placement",
+        ),
+    )
+    # Comma-separated ``execution_node.id`` values permitted for pinned operator CREATE.
+    devnest_pinned_create_execution_node_ids: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "DEVNEST_PINNED_CREATE_EXECUTION_NODE_IDS",
+            "devnest_pinned_create_execution_node_ids",
+        ),
+    )
     # Default SSH user when registering EC2 nodes (Amazon Linux / Ubuntu images).
     devnest_ec2_ssh_user_default: str = "ubuntu"
     # Default ``ExecutionNode.execution_mode`` for new EC2 registry rows (``ssm_docker`` preferred; ``ssh_docker`` fallback).
@@ -857,6 +886,32 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 5
         return max(1, min(n, 50))
+
+    @field_validator("devnest_enable_multi_node_scheduling", mode="before")
+    @classmethod
+    def _parse_devnest_enable_multi_node_scheduling(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off", ""):
+                return False
+        return bool(v)
+
+    @field_validator("devnest_allow_pinned_create_placement", mode="before")
+    @classmethod
+    def _parse_devnest_allow_pinned_create_placement(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off", ""):
+                return False
+        return bool(v)
 
     @field_validator(
         "devnest_worker_emit_execution_node_heartbeat",

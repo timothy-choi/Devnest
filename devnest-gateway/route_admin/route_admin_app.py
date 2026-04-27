@@ -127,6 +127,9 @@ class RouteRegisterBody(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=128)
     public_host: str = Field(min_length=1, max_length=512)
     target: str = Field(min_length=1, max_length=1024)
+    # Optional metadata for ops logs (not written into Traefik YAML).
+    node_key: str | None = Field(default=None, max_length=256)
+    execution_node_id: int | None = Field(default=None, ge=1)
 
 
 def _normalize_target(raw: str) -> str:
@@ -219,6 +222,16 @@ def register_route(body: RouteRegisterBody) -> dict[str, str]:
     with _lock:
         _routes[wid] = row
         _persist_locked()
+    logger.info(
+        "route_admin_route_upserted",
+        extra={
+            "workspace_id": wid,
+            "public_host": public_host,
+            "target": target,
+            "node_key": (body.node_key or "").strip() or None,
+            "execution_node_id": body.execution_node_id,
+        },
+    )
     return row
 
 

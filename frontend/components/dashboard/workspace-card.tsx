@@ -161,7 +161,9 @@ export function WorkspaceCard({
               </div>
             </DropdownMenuItem>
             <DropdownMenuItem
-              onClick={() => onDownload(String(workspace.id))}
+              onSelect={() => {
+                void onDownload(String(workspace.id));
+              }}
               disabled={!canDownloadSnapshot || snapshotBusyHere}
             >
               <Download className="h-4 w-4" />

@@ -98,6 +98,9 @@ def _workload_counts_by_node_keys(session: Session, node_keys: list[str]) -> dic
 def _count_idle_ec2_nodes(session: Session) -> int:
     """Count READY+schedulable EC2 nodes that have zero active workload placements.
 
+    Uses the same placement pool predicates as scheduling (including
+    ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING`` / primary-node gate when disabled).
+
     Used for cost-aware scale-up suppression: if idle nodes already exist there is no
     reason to provision more capacity.
 
@@ -113,9 +116,8 @@ def _count_idle_ec2_nodes(session: Session) -> int:
         select(ExecutionNode)
         .where(
             and_(
+                *schedulable_placement_predicates(),
                 ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
-                ExecutionNode.status == ExecutionNodeStatus.READY.value,
-                ExecutionNode.schedulable == True,  # noqa: E712
             ),
         )
     )
@@ -128,14 +130,14 @@ def _count_idle_ec2_nodes(session: Session) -> int:
 
 
 def count_ec2_ready_schedulable(session: Session) -> int:
+    """Count EC2 rows in the **placement pool** (same predicates as workspace scheduling)."""
     stmt = (
         select(func.count())
         .select_from(ExecutionNode)
         .where(
             and_(
+                *schedulable_placement_predicates(),
                 ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
-                ExecutionNode.status == ExecutionNodeStatus.READY.value,
-                ExecutionNode.schedulable == True,  # noqa: E712
             ),
         )
     )

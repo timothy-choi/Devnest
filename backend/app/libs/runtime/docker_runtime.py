@@ -406,6 +406,11 @@ class DockerRuntimeAdapter(RuntimeAdapter):
     def __init__(self, client: docker.DockerClient | None = None) -> None:
         self._client = client if client is not None else docker.from_env()
 
+    @property
+    def docker_engine_client(self) -> docker.DockerClient:
+        """Underlying :class:`docker.DockerClient` (local or ``ssh://`` remote engine)."""
+        return self._client
+
     def _get_container_if_exists(self, ref: str) -> Container | None:
         try:
             return self._client.containers.get(ref)

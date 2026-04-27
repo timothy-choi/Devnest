@@ -12,6 +12,10 @@ from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import LogEvent, log_event
 from app.services.gateway_client.errors import GatewayClientError
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
+from app.services.gateway_client.workspace_route_upstream import (
+    registration_upstream,
+    traefik_upstream_for_workspace_gateway,
+)
 from app.services.orchestrator_service.errors import (
     WorkspaceBringUpError,
     WorkspaceStopError,
@@ -72,7 +76,7 @@ def _strict_list_routes() -> list[dict[str, Any]]:
     return DevnestGatewayClient.from_settings(settings).get_registered_routes()
 
 
-def _strict_register_route(ws: Workspace, internal_endpoint: str) -> None:
+def _strict_register_route(session: Session, ws: Workspace, upstream: str) -> None:
     settings = get_settings()
     wid = ws.workspace_id
     assert wid is not None
@@ -80,7 +84,15 @@ def _strict_register_route(ws: Workspace, internal_endpoint: str) -> None:
         int(wid),
         settings.devnest_base_domain,
     )
-    DevnestGatewayClient.from_settings(settings).register_route(str(wid), internal_endpoint, public)
+    rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    nk = ((rt.node_id if rt else None) or "").strip() or None
+    DevnestGatewayClient.from_settings(settings).register_route(
+        str(wid),
+        upstream,
+        public,
+        node_key=nk,
+        execution_node_id=ws.execution_node_id,
+    )
 
 
 def _strict_deregister_route(workspace_id: int) -> None:
@@ -180,11 +192,14 @@ def _repair_runtime_capacity_ledger(session: Session, ws: Workspace) -> None:
         session.add(rt)
 
 
-def _runtime_snapshot(session: Session, workspace_id: int) -> tuple[str | None, str | None, str | None]:
+def _runtime_snapshot(
+    session: Session,
+    workspace_id: int,
+) -> tuple[str | None, str | None, str | None, str | None]:
     row = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id)).first()
     if row is None:
-        return (None, None, None)
-    return (row.container_id, row.internal_endpoint, row.health_status)
+        return (None, None, None, None)
+    return (row.container_id, row.internal_endpoint, row.gateway_route_target, row.health_status)
 
 
 def execute_reconcile_runtime_job(
@@ -666,6 +681,7 @@ def _reconcile_running(
         internal_endpoint=health.internal_endpoint,
         config_version=config_version,
         probe_healthy=health.probe_healthy,
+        gateway_route_target=health.gateway_route_target,
     )
     after = _runtime_snapshot(session, wid)
     runtime_changed = before != after
@@ -700,7 +716,13 @@ def _reconcile_running(
 
     settings = get_settings()
     fixed_route = False
-    if settings.devnest_gateway_enabled and health.internal_endpoint:
+    rt_cur = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    observed_upstream = (
+        traefik_upstream_for_workspace_gateway(ws, rt_cur)
+        if rt_cur is not None
+        else registration_upstream(health.gateway_route_target, health.internal_endpoint)
+    )
+    if settings.devnest_gateway_enabled and observed_upstream:
         try:
             routes = _strict_list_routes()
         except GatewayClientError as e:
@@ -713,11 +735,11 @@ def _reconcile_running(
         )
         if gateway_route_needs_repair(
             route_row=row,
-            observed_internal_endpoint=health.internal_endpoint,
+            observed_internal_endpoint=observed_upstream,
             expected_public_host=expected_host,
         ):
             try:
-                _strict_register_route(ws, health.internal_endpoint)
+                _strict_register_route(session, ws, observed_upstream)
             except GatewayClientError as e:
                 _fail_reconcile(session, ws, job, f"reconcile:gateway_register_failed:{e}")
                 return

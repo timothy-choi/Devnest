@@ -83,6 +83,7 @@ class LogEvent:
     ORCHESTRATOR_BRINGUP_SUCCEEDED = "orchestrator.bringup.succeeded"
     ORCHESTRATOR_BRINGUP_FAILED = "orchestrator.bringup.failed"
     ORCHESTRATOR_BRINGUP_ROLLBACK = "orchestrator.bringup.rollback"
+    ORCHESTRATOR_SNAPSHOT_EXPORT_STARTED = "orchestrator.snapshot.export_started"
     ORCHESTRATOR_SNAPSHOT_EXPORT_SUCCEEDED = "orchestrator.snapshot.export_succeeded"
     ORCHESTRATOR_SNAPSHOT_IMPORT_SUCCEEDED = "orchestrator.snapshot.import_succeeded"
 
@@ -103,7 +104,11 @@ class LogEvent:
     RECONCILE_FAILED = "reconcile.failed"
 
     PLACEMENT_NO_SCHEDULABLE_NODE = "placement.no_schedulable_node"
+    # Single-line digest from ``explain_placement_decision`` (newlines flattened) for Loki; max size bounded in code.
+    PLACEMENT_DECISION_SUMMARY = "placement.decision.summary"
 
+    # Placement success/failure: ``multi_node_scheduling_enabled``, ``placement_single_node_gate``,
+    # and ``placement_reason`` (Phase 3b Step 7).
     SCHEDULER_NODE_SELECTED = "scheduler.node.selected"
     SCHEDULER_FAIRNESS_SPREAD_APPLIED = "scheduler.fairness_spread_applied"
 
@@ -114,6 +119,8 @@ class LogEvent:
 
     EC2_NODE_PROVISIONED = "ec2.node.provisioned"
     EC2_NODE_TERMINATED = "ec2.node.terminated"
+    # Phase 3b Step 12: structured heartbeat after DB commit (``heartbeat_age_seconds`` for ops / Loki).
+    EXECUTION_NODE_HEARTBEAT_RECORDED = "execution.node.heartbeat_recorded"
 
     # Internal control-plane audit (who triggered sensitive HTTP surfaces; no secrets in fields).
     AUDIT_INTERNAL_WORKSPACE_JOBS_PROCESS = "audit.internal.workspace_jobs.process"

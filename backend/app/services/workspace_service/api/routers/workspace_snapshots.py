@@ -4,21 +4,24 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from sqlmodel import Session
 from starlette.background import BackgroundTask
 
 from app.libs.db.database import get_db
-from app.services.auth_service.api.dependencies import get_current_user
+from app.services.auth_service.api.dependencies import get_current_user, get_optional_bearer_user
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.api.schemas.snapshot_schemas import (
     CreateSnapshotAcceptedResponse,
     CreateSnapshotRequest,
     RestoreSnapshotAcceptedResponse,
+    SnapshotArchiveDownloadOfferResponse,
     SnapshotSummaryResponse,
     storage_backend_label,
 )
+from app.services.workspace_service.services.snapshot_download_token import decode_snapshot_archive_download_token
 from app.services.workspace_service.errors import (
     SnapshotConflictError,
     SnapshotNotFoundError,
@@ -128,6 +131,42 @@ def get_workspace_snapshots(
 
 
 @workspace_snapshots_router.get(
+    "/{workspace_id}/snapshots/archive-download",
+    response_model=SnapshotArchiveDownloadOfferResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get snapshot archive download instructions (presigned S3 or backend token URL)",
+)
+def get_workspace_snapshot_archive_download(
+    request: Request,
+    workspace_id: int,
+    snapshot_id: int | None = Query(
+        default=None,
+        description="Specific snapshot id; omit for the newest AVAILABLE snapshot that has an archive.",
+    ),
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> SnapshotArchiveDownloadOfferResponse:
+    assert current.user_auth_id is not None
+    try:
+        offer = snapshot_service.build_snapshot_archive_download_offer(
+            session,
+            workspace_id=workspace_id,
+            owner_user_id=current.user_auth_id,
+            snapshot_id=snapshot_id,
+            correlation_id=_correlation_id_from_request(request),
+        )
+    except WorkspaceServiceError as e:
+        _raise_snapshot_http(e)
+    return SnapshotArchiveDownloadOfferResponse(
+        mode=offer.mode,
+        filename=offer.filename,
+        expires_in=offer.expires_in,
+        presigned_url=offer.presigned_url,
+        relative_url=offer.relative_url,
+    )
+
+
+@workspace_snapshots_router.get(
     "/{workspace_id}/snapshots/archive",
     summary="Download snapshot project archive (latest AVAILABLE by default)",
     response_class=FileResponse,
@@ -139,16 +178,52 @@ def get_workspace_snapshot_archive(
         default=None,
         description="Specific snapshot id; omit to download the newest AVAILABLE snapshot that has an archive.",
     ),
+    download_token: str | None = Query(
+        default=None,
+        description="Short-lived token from GET …/archive-download (local storage); omit when using Bearer auth.",
+    ),
     session: Session = Depends(get_db),
-    current: UserAuth = Depends(get_current_user),
+    current: UserAuth | None = Depends(get_optional_bearer_user),
 ) -> FileResponse:
-    assert current.user_auth_id is not None
+    owner_user_id: int | None = None
+    effective_snapshot_id = snapshot_id
+
+    if current is not None and current.user_auth_id is not None:
+        owner_user_id = current.user_auth_id
+    elif download_token:
+        try:
+            claims = decode_snapshot_archive_download_token(download_token)
+        except jwt.PyJWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired download link",
+            ) from None
+        if int(claims["wid"]) != int(workspace_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Download link does not match this workspace",
+            )
+        owner_user_id = int(claims["uid"])
+        token_sid = int(claims["sid"])
+        if snapshot_id is not None and int(snapshot_id) != token_sid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="snapshot_id does not match download link",
+            )
+        effective_snapshot_id = token_sid
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid Authorization header",
+        )
+
+    assert owner_user_id is not None
     try:
         info = snapshot_service.prepare_snapshot_archive_download(
             session,
             workspace_id=workspace_id,
-            owner_user_id=current.user_auth_id,
-            snapshot_id=snapshot_id,
+            owner_user_id=owner_user_id,
+            snapshot_id=effective_snapshot_id,
             correlation_id=_correlation_id_from_request(request),
         )
     except WorkspaceServiceError as e:

@@ -8,13 +8,15 @@ Intended for operators and automation — not end-user facing.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from sqlalchemy import and_
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
 from app.libs.db.database import get_db
 from app.libs.observability.log_events import LogEvent, log_event
@@ -24,27 +26,39 @@ from app.services.audit_service.enums import AuditAction, AuditActorType, AuditO
 from app.services.audit_service.service import record_audit
 from app.services.placement_service.bootstrap import default_local_node_key, ensure_default_local_execution_node
 from app.services.placement_service.errors import ExecutionNodeNotFoundError
+from app.services.placement_service.node_heartbeat import execution_node_heartbeat_age_seconds
 from app.services.placement_service.models import ExecutionNode
 from app.services.providers.errors import Ec2InvalidInstanceIdError, Ec2ProviderError
+
+from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+from app.services.workspace_service.models.enums import WorkspaceStatus
 
 from ...errors import Ec2ProvisionConfigurationError, NodeLifecycleError
 from ...lifecycle import (
     deregister_node,
     mark_node_draining,
     provision_ec2_node,
+    register_catalog_ec2_stub,
     register_existing_ec2_node,
     sync_node_state,
     terminate_ec2_node,
+    undrain_node,
 )
+from ...execution_node_smoke import ExecutionNodeSmokeUnsupportedError, run_read_only_execution_node_smoke
 from ...models import Ec2ProvisionRequest
 
 from ..schemas import (
     ExecutionNodeCapacityResponse,
+    ExecutionNodeSmokeReadOnlyBody,
+    ExecutionNodeSmokeResponse,
     ExecutionNodeSummaryResponse,
     NodeKeyOrIdBody,
+    NodeWorkspacesSummaryResponse,
     ProvisionExecutionNodeRequest,
+    RegisterCatalogEc2Body,
     RegisterExistingEc2Body,
     SyncExecutionNodeBody,
+    WorkspaceOnNodeBrief,
 )
 
 _logger = logging.getLogger(__name__)
@@ -110,6 +124,71 @@ def get_execution_nodes_with_capacity(session: Session = Depends(get_db)) -> lis
     return [ExecutionNodeCapacityResponse.from_row_with_capacity(session, row) for row in rows]
 
 
+@router.get(
+    "/workspaces-by-node",
+    response_model=list[NodeWorkspacesSummaryResponse],
+    summary="Workspaces grouped by workspace_runtime.node_id (ops inventory)",
+)
+def get_workspaces_by_runtime_node(
+    session: Session = Depends(get_db),
+    limit_per_node: int = Query(
+        50,
+        ge=1,
+        le=200,
+        description="Maximum workspaces returned per node_key bucket (total count is always exact).",
+    ),
+) -> list[NodeWorkspacesSummaryResponse]:
+    nodes = list(session.exec(select(ExecutionNode).order_by(ExecutionNode.node_key.asc())).all())
+    stmt = (
+        select(Workspace.workspace_id, Workspace.name, Workspace.status, WorkspaceRuntime.node_id)
+        .join(WorkspaceRuntime, WorkspaceRuntime.workspace_id == Workspace.workspace_id)
+        .where(
+            Workspace.status != WorkspaceStatus.DELETED.value,
+            and_(col(WorkspaceRuntime.node_id).is_not(None), WorkspaceRuntime.node_id != ""),
+        )
+    )
+    by_key: defaultdict[str, list[tuple[int, str, str]]] = defaultdict(list)
+    for wid, name, st, nk in session.exec(stmt).all():
+        key = str(nk or "").strip()
+        if not key:
+            continue
+        by_key[key].append((int(wid), str(name or ""), str(st or "")))
+
+    catalog_keys: set[str] = set()
+    out: list[NodeWorkspacesSummaryResponse] = []
+    for n in nodes:
+        nk = (n.node_key or "").strip()
+        if not nk:
+            continue
+        catalog_keys.add(nk)
+        raw = by_key.get(nk, [])
+        briefs = [
+            WorkspaceOnNodeBrief(workspace_id=w, name=nm, status=st) for w, nm, st in raw[:limit_per_node]
+        ]
+        out.append(
+            NodeWorkspacesSummaryResponse(
+                node_key=nk,
+                execution_node_id=n.id,
+                workspace_count=len(raw),
+                workspaces=briefs,
+            ),
+        )
+    for nk in sorted(set(by_key.keys()) - catalog_keys):
+        raw = by_key[nk]
+        briefs = [
+            WorkspaceOnNodeBrief(workspace_id=w, name=nm, status=st) for w, nm, st in raw[:limit_per_node]
+        ]
+        out.append(
+            NodeWorkspacesSummaryResponse(
+                node_key=nk,
+                execution_node_id=None,
+                workspace_count=len(raw),
+                workspaces=briefs,
+            ),
+        )
+    return out
+
+
 @router.post(
     "/heartbeat",
     response_model=ExecutionNodeHeartbeatOutBody,
@@ -119,7 +198,11 @@ def post_execution_node_heartbeat(
     body: ExecutionNodeHeartbeatInBody,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeHeartbeatOutBody:
-    """Apply execution node heartbeat: update ``last_heartbeat_at`` and optional ``metadata_json['heartbeat']``."""
+    """Apply execution node heartbeat: update ``last_heartbeat_at`` and optional ``metadata_json['heartbeat']``.
+
+    Does **not** modify ``schedulable`` or ``status`` (Phase 3b: catalog node-2 can heartbeat while
+    ``schedulable=false``; placement still excludes it until undrain / explicit enable).
+    """
     nk = str(body.node_key).strip()
     _logger.info(
         "execution_node_heartbeat_received",
@@ -162,9 +245,15 @@ def post_execution_node_heartbeat(
     session.commit()
     session.refresh(node)
 
-    _logger.info(
-        "execution_node_heartbeat_node_updated",
-        extra={"node_key": nk, "execution_node_id": node.id},
+    log_event(
+        _logger,
+        LogEvent.EXECUTION_NODE_HEARTBEAT_RECORDED,
+        node_key=nk,
+        execution_node_id=node.id,
+        heartbeat_age_seconds=execution_node_heartbeat_age_seconds(node),
+        docker_ok=bool(body.docker_ok),
+        disk_free_mb=body.disk_free_mb,
+        slots_in_use=body.slots_in_use,
     )
     return ExecutionNodeHeartbeatOutBody(
         id=node.id,
@@ -173,6 +262,34 @@ def post_execution_node_heartbeat(
         schedulable=bool(node.schedulable),
         last_heartbeat_at=node.last_heartbeat_at,
     )
+
+
+@router.post(
+    "/smoke-read-only",
+    response_model=ExecutionNodeSmokeResponse,
+    summary="Run read-only docker info on an EC2 execution node (SSM or SSH smoke, Phase 3b)",
+)
+def post_execution_node_smoke_read_only(
+    body: ExecutionNodeSmokeReadOnlyBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSmokeResponse:
+    """Operator smoke: verify control plane can reach node Docker without changing ``schedulable`` or placement.
+
+    Runs in the API process (same AWS/SSH credentials as other control-plane mutations). Phase 3b Step 6:
+    use for catalog ``node-2`` while ``schedulable=false`` — no Traefik or workspace scheduling changes.
+    """
+    _audit_mutation("smoke_read_only", **_select_kwargs(body))
+    try:
+        payload = run_read_only_execution_node_smoke(
+            session,
+            read_only_command=body.read_only_command,
+            **_select_kwargs(body),
+        )
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except ExecutionNodeSmokeUnsupportedError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail=e.message) from e
+    return ExecutionNodeSmokeResponse.model_validate(payload)
 
 
 def _merge_provision_request(body: ProvisionExecutionNodeRequest) -> Ec2ProvisionRequest:
@@ -242,16 +359,70 @@ def post_provision_execution_node(
 
 
 @router.post(
+    "/register-catalog-ec2",
+    response_model=ExecutionNodeSummaryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Phase 3b Step 4: upsert EC2 catalog row without AWS (schedulable=false; optional placeholder instance id)",
+)
+def post_register_catalog_ec2(
+    body: RegisterCatalogEc2Body,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("register_catalog_ec2", node_key=body.node_key.strip())
+    try:
+        node = register_catalog_ec2_stub(
+            session,
+            node_key=body.node_key.strip(),
+            name=body.name,
+            provider_instance_id=body.provider_instance_id,
+            private_ip=body.private_ip,
+            public_ip=body.public_ip,
+            region=body.region,
+            availability_zone=body.availability_zone,
+            instance_type=body.instance_type,
+            execution_mode=body.execution_mode,
+            ssh_user=body.ssh_user,
+            status=body.status,
+            total_cpu=body.total_cpu,
+            total_memory_mb=body.total_memory_mb,
+            allocatable_cpu=body.allocatable_cpu,
+            allocatable_memory_mb=body.allocatable_memory_mb,
+            max_workspaces=body.max_workspaces,
+            allocatable_disk_mb=body.allocatable_disk_mb,
+            align_status_with_heartbeat=bool(body.align_status_with_heartbeat),
+        )
+        record_audit(
+            session,
+            action=AuditAction.NODE_REGISTERED.value,
+            resource_type="node",
+            resource_id=node.node_key,
+            actor_type=AuditActorType.INTERNAL_SERVICE.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            node_id=node.node_key,
+            metadata={"register_catalog_ec2": True, "provider_instance_id": node.provider_instance_id},
+        )
+        session.commit()
+        session.refresh(node)
+    except NodeLifecycleError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
     "/register-existing",
     response_model=ExecutionNodeSummaryResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a pre-existing EC2 instance (immediate READY if running, unless lifecycle state blocks)",
+    summary="Register a pre-existing EC2 instance (optional catalog_only forces schedulable=false, Step 4)",
 )
 def post_register_existing_ec2(
     body: RegisterExistingEc2Body,
     session: Session = Depends(get_db),
 ) -> ExecutionNodeSummaryResponse:
-    _audit_mutation("register_existing", instance_id=body.instance_id.strip())
+    _audit_mutation(
+        "register_existing",
+        instance_id=body.instance_id.strip(),
+        catalog_only=bool(body.catalog_only),
+    )
     try:
         node = register_existing_ec2_node(
             session,
@@ -259,6 +430,7 @@ def post_register_existing_ec2(
             node_key=body.node_key,
             ssh_user=body.ssh_user,
             execution_mode=body.execution_mode,
+            catalog_only=bool(body.catalog_only),
         )
         record_audit(
             session,
@@ -322,6 +494,27 @@ def post_drain_execution_node(
         session.refresh(node)
     except ExecutionNodeNotFoundError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    return ExecutionNodeSummaryResponse.from_row(node)
+
+
+@router.post(
+    "/undrain",
+    response_model=ExecutionNodeSummaryResponse,
+    summary="Re-admit a DRAINING node (READY + schedulable) or set schedulable=true on READY",
+)
+def post_undrain_execution_node(
+    body: NodeKeyOrIdBody,
+    session: Session = Depends(get_db),
+) -> ExecutionNodeSummaryResponse:
+    _audit_mutation("undrain", node_id=body.node_id, node_key=body.node_key)
+    try:
+        node = undrain_node(session, **_select_kwargs(body))
+        session.commit()
+        session.refresh(node)
+    except ExecutionNodeNotFoundError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=str(e)) from e
+    except NodeLifecycleError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=str(e)) from e
     return ExecutionNodeSummaryResponse.from_row(node)
 
 

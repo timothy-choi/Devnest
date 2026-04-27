@@ -58,6 +58,10 @@ from app.services.node_execution_service.workspace_project_dir import (
     workspace_container_uid_gid,
     workspace_project_dir_name,
 )
+from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
+from app.libs.runtime.ssm_docker_runtime import SsmDockerRuntimeAdapter
+from app.services.gateway_client.workspace_route_upstream import compose_traefik_upstream_target
+from app.services.node_execution_service.ssh_command_runner import SshRemoteCommandRunner
 from app.services.placement_service.runtime_policy import authoritative_container_ref_required
 
 from .errors import (
@@ -69,6 +73,11 @@ from .errors import (
     WorkspaceUpdateError,
 )
 from .interfaces import OrchestratorService
+from .snapshot_filesystem import (
+    export_host_tree_tar_via_ssh,
+    export_running_workspace_tar_from_container,
+    import_archive_to_host_via_ssh,
+)
 from .results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
@@ -203,12 +212,16 @@ class DefaultOrchestratorService(OrchestratorService):
         workspace_projects_base: str | None = None,
         workspace_image: str | None = None,
         ensure_workspace_project_dir: _EnsureWorkspaceProjectDir | None = None,
+        traefik_routing_host: str | None = None,
+        snapshot_ssh_runner: SshRemoteCommandRunner | None = None,
     ) -> None:
         self._runtime_adapter = runtime_adapter
         self._topology_service = topology_service
         self._probe_runner = probe_runner
         self._topology_id = topology_id
         self._node_id = node_id.strip() or "node-1"
+        self._traefik_routing_host = (traefik_routing_host or "").strip() or None
+        self._snapshot_ssh_runner = snapshot_ssh_runner
         self._workspace_projects_base = workspace_projects_base or os.path.join(
             tempfile.gettempdir(),
             "devnest-workspaces",
@@ -871,6 +884,14 @@ class DefaultOrchestratorService(OrchestratorService):
             [f"{i.component}:{i.code}:{i.message}" for i in health.issues] if health.issues else []
         )
 
+        internal_ep = health.internal_endpoint or attach_res.internal_endpoint
+        gw = compose_traefik_upstream_target(
+            traefik_routing_host=self._traefik_routing_host,
+            resolved_ports=running.resolved_ports,
+            topology_internal_endpoint=internal_ep,
+            ide_container_port=WORKSPACE_IDE_CONTAINER_PORT,
+        )
+
         return WorkspaceBringUpResult(
             workspace_id=ctx.wid,
             success=health.healthy,
@@ -880,7 +901,8 @@ class DefaultOrchestratorService(OrchestratorService):
             container_state=health.container_state or running.container_state,
             netns_ref=netns.netns_ref,
             workspace_ip=health.workspace_ip or attach_res.workspace_ip,
-            internal_endpoint=health.internal_endpoint or attach_res.internal_endpoint,
+            internal_endpoint=internal_ep,
+            gateway_route_target=gw,
             probe_healthy=health.healthy,
             issues=_issues_or_none(issue_msgs),
         )
@@ -1155,6 +1177,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 netns_ref=result.netns_ref,
                 workspace_ip=None if rb_ok else result.workspace_ip,
                 internal_endpoint=None if rb_ok else result.internal_endpoint,
+                gateway_route_target=None if rb_ok else result.gateway_route_target,
                 probe_healthy=False,
                 issues=_issues_or_none(merged_issues),
                 rollback_attempted=True,
@@ -1519,6 +1542,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 topology_id=tid,
                 workspace_ip=None,
                 internal_endpoint=None,
+                gateway_route_target=None,
                 probe_healthy=None,
                 issues=_issues_or_none(issues),
             )
@@ -1554,6 +1578,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 topology_id=tid,
                 workspace_ip=None,
                 internal_endpoint=None,
+                gateway_route_target=None,
                 probe_healthy=None,
                 issues=_issues_or_none(issues),
             )
@@ -1574,6 +1599,7 @@ class DefaultOrchestratorService(OrchestratorService):
             topology_id=up_res.topology_id or tid,
             workspace_ip=up_res.workspace_ip,
             internal_endpoint=up_res.internal_endpoint,
+            gateway_route_target=up_res.gateway_route_target,
             probe_healthy=up_res.probe_healthy,
             issues=_issues_or_none(issues),
         )
@@ -1699,6 +1725,7 @@ class DefaultOrchestratorService(OrchestratorService):
             topology_id=r.topology_id,
             workspace_ip=r.workspace_ip,
             internal_endpoint=r.internal_endpoint,
+            gateway_route_target=r.gateway_route_target,
             probe_healthy=r.probe_healthy,
             issues=_issues_or_none(issues),
         )
@@ -1807,6 +1834,13 @@ class DefaultOrchestratorService(OrchestratorService):
         except Exception:
             pass
 
+        gw = compose_traefik_upstream_target(
+            traefik_routing_host=self._traefik_routing_host,
+            resolved_ports=ins.ports,
+            topology_internal_endpoint=health.internal_endpoint,
+            ide_container_port=WORKSPACE_IDE_CONTAINER_PORT,
+        )
+
         return WorkspaceBringUpResult(
             workspace_id=wid,
             success=bool(health.healthy),
@@ -1817,6 +1851,7 @@ class DefaultOrchestratorService(OrchestratorService):
             netns_ref=netns_ref,
             workspace_ip=health.workspace_ip,
             internal_endpoint=health.internal_endpoint,
+            gateway_route_target=gw,
             probe_healthy=health.healthy,
             issues=_issues_or_none(issue_msgs),
         )
@@ -1932,19 +1967,33 @@ class DefaultOrchestratorService(OrchestratorService):
                 except Exception:
                     pass
 
+    def _docker_engine_client(self):
+        """Docker SDK client when the runtime adapter is engine-backed (local or ``ssh://``)."""
+        ra = self._runtime_adapter
+        if isinstance(ra, DockerRuntimeAdapter):
+            return ra.docker_engine_client
+        return None
+
     def export_workspace_filesystem_snapshot(
         self,
         *,
         workspace_id: str,
         project_storage_key: str | None = None,
         archive_path: str,
+        container_id: str | None = None,
     ) -> WorkspaceSnapshotOperationResult:
         wid = (workspace_id or "").strip()
-        try:
-            root = self._workspace_project_path_for_snapshot(wid, project_storage_key)
-        except WorkspaceSnapshotError as e:
+        if not wid:
             return WorkspaceSnapshotOperationResult(
-                workspace_id=wid or (workspace_id or ""),
+                workspace_id=workspace_id or "",
+                success=False,
+                issues=["snapshot:export:workspace_id_empty"],
+            )
+        try:
+            _parse_topology_workspace_id(wid)
+        except WorkspaceBringUpError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
                 success=False,
                 issues=[str(e)],
             )
@@ -1959,8 +2008,95 @@ class DefaultOrchestratorService(OrchestratorService):
                 issues=[f"snapshot:export:mkdir_failed:{e}"],
             )
 
+        # Prefer streaming from the **placed** engine (local or ssh://) before resolving host bind paths.
+        # Remote nodes often have no matching directory on the control-plane filesystem.
+        dc = self._docker_engine_client()
+        cid = (container_id or "").strip() or None
+        if cid and dc:
+            try:
+                ins = self._runtime_adapter.inspect_container(container_id=cid)
+            except Exception as e:
+                return WorkspaceSnapshotOperationResult(
+                    workspace_id=wid,
+                    success=False,
+                    issues=[f"snapshot:export:inspect_failed:{e}"],
+                )
+            st = (ins.container_state or "").strip().lower()
+            if ins.exists and st == "running":
+                ok, issues = export_running_workspace_tar_from_container(
+                    docker_client=dc,
+                    container_id=cid,
+                    dest=dest,
+                )
+                if ok:
+                    try:
+                        size_bytes = int(dest.stat().st_size)
+                    except OSError:
+                        size_bytes = None
+                    log_event(
+                        logger,
+                        LogEvent.ORCHESTRATOR_SNAPSHOT_EXPORT_SUCCEEDED,
+                        workspace_id=wid,
+                        size_bytes=size_bytes,
+                        snapshot_export_mode="docker_exec",
+                    )
+                    return WorkspaceSnapshotOperationResult(
+                        workspace_id=wid,
+                        success=True,
+                        size_bytes=size_bytes,
+                        issues=None,
+                    )
+                return WorkspaceSnapshotOperationResult(workspace_id=wid, success=False, issues=issues)
+
+        if cid and not dc and isinstance(self._runtime_adapter, SsmDockerRuntimeAdapter):
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=[
+                    "snapshot:export:ssm_docker_binary_export_unsupported",
+                    "Snapshots from running workspaces on ssm_docker nodes require a Docker engine client "
+                    "that can stream exec output (use ssh_docker execution_mode for the execution node, "
+                    "or extend SSM snapshot staging).",
+                ],
+            )
+
+        try:
+            root = self._workspace_project_path_for_snapshot(wid, project_storage_key)
+        except WorkspaceSnapshotError as e:
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=[str(e)],
+            )
+
         root_path = Path(root).resolve()
         if not root_path.is_dir():
+            if self._snapshot_ssh_runner is not None:
+                ok, issues = export_host_tree_tar_via_ssh(
+                    ssh_runner=self._snapshot_ssh_runner,
+                    host_project_root=(root or "").strip(),
+                    dest=dest,
+                )
+                if ok:
+                    try:
+                        size_bytes = int(dest.stat().st_size)
+                    except OSError:
+                        size_bytes = None
+                    log_event(
+                        logger,
+                        LogEvent.ORCHESTRATOR_SNAPSHOT_EXPORT_SUCCEEDED,
+                        workspace_id=wid,
+                        size_bytes=size_bytes,
+                        snapshot_export_mode="ssh_host_tar",
+                    )
+                    return WorkspaceSnapshotOperationResult(
+                        workspace_id=wid,
+                        success=True,
+                        size_bytes=size_bytes,
+                        issues=None,
+                    )
+                return WorkspaceSnapshotOperationResult(workspace_id=wid, success=False, issues=issues)
+
             return WorkspaceSnapshotOperationResult(
                 workspace_id=wid,
                 success=False,
@@ -1999,6 +2135,7 @@ class DefaultOrchestratorService(OrchestratorService):
             LogEvent.ORCHESTRATOR_SNAPSHOT_EXPORT_SUCCEEDED,
             workspace_id=wid,
             size_bytes=size_bytes,
+            snapshot_export_mode="local_walk",
         )
         return WorkspaceSnapshotOperationResult(
             workspace_id=wid,
@@ -2013,10 +2150,12 @@ class DefaultOrchestratorService(OrchestratorService):
         workspace_id: str,
         project_storage_key: str | None = None,
         archive_path: str,
+        container_id: str | None = None,
     ) -> WorkspaceSnapshotOperationResult:
+        _ = container_id
         wid = (workspace_id or "").strip()
         try:
-            dest_root = Path(self._workspace_project_path_for_snapshot(wid, project_storage_key)).resolve()
+            dest_root_str = self._workspace_project_path_for_snapshot(wid, project_storage_key)
         except WorkspaceSnapshotError as e:
             return WorkspaceSnapshotOperationResult(
                 workspace_id=wid or (workspace_id or ""),
@@ -2024,6 +2163,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 issues=[str(e)],
             )
 
+        dest_root = Path(dest_root_str).resolve()
         src = Path(archive_path).expanduser().resolve()
         if not src.is_file():
             return WorkspaceSnapshotOperationResult(
@@ -2038,6 +2178,34 @@ class DefaultOrchestratorService(OrchestratorService):
                 workspace_id=wid,
                 success=False,
                 issues=["snapshot:import:invalid_archive_format"],
+            )
+
+        if not dest_root.is_dir():
+            if self._snapshot_ssh_runner is not None:
+                ok, issues = import_archive_to_host_via_ssh(
+                    ssh_runner=self._snapshot_ssh_runner,
+                    host_project_root=(dest_root_str or "").strip(),
+                    archive_path=src,
+                )
+                if ok:
+                    log_event(
+                        logger,
+                        LogEvent.ORCHESTRATOR_SNAPSHOT_IMPORT_SUCCEEDED,
+                        workspace_id=wid,
+                        snapshot_import_mode="ssh_host_tar",
+                    )
+                    return WorkspaceSnapshotOperationResult(
+                        workspace_id=wid,
+                        success=True,
+                        size_bytes=int(src.stat().st_size),
+                        issues=None,
+                    )
+                return WorkspaceSnapshotOperationResult(workspace_id=wid, success=False, issues=issues)
+
+            return WorkspaceSnapshotOperationResult(
+                workspace_id=wid,
+                success=False,
+                issues=["snapshot:import:project_dir_missing"],
             )
 
         try:
@@ -2060,6 +2228,7 @@ class DefaultOrchestratorService(OrchestratorService):
             logger,
             LogEvent.ORCHESTRATOR_SNAPSHOT_IMPORT_SUCCEEDED,
             workspace_id=wid,
+            snapshot_import_mode="local_extract",
         )
         return WorkspaceSnapshotOperationResult(
             workspace_id=wid,
@@ -2144,6 +2313,13 @@ class DefaultOrchestratorService(OrchestratorService):
         if health.issues:
             issues.extend([f"{i.component}:{i.code}:{i.message}" for i in health.issues])
 
+        gw = compose_traefik_upstream_target(
+            traefik_routing_host=self._traefik_routing_host,
+            resolved_ports=ins.ports,
+            topology_internal_endpoint=health.internal_endpoint,
+            ide_container_port=WORKSPACE_IDE_CONTAINER_PORT,
+        )
+
         return WorkspaceUpdateResult(
             workspace_id=wid,
             success=bool(health.healthy),
@@ -2157,6 +2333,7 @@ class DefaultOrchestratorService(OrchestratorService):
             topology_id=topology_id,
             workspace_ip=health.workspace_ip,
             internal_endpoint=health.internal_endpoint,
+            gateway_route_target=gw,
             probe_healthy=health.healthy,
             issues=_issues_or_none(issues),
         )

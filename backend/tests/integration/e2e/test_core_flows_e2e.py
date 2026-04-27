@@ -82,8 +82,9 @@ def _export_writes_minimal_archive(
     workspace_id: str,
     project_storage_key: str | None = None,
     archive_path: str,
+    container_id: str | None = None,
 ) -> WorkspaceSnapshotOperationResult:
-    _ = project_storage_key
+    _ = project_storage_key, container_id
     p = Path(archive_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"x" * 32)

@@ -116,3 +116,19 @@ def test_get_snapshot_archive_404_when_no_completed_snapshot(client, db_session)
     wid = _seed_running_workspace(db_session, uid)
     r = client.get(f"/workspaces/{wid}/snapshots/archive", headers=_auth(token))
     assert r.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_get_snapshot_archive_download_requires_auth(client) -> None:
+    r = client.get("/workspaces/1/snapshots/archive-download")
+    assert r.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_get_snapshot_archive_download_404_when_no_completed_snapshot(client, db_session) -> None:
+    uid, token = _register_and_token(
+        client,
+        username="snap_dl_meta_user",
+        email="snap_dl_meta_user@example.com",
+    )
+    wid = _seed_running_workspace(db_session, uid)
+    r = client.get(f"/workspaces/{wid}/snapshots/archive-download", headers=_auth(token))
+    assert r.status_code == status.HTTP_404_NOT_FOUND

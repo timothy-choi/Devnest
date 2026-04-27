@@ -24,6 +24,8 @@ class WorkspaceRuntime(SQLModel, table=True):
     container_state: str | None = Field(default=None, max_length=64)
     topology_id: int | None = Field(default=None, index=True)
     internal_endpoint: str | None = Field(default=None, max_length=512)
+    # Traefik/route-admin upstream when distinct from topology ``internal_endpoint`` (e.g. EC2 host IP + published port).
+    gateway_route_target: str | None = Field(default=None, max_length=512)
     config_version: int | None = Field(default=None, ge=1)
     health_status: str = Field(
         default=WorkspaceRuntimeHealthStatus.UNKNOWN.value,

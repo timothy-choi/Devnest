@@ -19,6 +19,7 @@ def test_build_default_orchestrator_passes_bundle_ensure_dir() -> None:
     bundle.runtime_adapter = None
     bundle.topology_command_runner = MagicMock()
     bundle.service_reachability_runner = None
+    bundle.traefik_routing_host = None
     bundle.ensure_workspace_project_dir = MagicMock(return_value="/remote/devnest/7")
 
     with patch(
@@ -33,6 +34,26 @@ def test_build_default_orchestrator_passes_bundle_ensure_dir() -> None:
 
     mock_resolve.assert_called_once_with(session, "node-1")
     assert orch._ensure_workspace_project_dir is bundle.ensure_workspace_project_dir
+    assert orch._traefik_routing_host is None
+
+
+def test_build_default_orchestrator_passes_traefik_routing_host_from_bundle() -> None:
+    session = MagicMock()
+    bundle = MagicMock()
+    bundle.docker_client = MagicMock()
+    bundle.runtime_adapter = None
+    bundle.topology_command_runner = MagicMock()
+    bundle.service_reachability_runner = None
+    bundle.traefik_routing_host = "10.20.30.40"
+    bundle.ensure_workspace_project_dir = MagicMock(return_value="/x")
+
+    with patch(
+        "app.services.orchestrator_service.app_factory.resolve_node_execution_bundle",
+        return_value=bundle,
+    ):
+        orch = build_default_orchestrator_for_session(session, execution_node_key="node-ec2")
+
+    assert orch._traefik_routing_host == "10.20.30.40"
 
 
 def test_build_default_orchestrator_uses_runtime_adapter_when_set() -> None:
@@ -42,6 +63,7 @@ def test_build_default_orchestrator_uses_runtime_adapter_when_set() -> None:
     bundle.runtime_adapter = SsmDockerRuntimeAdapter(MagicMock())
     bundle.topology_command_runner = MagicMock()
     bundle.service_reachability_runner = MagicMock()
+    bundle.traefik_routing_host = None
     bundle.ensure_workspace_project_dir = MagicMock(return_value="/remote/ws/1")
 
     with patch(
@@ -60,6 +82,7 @@ def test_build_default_orchestrator_raises_when_no_docker_or_adapter() -> None:
     bundle.runtime_adapter = None
     bundle.topology_command_runner = MagicMock()
     bundle.service_reachability_runner = None
+    bundle.traefik_routing_host = None
     bundle.ensure_workspace_project_dir = MagicMock()
 
     with patch(

@@ -291,6 +291,7 @@ def register_ec2_instance(
     node_key: str | None = None,
     ssh_user: str | None = None,
     execution_mode: str | None = None,
+    catalog_only: bool = False,
 ) -> ExecutionNode:
     """
     Upsert an :class:`ExecutionNode` for an existing EC2 instance.
@@ -299,6 +300,9 @@ def register_ec2_instance(
     - ``execution_mode`` defaults from ``DEVNEST_EC2_DEFAULT_EXECUTION_MODE`` (``ssm_docker`` or ``ssh_docker``).
     - Sets ``schedulable`` and ``status`` using :func:`compute_status_schedulable_after_ec2_sync`
       (running → ``READY`` for normal rows; preserves ``PROVISIONING`` / ``DRAINING`` / etc.).
+    - When ``catalog_only`` is true (Phase 3b Step 4), ``schedulable`` is forced to **false** after
+      status is computed so the scheduler never places new workloads, while **status** still follows
+      EC2 state (``READY`` if ``running``, else ``NOT_READY``). Traffic/routes are unchanged.
 
     Caller should ``commit`` the session. Does not call ``session.commit()``.
     """
@@ -339,17 +343,21 @@ def register_ec2_instance(
                 )
 
     now = datetime.now(timezone.utc)
-    meta_patch = {
+    meta_patch: dict[str, Any] = {
         "ec2": {
             "state": desc.state,
             "synced_at": now.isoformat(),
         },
     }
+    if catalog_only:
+        meta_patch["ec2"]["catalog_only"] = True
 
     status: str
     schedulable: bool
     if row is None:
         status, schedulable = compute_status_schedulable_after_ec2_sync(existing_row=None, desc=desc)
+        if catalog_only:
+            schedulable = False
         row = ExecutionNode(
             node_key=key,
             name=desc.name_tag or key,
@@ -381,6 +389,8 @@ def register_ec2_instance(
     else:
         prior_status = (row.status or "").strip().upper()
         status, schedulable = compute_status_schedulable_after_ec2_sync(existing_row=row, desc=desc)
+        if catalog_only:
+            schedulable = False
         if (
             status == ExecutionNodeStatus.ERROR.value
             and prior_status == ExecutionNodeStatus.PROVISIONING.value

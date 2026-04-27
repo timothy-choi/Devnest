@@ -38,6 +38,14 @@ def main() -> int:
         choices=["ssm_docker", "ssh_docker"],
         help="ExecutionNode.execution_mode (default from DEVNEST_EC2_DEFAULT_EXECUTION_MODE)",
     )
+    parser.add_argument(
+        "--catalog-only",
+        action="store_true",
+        help=(
+            "Phase 3b Step 4: register EC2 metadata + capacity but force schedulable=false "
+            "(scheduler will not place new workspaces; no routing changes)."
+        ),
+    )
     args = parser.parse_args()
 
     from sqlmodel import Session
@@ -54,12 +62,15 @@ def main() -> int:
                 args.instance_id.strip(),
                 node_key=args.node_key,
                 ssh_user=args.ssh_user,
+                execution_mode=args.execution_mode,
+                catalog_only=bool(args.catalog_only),
             )
             session.commit()
+            suffix = " catalog_only=schedulable_forced_false" if args.catalog_only else ""
             print(
                 f"Registered execution node id={node.id} node_key={node.node_key!r} "
                 f"provider_instance_id={node.provider_instance_id!r} execution_mode={node.execution_mode!r} "
-                f"status={node.status!r} schedulable={node.schedulable}",
+                f"status={node.status!r} schedulable={node.schedulable}{suffix}",
             )
     except Ec2ProviderError as e:
         print(f"EC2 registration failed: {e}", file=sys.stderr)

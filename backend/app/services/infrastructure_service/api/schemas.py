@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
@@ -70,6 +71,10 @@ class ExecutionNodeCapacityResponse(ExecutionNodeSummaryResponse):
         description="RUNNING (etc.) workspaces pinned to this node_key that consume a schedulable slot.",
     )
     available_workspace_slots: int = Field(..., ge=0, description="max(0, max_workspaces - active).")
+    heartbeat_age_seconds: int | None = Field(
+        default=None,
+        description="Seconds since last_heartbeat_at (UTC) when set; null if never heartbeated.",
+    )
 
     @classmethod
     def from_row_with_capacity(cls, session: Session, row: ExecutionNode) -> ExecutionNodeCapacityResponse:
@@ -78,11 +83,35 @@ class ExecutionNodeCapacityResponse(ExecutionNodeSummaryResponse):
         active = count_active_workloads_on_node_key(session, key)
         max_w = int(row.max_workspaces or 0)
         avail = max(0, max_w - active)
+        now = datetime.now(timezone.utc)
+        hb_age: int | None = None
+        if row.last_heartbeat_at is not None:
+            delta = now - row.last_heartbeat_at
+            sec = int(delta.total_seconds())
+            hb_age = max(0, sec)
         return cls(
             **base.model_dump(),
             active_workspace_slots=active,
             available_workspace_slots=avail,
+            heartbeat_age_seconds=hb_age,
         )
+
+
+class WorkspaceOnNodeBrief(BaseModel):
+    """Minimal workspace row for ops listing (no secrets)."""
+
+    workspace_id: int
+    name: str
+    status: str
+
+
+class NodeWorkspacesSummaryResponse(BaseModel):
+    """Workspaces whose ``workspace_runtime.node_id`` matches this catalog ``node_key``."""
+
+    node_key: str
+    execution_node_id: int | None = None
+    workspace_count: int = Field(..., ge=0)
+    workspaces: list[WorkspaceOnNodeBrief] = Field(default_factory=list)
 
 
 class NodeKeyOrIdBody(BaseModel):
@@ -96,6 +125,15 @@ class NodeKeyOrIdBody(BaseModel):
         if self.node_id is None and not (self.node_key and str(self.node_key).strip()):
             raise ValueError("provide node_id or non-empty node_key")
         return self
+
+
+class ExecutionNodeSmokeReadOnlyBody(NodeKeyOrIdBody):
+    """Body for ``POST /internal/execution-nodes/smoke-read-only`` (Phase 3b Step 6)."""
+
+    read_only_command: Literal["docker_info", "docker_ps"] = Field(
+        default="docker_info",
+        description="Fixed read-only docker invocation (no arbitrary shell).",
+    )
 
 
 class ExecutionNodeHeartbeatRequest(BaseModel):
@@ -151,7 +189,65 @@ class RegisterExistingEc2Body(BaseModel):
     node_key: str | None = None
     ssh_user: str | None = None
     execution_mode: str | None = Field(default=None, description="ssm_docker or ssh_docker")
+    catalog_only: bool = Field(
+        default=False,
+        description=(
+            "Phase 3b Step 4: after EC2-derived status is set, force schedulable=false so the scheduler "
+            "never selects this node (catalog / warm pool). Does not create routes or change node 1."
+        ),
+    )
+
+
+class RegisterCatalogEc2Body(BaseModel):
+    """Upsert an EC2 execution_node row without AWS describe (Step 4 catalog before/without live sync)."""
+
+    node_key: str = Field(..., min_length=1, max_length=128, description="Stable registry key, e.g. node-2")
+    name: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Display/catalog name (defaults to node_key)",
+    )
+    provider_instance_id: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Real i-… when known; omitted uses catalog-pending:<node_key>",
+    )
+    private_ip: str | None = Field(default=None, max_length=64)
+    public_ip: str | None = Field(default=None, max_length=64)
+    region: str | None = Field(default="us-east-1", max_length=32)
+    availability_zone: str | None = Field(default=None, max_length=32)
+    instance_type: str | None = Field(default=None, max_length=64)
+    execution_mode: str | None = Field(default=None, description="ssm_docker or ssh_docker")
+    ssh_user: str | None = Field(default=None, max_length=64)
+    status: str | None = Field(
+        default=None,
+        description="READY or NOT_READY; omit for NOT_READY on insert, unchanged on update unless set",
+    )
+    total_cpu: float | None = Field(default=None, gt=0)
+    total_memory_mb: int | None = Field(default=None, gt=0)
+    allocatable_cpu: float | None = Field(default=None, gt=0)
+    allocatable_memory_mb: int | None = Field(default=None, gt=0)
+    max_workspaces: int | None = Field(default=None, ge=0)
+    allocatable_disk_mb: int | None = Field(default=None, ge=0)
+    align_status_with_heartbeat: bool = Field(
+        default=False,
+        description="If true, set READY only when last_heartbeat_at is within DEVNEST_NODE_HEARTBEAT_MAX_AGE_SECONDS",
+    )
 
 
 class SyncExecutionNodeBody(NodeKeyOrIdBody):
     promote_provisioning_when_ready: bool = True
+
+
+class ExecutionNodeSmokeResponse(BaseModel):
+    """Sanitized result of ``POST /internal/execution-nodes/smoke-read-only`` (Phase 3b Step 6)."""
+
+    ok: bool
+    execution_node_id: int | None = Field(default=None, description="ExecutionNode.id for the row that was resolved")
+    node_key: str
+    execution_mode: str
+    schedulable: bool
+    status: str
+    command_status: str = Field(..., description="Success, Failed, or Skipped")
+    output_preview: str = Field(default="", max_length=2500, description="Truncated stdout/stderr or error text")
+    provider_instance_id: str | None = None

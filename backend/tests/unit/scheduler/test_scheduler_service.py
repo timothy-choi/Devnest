@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.libs.common.config import get_settings
+from app.libs.observability.log_events import LogEvent
 from app.services.placement_service.errors import InvalidPlacementParametersError, NoSchedulableNodeError
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 from app.services.scheduler_service.service import schedule_workspace
@@ -61,3 +63,77 @@ def test_schedule_workspace_invalid_request(mock_reserve: MagicMock) -> None:
     out = schedule_workspace(MagicMock(), workspace_id=1)
     assert out.execution_node is None
     assert out.invalid_request is True
+
+
+@patch("app.services.scheduler_service.service.log_event")
+@patch("app.services.scheduler_service.service.reserve_node_for_workspace")
+def test_schedule_workspace_success_logs_single_node_gate_when_disabled(
+    mock_reserve: MagicMock,
+    mock_log: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", "false")
+    get_settings.cache_clear()
+    mock_reserve.return_value = _chosen()
+    schedule_workspace(MagicMock(), workspace_id=42)
+    sel = next(c for c in mock_log.call_args_list if len(c.args) > 1 and c.args[1] == LogEvent.SCHEDULER_NODE_SELECTED)
+    kwargs = sel.kwargs
+    assert kwargs["multi_node_scheduling_enabled"] is False
+    assert kwargs["placement_single_node_gate"] is True
+    assert kwargs["workspace_id"] == 42
+    assert "primary_only" in str(kwargs.get("placement_reason", ""))
+    get_settings.cache_clear()
+
+
+@patch("app.services.scheduler_service.service.explain_placement_decision", return_value="rank-1 | pool-2")
+@patch("app.services.scheduler_service.service.log_event")
+@patch("app.services.scheduler_service.service.reserve_node_for_workspace")
+def test_schedule_workspace_logs_placement_decision_summary(
+    mock_reserve: MagicMock,
+    mock_log: MagicMock,
+    _mock_explain: MagicMock,
+) -> None:
+    mock_reserve.return_value = _chosen()
+    schedule_workspace(MagicMock(), workspace_id=501)
+    names = [call_args[0][1] for call_args in mock_log.call_args_list]
+    assert LogEvent.SCHEDULER_NODE_SELECTED in names
+    assert LogEvent.PLACEMENT_DECISION_SUMMARY in names
+
+
+@patch("app.services.scheduler_service.service.log_event")
+@patch("app.services.scheduler_service.service.reserve_node_for_workspace")
+def test_schedule_workspace_success_logs_multi_node_when_env_true(
+    mock_reserve: MagicMock,
+    mock_log: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", "true")
+    get_settings.cache_clear()
+    mock_reserve.return_value = _chosen()
+    schedule_workspace(MagicMock(), workspace_id=99)
+    sel = next(c for c in mock_log.call_args_list if len(c.args) > 1 and c.args[1] == LogEvent.SCHEDULER_NODE_SELECTED)
+    kwargs = sel.kwargs
+    assert kwargs["multi_node_scheduling_enabled"] is True
+    assert kwargs["placement_single_node_gate"] is False
+    assert kwargs["workspace_id"] == 99
+    assert "multi_node" in str(kwargs.get("placement_reason", ""))
+    get_settings.cache_clear()
+
+
+@patch("app.services.scheduler_service.service.log_event")
+@patch("app.services.scheduler_service.service.reserve_node_for_workspace")
+def test_schedule_workspace_default_env_logs_primary_gate(
+    mock_reserve: MagicMock,
+    mock_log: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", raising=False)
+    get_settings.cache_clear()
+    mock_reserve.return_value = _chosen()
+    schedule_workspace(MagicMock(), workspace_id=7)
+    sel = next(c for c in mock_log.call_args_list if len(c.args) > 1 and c.args[1] == LogEvent.SCHEDULER_NODE_SELECTED)
+    kwargs = sel.kwargs
+    assert kwargs["multi_node_scheduling_enabled"] is False
+    assert kwargs["placement_single_node_gate"] is True
+    assert "primary_only" in str(kwargs.get("placement_reason", ""))
+    get_settings.cache_clear()

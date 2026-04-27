@@ -6,6 +6,8 @@ import logging
 
 from sqlmodel import Session
 
+from app.libs.common.config import get_settings
+from app.services.placement_service.node_heartbeat import execution_node_heartbeat_age_seconds
 from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
@@ -25,6 +27,22 @@ from .models import WorkspaceComputeRequest, WorkspaceScheduleResult
 from .policy import can_fit_workspace_effective, rank_candidate_nodes
 
 logger = logging.getLogger(__name__)
+
+
+def _placement_telemetry() -> dict[str, bool | str]:
+    """Structured fields for placement logs (Step 7): gate + human-readable selection reason."""
+    mns = bool(get_settings().devnest_enable_multi_node_scheduling)
+    gate = not mns
+    reason = (
+        "primary_only:min_execution_node_id_among_ready_schedulable_after_provider_filter"
+        if gate
+        else "multi_node:rank_by_effective_free_resources_then_spread_then_node_key_stable_tiebreak"
+    )
+    return {
+        "multi_node_scheduling_enabled": mns,
+        "placement_single_node_gate": gate,
+        "placement_reason": reason,
+    }
 
 
 def schedule_workspace(
@@ -57,7 +75,31 @@ def schedule_workspace(
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
+            target_node_heartbeat_age_seconds=execution_node_heartbeat_age_seconds(node),
+            **_placement_telemetry(),
         )
+        try:
+            explain = explain_placement_decision(
+                session,
+                chosen=node,
+                workspace_id=workspace_id,
+                requested_cpu=requested_cpu,
+                requested_memory_mb=requested_memory_mb,
+                requested_disk_mb=requested_disk_mb,
+            )
+            digest = (explain or "").replace("\n", " | ").replace("\r", "")[:900]
+            if digest:
+                log_event(
+                    logger,
+                    LogEvent.PLACEMENT_DECISION_SUMMARY,
+                    workspace_id=workspace_id,
+                    execution_node_id=node.id,
+                    node_key=node.node_key,
+                    placement_summary=digest,
+                    target_node_heartbeat_age_seconds=execution_node_heartbeat_age_seconds(node),
+                )
+        except Exception:
+            logger.debug("placement_decision_summary_skipped", exc_info=True)
         return WorkspaceScheduleResult(
             execution_node=node,
             insufficient_capacity=False,
@@ -72,6 +114,7 @@ def schedule_workspace(
             message=str(e),
         )
     except NoSchedulableNodeError as e:
+        settings = get_settings()
         log_event(
             logger,
             LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
@@ -80,6 +123,9 @@ def schedule_workspace(
             requested_cpu=requested_cpu,
             requested_memory_mb=requested_memory_mb,
             requested_disk_mb=requested_disk_mb,
+            **_placement_telemetry(),
+            heartbeat_gate_enabled=bool(getattr(settings, "devnest_require_fresh_node_heartbeat", False)),
+            node_heartbeat_max_age_seconds=int(getattr(settings, "devnest_node_heartbeat_max_age_seconds", 300) or 300),
             detail=str(e)[:2000],
         )
         return WorkspaceScheduleResult(
@@ -119,6 +165,12 @@ def explain_placement_decision(
     free_m = max(0, int(chosen.allocatable_memory_mb or 0) - used_m)
     free_d = max(0, int(chosen.allocatable_disk_mb or 0) - used_d)
     wcount = count_active_workloads_on_node_key(session, k)
+    mns = bool(get_settings().devnest_enable_multi_node_scheduling)
+    pool_note = (
+        "READY+schedulable pool (after devnest_node_provider filter"
+        + ("" if mns else "; DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=false → primary node=min(id) only")
+        + ")"
+    )
     lines: list[str] = [
         f"selected node_key={chosen.node_key!r} allocatable_cpu={chosen.allocatable_cpu} "
         f"allocatable_memory_mb={chosen.allocatable_memory_mb} allocatable_disk_mb={chosen.allocatable_disk_mb} "
@@ -128,7 +180,7 @@ def explain_placement_decision(
         f"(reservations from workspace_runtime; STOPPED/DELETED/ERROR workspaces excluded)",
         f"sort_policy: capacity-first (effective_free_cpu desc, effective_free_memory_mb desc), "
         f"then active_workload_count asc (spread/anti-concentration), then node_key asc (stable tiebreak)",
-        f"READY+schedulable pool size (after devnest_node_provider filter): {len(pool)}",
+        f"{pool_note}: {len(pool)} node(s)",
         f"pool nodes satisfying effective capacity for "
         f"cpu>={req.requested_cpu}, memory_mb>={req.requested_memory_mb}, "
         f"disk_mb>={req.requested_disk_mb}, and workspace slots: {len(ranked)}",

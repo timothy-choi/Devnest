@@ -26,6 +26,7 @@ from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.topology import DbTopologyAdapter
 from app.services.node_execution_service import resolve_node_execution_bundle
 from app.services.node_execution_service.errors import NodeExecutionBindingError
+from app.services.node_execution_service.ssh_command_runner import SshRemoteCommandRunner
 from app.services.workspace_service.models import Workspace, WorkspaceJob
 
 from .errors import AppOrchestratorBindingError
@@ -142,6 +143,12 @@ def build_default_orchestrator_for_session(
         service_reachability_runner=bundle.service_reachability_runner,
     )
 
+    snapshot_ssh = (
+        bundle.topology_command_runner
+        if isinstance(bundle.topology_command_runner, SshRemoteCommandRunner)
+        else None
+    )
+
     return DefaultOrchestratorService(
         runtime,
         topology,
@@ -151,6 +158,8 @@ def build_default_orchestrator_for_session(
         workspace_projects_base=base,
         workspace_image=image,
         ensure_workspace_project_dir=bundle.ensure_workspace_project_dir,
+        traefik_routing_host=bundle.traefik_routing_host,
+        snapshot_ssh_runner=snapshot_ssh,
     )
 
 

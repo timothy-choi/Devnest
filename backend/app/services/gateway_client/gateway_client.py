@@ -62,17 +62,23 @@ class DevnestGatewayClient:
         workspace_id: str,
         internal_endpoint: str,
         public_host: str,
+        *,
+        node_key: str | None = None,
+        execution_node_id: int | None = None,
     ) -> None:
         wid = str(workspace_id).strip()
         host = (public_host or "").strip()
         if not wid or not host:
             raise ValueError("workspace_id and public_host are required")
         target = _normalize_target(internal_endpoint)
+        nk = (node_key or "").strip() or None
         payload = GatewayRouteRegisterPayload(
             workspace_id=wid,
             public_host=host,
             target=target,
-        ).model_dump()
+            node_key=nk,
+            execution_node_id=execution_node_id,
+        ).model_dump(exclude_none=True)
         c = httpx.Client(**self._client_kwargs())
         try:
             try:
@@ -104,11 +110,22 @@ class DevnestGatewayClient:
                 LogEvent.GATEWAY_ROUTE_REGISTERED,
                 workspace_id=wid,
                 public_host=host,
+                node_key=nk,
+                execution_node_id=execution_node_id,
+                gateway_upstream_target=target,
+                gateway_route_target=target,
             )
         finally:
             c.close()
 
-    def deregister_route(self, workspace_id: str) -> None:
+    def deregister_route(
+        self,
+        workspace_id: str,
+        *,
+        public_host: str | None = None,
+        node_key: str | None = None,
+        gateway_upstream_target: str | None = None,
+    ) -> None:
         wid = str(workspace_id).strip()
         if not wid:
             raise ValueError("workspace_id is empty")
@@ -138,7 +155,14 @@ class DevnestGatewayClient:
                 )
                 raise GatewayClientTransportError(f"route-admin unreachable: {e}") from e
             record_gateway_operation(operation="deregister", success=True)
-            log_event(logger, LogEvent.GATEWAY_ROUTE_DEREGISTERED, workspace_id=wid)
+            log_event(
+                logger,
+                LogEvent.GATEWAY_ROUTE_DEREGISTERED,
+                workspace_id=wid,
+                public_host=public_host,
+                node_key=node_key,
+                gateway_upstream_target=gateway_upstream_target,
+            )
         finally:
             c.close()
 

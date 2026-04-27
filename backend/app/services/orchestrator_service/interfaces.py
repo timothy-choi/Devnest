@@ -130,8 +130,14 @@ class OrchestratorService(ABC):
         workspace_id: str,
         project_storage_key: str | None = None,
         archive_path: str,
+        container_id: str | None = None,
     ) -> WorkspaceSnapshotOperationResult:
-        """Write a compressed archive of the workspace project directory to ``archive_path``."""
+        """Write a compressed archive of the workspace project directory to ``archive_path``.
+
+        When ``container_id`` is set and the runtime uses a reachable Docker engine (local or
+        ``ssh://``), implementations may stream from the running container instead of the control
+        plane filesystem.
+        """
 
     @abstractmethod
     def import_workspace_filesystem_snapshot(
@@ -140,5 +146,6 @@ class OrchestratorService(ABC):
         workspace_id: str,
         project_storage_key: str | None = None,
         archive_path: str,
+        container_id: str | None = None,
     ) -> WorkspaceSnapshotOperationResult:
         """Extract a snapshot archive into the workspace project directory (V1: overwrites files)."""
