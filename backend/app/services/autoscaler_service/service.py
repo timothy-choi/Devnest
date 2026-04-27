@@ -593,7 +593,12 @@ def _sync_provisioning_ec2_nodes(session: Session) -> None:
             .where(
                 and_(
                     ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
-                    ExecutionNode.status == ExecutionNodeStatus.PROVISIONING.value,
+                    ExecutionNode.status.in_(
+                        [
+                            ExecutionNodeStatus.PROVISIONING.value,
+                            ExecutionNodeStatus.NOT_READY.value,
+                        ],
+                    ),
                 ),
             )
             .order_by(ExecutionNode.node_key.asc()),

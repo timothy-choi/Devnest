@@ -315,7 +315,7 @@ def test_undrain_terminated_raises(infrastructure_unit_engine) -> None:
             undrain_node(session, node_key="no-undrain-term")
 
 
-def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit_engine) -> None:
+def test_sync_promotes_provisioning_to_ready_when_heartbeat_ready(infrastructure_unit_engine) -> None:
     iid = "i-0123456789abcdef0"
     row = ExecutionNode(
         node_key="ssm-promote-test",
@@ -332,7 +332,7 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
         allocatable_cpu=2.0,
         allocatable_memory_mb=4096,
         last_heartbeat_at=datetime.now(timezone.utc),
-        metadata_json={"heartbeat": {"docker_ok": True}},
+        metadata_json={"heartbeat": {"docker_ok": True, "disk_free_mb": 99_999}},
     )
     with Session(infrastructure_unit_engine) as session:
         session.add(row)
@@ -355,10 +355,6 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
                 "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
                 return_value=SimpleNamespace(state="running"),
             ),
-            patch(
-                "app.services.infrastructure_service.lifecycle.is_instance_ssm_online",
-                return_value=True,
-            ),
         ):
             out = sync_node_state(session, node_key="ssm-promote-test")
             session.commit()
@@ -367,6 +363,55 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
     assert out.status == ExecutionNodeStatus.READY.value
     assert out.schedulable is True
     assert out.private_ip == "10.0.0.10"
+
+
+def test_sync_promotes_not_ready_to_ready_when_heartbeat_ready(infrastructure_unit_engine) -> None:
+    iid = "i-0123456789abcdef1"
+    row = ExecutionNode(
+        node_key="not-ready-promote-test",
+        name="not-ready-promote-test",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.NOT_READY.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        last_heartbeat_at=datetime.now(timezone.utc),
+        metadata_json={"heartbeat": {"docker_ok": True, "disk_free_mb": 99_999}},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+
+        def _fake_register(sess, instance_id, *, ec2_client=None, node_key=None, ssh_user=None, execution_mode=None):
+            r = sess.exec(select(ExecutionNode).where(ExecutionNode.node_key == "not-ready-promote-test")).first()
+            assert r is not None
+            r.status = ExecutionNodeStatus.READY.value
+            r.schedulable = True
+            sess.add(r)
+            sess.flush()
+
+        with (
+            patch(
+                "app.services.infrastructure_service.lifecycle.register_ec2_instance",
+                side_effect=_fake_register,
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+                return_value=SimpleNamespace(state="running"),
+            ),
+        ):
+            out = sync_node_state(session, node_key="not-ready-promote-test")
+            session.commit()
+            session.refresh(out)
+
+    assert out.status == ExecutionNodeStatus.READY.value
+    assert out.schedulable is True
 
 
 def test_sync_does_not_promote_provisioning_without_healthy_heartbeat(infrastructure_unit_engine) -> None:
@@ -405,10 +450,6 @@ def test_sync_does_not_promote_provisioning_without_healthy_heartbeat(infrastruc
             patch(
                 "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
                 return_value=SimpleNamespace(state="running"),
-            ),
-            patch(
-                "app.services.infrastructure_service.lifecycle.is_instance_ssm_online",
-                return_value=True,
             ),
         ):
             out = sync_node_state(session, node_key="ssm-waits-heartbeat")
