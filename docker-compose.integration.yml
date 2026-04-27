@@ -140,6 +140,8 @@ services:
     env_file:
       - path: ./backend/.env
         required: false
+      - path: ./.env.integration
+        required: true
     ports:
       - "8000:8000"
     environment:
@@ -199,20 +201,6 @@ services:
       DEVNEST_AUTOSCALER_MIN_IDLE_SLOTS: "${DEVNEST_AUTOSCALER_MIN_IDLE_SLOTS:-1}"
       DEVNEST_AUTOSCALER_MAX_CONCURRENT_PROVISIONING: "${DEVNEST_AUTOSCALER_MAX_CONCURRENT_PROVISIONING:-1}"
 
-      DEVNEST_EC2_REGION: "${DEVNEST_EC2_REGION:-}"
-      DEVNEST_EC2_AMI_ID: "${DEVNEST_EC2_AMI_ID:-}"
-      DEVNEST_EC2_INSTANCE_TYPE: "${DEVNEST_EC2_INSTANCE_TYPE:-t3.medium}"
-      DEVNEST_EC2_SUBNET_ID: "${DEVNEST_EC2_SUBNET_ID:-}"
-      DEVNEST_EC2_SECURITY_GROUP_IDS: "${DEVNEST_EC2_SECURITY_GROUP_IDS:-}"
-      DEVNEST_EC2_INSTANCE_PROFILE: "${DEVNEST_EC2_INSTANCE_PROFILE:-}"
-      DEVNEST_EC2_KEY_NAME: "${DEVNEST_EC2_KEY_NAME:-}"
-      DEVNEST_EC2_DEFAULT_EXECUTION_MODE: "${DEVNEST_EC2_DEFAULT_EXECUTION_MODE:-ssm_docker}"
-      DEVNEST_EC2_BOOTSTRAP_PREBAKED: "${DEVNEST_EC2_BOOTSTRAP_PREBAKED:-false}"
-      DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL: "${DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL:-${INTERNAL_API_BASE_URL:-}}"
-      DEVNEST_EC2_WORKSPACE_PROJECTS_BASE: "${DEVNEST_EC2_WORKSPACE_PROJECTS_BASE:-/var/lib/devnest/workspace-projects}"
-      DEVNEST_EC2_USER_DATA: "${DEVNEST_EC2_USER_DATA:-}"
-      DEVNEST_EC2_USER_DATA_B64: "${DEVNEST_EC2_USER_DATA_B64:-}"
-      DEVNEST_EC2_EXTRA_TAGS: "${DEVNEST_EC2_EXTRA_TAGS:-}"
       # Some CI runners provide a minimal PATH; console scripts live under /usr/local/bin.
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
@@ -249,6 +237,8 @@ services:
     env_file:
       - path: ./backend/.env
         required: false
+      - path: ./.env.integration
+        required: true
     environment:
       DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
       DEVNEST_DATABASE_URL: ${DEVNEST_COMPOSE_DATABASE_URL:-${DATABASE_URL:-postgresql+psycopg://devnest:devnest@postgres:5432/devnest_dev}}
@@ -307,20 +297,7 @@ services:
       DEVNEST_AUTOSCALER_MIN_IDLE_SLOTS: "${DEVNEST_AUTOSCALER_MIN_IDLE_SLOTS:-1}"
       DEVNEST_AUTOSCALER_MAX_CONCURRENT_PROVISIONING: "${DEVNEST_AUTOSCALER_MAX_CONCURRENT_PROVISIONING:-1}"
 
-      DEVNEST_EC2_REGION: "${DEVNEST_EC2_REGION:-}"
-      DEVNEST_EC2_AMI_ID: "${DEVNEST_EC2_AMI_ID:-}"
-      DEVNEST_EC2_INSTANCE_TYPE: "${DEVNEST_EC2_INSTANCE_TYPE:-t3.medium}"
-      DEVNEST_EC2_SUBNET_ID: "${DEVNEST_EC2_SUBNET_ID:-}"
-      DEVNEST_EC2_SECURITY_GROUP_IDS: "${DEVNEST_EC2_SECURITY_GROUP_IDS:-}"
-      DEVNEST_EC2_INSTANCE_PROFILE: "${DEVNEST_EC2_INSTANCE_PROFILE:-}"
-      DEVNEST_EC2_KEY_NAME: "${DEVNEST_EC2_KEY_NAME:-}"
-      DEVNEST_EC2_DEFAULT_EXECUTION_MODE: "${DEVNEST_EC2_DEFAULT_EXECUTION_MODE:-ssm_docker}"
-      DEVNEST_EC2_BOOTSTRAP_PREBAKED: "${DEVNEST_EC2_BOOTSTRAP_PREBAKED:-false}"
-      DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL: "${DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL:-${INTERNAL_API_BASE_URL:-}}"
-      DEVNEST_EC2_WORKSPACE_PROJECTS_BASE: "${DEVNEST_EC2_WORKSPACE_PROJECTS_BASE:-/var/lib/devnest/workspace-projects}"
-      DEVNEST_EC2_USER_DATA: "${DEVNEST_EC2_USER_DATA:-}"
-      DEVNEST_EC2_USER_DATA_B64: "${DEVNEST_EC2_USER_DATA_B64:-}"
-      DEVNEST_EC2_EXTRA_TAGS: "${DEVNEST_EC2_EXTRA_TAGS:-}"
+      
       PATH: /usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
