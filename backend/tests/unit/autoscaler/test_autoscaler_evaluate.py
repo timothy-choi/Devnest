@@ -393,6 +393,7 @@ def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(au
                 internal_api_key_infrastructure="infra-secret",
                 internal_api_key="",
                 workspace_projects_base="/var/lib/devnest/workspace-projects",
+                devnest_ec2_workspace_projects_base="/var/lib/devnest/workspace-projects",
                 devnest_node_heartbeat_interval_seconds=30,
                 devnest_ec2_user_data="",
                 devnest_ec2_user_data_b64="",
@@ -405,6 +406,8 @@ def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(au
                 assert "dnf install -y docker curl" in (request.user_data or "")
                 assert "devnest-execution-node-heartbeat.service" in (request.user_data or "")
                 assert "/var/lib/devnest/workspace-projects" in (request.user_data or "")
+                assert "/var/log/devnest/bootstrap.log" in (request.user_data or "")
+                assert "StandardOutput=journal" in (request.user_data or "")
                 node = ExecutionNode(
                     node_key=request.node_key,
                     name=request.node_key,

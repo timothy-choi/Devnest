@@ -23,6 +23,7 @@ def test_phase2_scale_out_autoscaler_defaults() -> None:
     assert s.devnest_autoscaler_min_idle_slots == 1
     assert s.devnest_autoscaler_scale_out_cooldown_seconds == 300
     assert s.devnest_autoscaler_scale_in_cooldown_seconds == 900
+    assert s.devnest_ec2_workspace_projects_base == "/var/lib/devnest/workspace-projects"
 
 
 def test_ec2_provision_request_reads_bootstrap_and_extra_tags_from_settings() -> None:

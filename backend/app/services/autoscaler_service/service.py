@@ -306,7 +306,8 @@ def _autoscaler_node_key() -> str:
 
 def _workspace_projects_base_for_ec2(settings: object) -> str:
     return (
-        (getattr(settings, "workspace_projects_base", "") or "").strip()
+        (getattr(settings, "devnest_ec2_workspace_projects_base", "") or "").strip()
+        or (getattr(settings, "workspace_projects_base", "") or "").strip()
         or "/var/lib/devnest/workspace-projects"
     )
 

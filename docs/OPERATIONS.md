@@ -360,6 +360,7 @@ DEVNEST_EC2_INSTANCE_PROFILE=DevNestExecutionNodeProfile
 DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker
 DEVNEST_EC2_TAG_PREFIX=devnest
 DEVNEST_EC2_EXTRA_TAGS=env=prod,service=execution-node
+DEVNEST_EC2_WORKSPACE_PROJECTS_BASE=/var/lib/devnest/workspace-projects
 DEVNEST_EC2_BOOTSTRAP_PREBAKED=false
 DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL=http://api.internal.example:8000
 INTERNAL_API_KEY_INFRASTRUCTURE=<strong-random-infra-key>
@@ -375,4 +376,16 @@ Trigger one scale-out tick:
 ```bash
 curl -X POST -H "X-Internal-API-Key: $INTERNAL_API_KEY_AUTOSCALER" \
   "$INTERNAL_API_BASE_URL/internal/autoscaler/provision-one"
+```
+
+Verify generated Amazon Linux 2023 bootstrap on the new EC2 node:
+
+```bash
+docker --version
+systemctl status docker --no-pager
+test -d /opt/devnest
+test -d /var/lib/devnest/workspace-projects
+systemctl status devnest-execution-node-heartbeat --no-pager
+journalctl -u devnest-execution-node-heartbeat -n 50 --no-pager
+tail -n 100 /var/log/devnest/bootstrap.log
 ```

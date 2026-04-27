@@ -98,6 +98,9 @@ def build_default_amazon_linux_2023_user_data(
     return f"""#!/bin/bash
 set -Eeuo pipefail
 
+install -d -m 0755 /var/log/devnest
+exec > >(tee -a /var/log/devnest/bootstrap.log) 2>&1
+
 dnf install -y docker curl
 systemctl enable --now docker
 
@@ -149,6 +152,8 @@ EnvironmentFile=/opt/devnest/heartbeat.env
 ExecStart=/opt/devnest/execution-node-heartbeat.sh
 Restart=always
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

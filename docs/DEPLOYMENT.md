@@ -154,6 +154,7 @@ DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker
 DEVNEST_EC2_KEY_NAME=
 DEVNEST_EC2_TAG_PREFIX=devnest
 DEVNEST_EC2_EXTRA_TAGS=env=prod,service=execution-node
+DEVNEST_EC2_WORKSPACE_PROJECTS_BASE=/var/lib/devnest/workspace-projects
 
 # Bootstrap: stock Amazon Linux 2023 AMIs can use DevNest-generated user-data.
 # The heartbeat URL must be reachable from the autoscaled execution node.

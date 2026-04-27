@@ -726,6 +726,8 @@ class Settings(BaseSettings):
     # Optional EC2 user-data bootstrap. Prefer ``DEVNEST_EC2_USER_DATA_B64`` for multi-line cloud-init.
     devnest_ec2_user_data: str = ""
     devnest_ec2_user_data_b64: str = ""
+    # Host path on autoscaled EC2 execution nodes for workspace bind mounts.
+    devnest_ec2_workspace_projects_base: str = "/var/lib/devnest/workspace-projects"
     # Base URL reachable from autoscaled EC2 nodes for posting execution-node heartbeats.
     # Falls back to INTERNAL_API_BASE_URL when unset.
     devnest_ec2_heartbeat_internal_api_base_url: str = ""
