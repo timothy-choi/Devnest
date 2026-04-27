@@ -155,10 +155,16 @@ DEVNEST_EC2_KEY_NAME=
 DEVNEST_EC2_TAG_PREFIX=devnest
 DEVNEST_EC2_EXTRA_TAGS=env=prod,service=execution-node
 
-# Bootstrap: either use a prebaked AMI or provide user-data. New nodes stay PROVISIONING +
-# schedulable=false until EC2 is running and a fresh heartbeat reports docker_ok=true.
+# Bootstrap: stock Amazon Linux 2023 AMIs can use DevNest-generated user-data.
+# The heartbeat URL must be reachable from the autoscaled execution node.
+# New nodes stay PROVISIONING + schedulable=false until EC2 is running and a fresh
+# heartbeat reports docker_ok=true.
 DEVNEST_EC2_BOOTSTRAP_PREBAKED=false
-DEVNEST_EC2_USER_DATA_B64=<base64-encoded cloud-init or shell script>
+DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL=http://api.internal.example:8000
+INTERNAL_API_KEY_INFRASTRUCTURE=<strong-random-infra-key>
+# Optional custom override; leave empty for generated Amazon Linux 2023 bootstrap.
+# Custom user-data may include {{NODE_KEY}} or {{DEVNEST_NODE_KEY}} placeholders.
+DEVNEST_EC2_USER_DATA_B64=
 # DEVNEST_EC2_USER_DATA=
 
 # Autoscaler scale-in remains manual/disabled for Phase 2. These values only affect explicit reclaim endpoints.

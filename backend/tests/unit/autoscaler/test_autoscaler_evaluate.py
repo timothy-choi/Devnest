@@ -388,15 +388,26 @@ def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(au
                 devnest_ec2_instance_profile="DevNestExecutionNodeProfile",
                 devnest_ec2_key_name="",
                 devnest_ec2_default_execution_mode="ssm_docker",
-                devnest_ec2_bootstrap_prebaked=True,
+                devnest_ec2_bootstrap_prebaked=False,
+                devnest_ec2_heartbeat_internal_api_base_url="http://api.internal:8000",
+                internal_api_key_infrastructure="infra-secret",
+                internal_api_key="",
+                workspace_projects_base="/var/lib/devnest/workspace-projects",
+                devnest_node_heartbeat_interval_seconds=30,
                 devnest_ec2_user_data="",
                 devnest_ec2_user_data_b64="",
+                devnest_ec2_extra_tags="",
             )
 
             def _fake_provision(sess, request=None, wait_until_running=True):
+                assert request is not None
+                assert request.node_key.startswith("ec2-autoscale-")
+                assert "dnf install -y docker curl" in (request.user_data or "")
+                assert "devnest-execution-node-heartbeat.service" in (request.user_data or "")
+                assert "/var/lib/devnest/workspace-projects" in (request.user_data or "")
                 node = ExecutionNode(
-                    node_key="ec2-new",
-                    name="ec2-new",
+                    node_key=request.node_key,
+                    name=request.node_key,
                     provider_type=ExecutionNodeProviderType.EC2.value,
                     provider_instance_id="i-0123456789abcdef0",
                     status=ExecutionNodeStatus.PROVISIONING.value,

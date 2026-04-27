@@ -726,6 +726,9 @@ class Settings(BaseSettings):
     # Optional EC2 user-data bootstrap. Prefer ``DEVNEST_EC2_USER_DATA_B64`` for multi-line cloud-init.
     devnest_ec2_user_data: str = ""
     devnest_ec2_user_data_b64: str = ""
+    # Base URL reachable from autoscaled EC2 nodes for posting execution-node heartbeats.
+    # Falls back to INTERNAL_API_BASE_URL when unset.
+    devnest_ec2_heartbeat_internal_api_base_url: str = ""
     # Set true only when the AMI already installs Docker and starts the DevNest heartbeat agent.
     devnest_ec2_bootstrap_prebaked: bool = False
 
@@ -976,6 +979,13 @@ class Settings(BaseSettings):
     @field_validator("devnest_worker_heartbeat_internal_api_base_url", mode="before")
     @classmethod
     def _strip_worker_heartbeat_internal_api_base_url(cls, v):  # noqa: ANN001
+        if v is None:
+            return ""
+        return str(v).strip().rstrip("/")
+
+    @field_validator("devnest_ec2_heartbeat_internal_api_base_url", mode="before")
+    @classmethod
+    def _strip_ec2_heartbeat_internal_api_base_url(cls, v):  # noqa: ANN001
         if v is None:
             return ""
         return str(v).strip().rstrip("/")

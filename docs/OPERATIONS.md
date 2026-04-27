@@ -360,8 +360,13 @@ DEVNEST_EC2_INSTANCE_PROFILE=DevNestExecutionNodeProfile
 DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker
 DEVNEST_EC2_TAG_PREFIX=devnest
 DEVNEST_EC2_EXTRA_TAGS=env=prod,service=execution-node
-DEVNEST_EC2_USER_DATA_B64=<base64 cloud-init>
-# Or, only for AMIs that already start Docker + heartbeat:
+DEVNEST_EC2_BOOTSTRAP_PREBAKED=false
+DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL=http://api.internal.example:8000
+INTERNAL_API_KEY_INFRASTRUCTURE=<strong-random-infra-key>
+# Optional custom override; leave empty for generated Amazon Linux 2023 bootstrap.
+# Custom user-data may include {{NODE_KEY}} or {{DEVNEST_NODE_KEY}} placeholders.
+DEVNEST_EC2_USER_DATA_B64=
+# Or, only for AMIs that already start Docker + heartbeat instead of generated bootstrap:
 # DEVNEST_EC2_BOOTSTRAP_PREBAKED=true
 ```
 

@@ -10,6 +10,7 @@ TODO: provisioning jobs / SQS, cooldown windows, predictive signals, per-tenant 
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, func
@@ -25,7 +26,7 @@ from app.services.infrastructure_service.lifecycle import (
     sync_node_state,
     terminate_ec2_node,
 )
-from app.services.infrastructure_service.models import Ec2ProvisionRequest
+from app.services.infrastructure_service.models import Ec2ProvisionRequest, build_default_amazon_linux_2023_user_data
 from app.services.placement_service.capacity import max_effective_free_resources_across_schedulable
 from app.services.placement_service.capacity import (
     count_active_workloads_on_node_key,
@@ -265,14 +266,29 @@ def ec2_autoscaler_provisioning_config_errors(settings: object | None = None) ->
     if mode == "ssh_docker" and not (getattr(s, "devnest_ec2_key_name", "") or "").strip():
         errors.append("DEVNEST_EC2_KEY_NAME is required when DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssh_docker")
 
-    has_user_data = bool(
+    has_custom_user_data = bool(
         (getattr(s, "devnest_ec2_user_data", "") or "").strip()
         or (getattr(s, "devnest_ec2_user_data_b64", "") or "").strip()
     )
-    if not has_user_data and not _config_bool(s, "devnest_ec2_bootstrap_prebaked", False):
+    internal_base = (
+        (getattr(s, "devnest_ec2_heartbeat_internal_api_base_url", "") or "").strip()
+        or (getattr(s, "internal_api_base_url", "") or "").strip()
+    )
+    internal_key = (
+        (getattr(s, "internal_api_key_infrastructure", "") or "").strip()
+        or (getattr(s, "internal_api_key", "") or "").strip()
+    )
+    has_generated_bootstrap_config = bool(internal_base and internal_key)
+    if (
+        not has_custom_user_data
+        and not has_generated_bootstrap_config
+        and not _config_bool(s, "devnest_ec2_bootstrap_prebaked", False)
+    ):
         errors.append(
-            "bootstrap config is required: set DEVNEST_EC2_USER_DATA_B64, DEVNEST_EC2_USER_DATA, "
-            "or DEVNEST_EC2_BOOTSTRAP_PREBAKED=true for an AMI that starts Docker and heartbeat",
+            "bootstrap config is required: set DEVNEST_EC2_USER_DATA_B64/DEVNEST_EC2_USER_DATA, "
+            "or set DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL (or INTERNAL_API_BASE_URL) plus "
+            "INTERNAL_API_KEY_INFRASTRUCTURE (or INTERNAL_API_KEY) so DevNest can generate Amazon Linux 2023 "
+            "user-data, or set DEVNEST_EC2_BOOTSTRAP_PREBAKED=true for an AMI that starts Docker and heartbeat",
         )
 
     try:
@@ -282,6 +298,54 @@ def ec2_autoscaler_provisioning_config_errors(settings: object | None = None) ->
         if msg and all(msg not in existing for existing in errors):
             errors.append(msg)
     return errors
+
+
+def _autoscaler_node_key() -> str:
+    return f"ec2-autoscale-{uuid.uuid4().hex[:12]}"
+
+
+def _workspace_projects_base_for_ec2(settings: object) -> str:
+    return (
+        (getattr(settings, "workspace_projects_base", "") or "").strip()
+        or "/var/lib/devnest/workspace-projects"
+    )
+
+
+def _ec2_heartbeat_internal_api_base_url(settings: object) -> str:
+    return (
+        (getattr(settings, "devnest_ec2_heartbeat_internal_api_base_url", "") or "").strip()
+        or (getattr(settings, "internal_api_base_url", "") or "").strip()
+    )
+
+
+def _ec2_heartbeat_internal_api_key(settings: object) -> str:
+    return (
+        (getattr(settings, "internal_api_key_infrastructure", "") or "").strip()
+        or (getattr(settings, "internal_api_key", "") or "").strip()
+    )
+
+
+def _build_autoscaler_ec2_provision_request(settings: object) -> Ec2ProvisionRequest:
+    """Build one EC2 request with a preassigned node key and default AL2023 bootstrap when needed."""
+    req = Ec2ProvisionRequest.from_settings(settings)
+    req.node_key = _autoscaler_node_key()
+    req.name_tag = req.node_key
+    has_custom_user_data = bool((req.user_data or "").strip())
+    if has_custom_user_data:
+        req.user_data = (
+            (req.user_data or "")
+            .replace("{{NODE_KEY}}", req.node_key)
+            .replace("{{DEVNEST_NODE_KEY}}", req.node_key)
+        )
+    elif not _config_bool(settings, "devnest_ec2_bootstrap_prebaked", False):
+        req.user_data = build_default_amazon_linux_2023_user_data(
+            node_key=req.node_key,
+            internal_api_base_url=_ec2_heartbeat_internal_api_base_url(settings),
+            internal_api_key=_ec2_heartbeat_internal_api_key(settings),
+            workspace_projects_base=_workspace_projects_base_for_ec2(settings),
+            heartbeat_interval_seconds=_config_int(settings, "devnest_node_heartbeat_interval_seconds", 30),
+        )
+    return req
 
 
 def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
@@ -542,7 +606,8 @@ def provision_one_from_fleet_decision(session: Session, decision: FleetAutoscale
             reasons=" | ".join(decision.reasons)[:2000],
         )
         return None
-    node = provision_ec2_node(session, request=None, wait_until_running=True)
+    req = _build_autoscaler_ec2_provision_request(get_settings())
+    node = provision_ec2_node(session, request=req, wait_until_running=True)
     session.flush()
     record_autoscaler_scale_up()
     log_event(
