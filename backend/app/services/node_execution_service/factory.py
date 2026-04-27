@@ -116,7 +116,9 @@ def _topology_ip_should_use_host_nsenter() -> bool:
 def _ec2_traefik_routing_host(node: ExecutionNode) -> str | None:
     if (node.provider_type or "").strip().lower() != ExecutionNodeProviderType.EC2.value:
         return None
-    h = _execution_connect_host(node)
+    # Traefik runs in the control-plane/gateway network, not on the remote Docker host.
+    # For EC2 nodes it must target the instance private IP plus the published Docker host port.
+    h = (node.private_ip or "").strip()
     return h or None
 
 

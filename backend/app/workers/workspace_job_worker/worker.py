@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
@@ -596,6 +597,57 @@ def _touch_workspace(session: Session, ws: Workspace) -> None:
     session.add(ws)
 
 
+def _route_target_port(value: str | None) -> int | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
+    try:
+        if parsed.port is not None:
+            return int(parsed.port)
+    except ValueError:
+        return None
+    host_port = (parsed.netloc or parsed.path or "").rsplit(":", 1)
+    if len(host_port) == 2 and host_port[1].isdigit():
+        return int(host_port[1])
+    return None
+
+
+def _remote_gateway_route_target_for_node(
+    session: Session,
+    *,
+    node_key: str | None,
+    gateway_route_target: str | None,
+    internal_endpoint: str | None,
+) -> str | None:
+    """
+    For EC2/remote Docker nodes, Traefik must reach the execution host's published port.
+
+    The orchestrator may still report ``internal_endpoint=127.0.0.1:<published_port>`` because
+    probes run on the execution host via SSM/SSH. Convert that to
+    ``http://{execution_node.private_ip}:{published_port}`` for route-admin.
+    """
+    key = (node_key or "").strip()
+    if not key:
+        return (gateway_route_target or "").strip() or None
+    node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+    if node is None:
+        return (gateway_route_target or "").strip() or None
+    execution_mode = (node.execution_mode or "").strip()
+    provider_type = (node.provider_type or "").strip()
+    is_remote = provider_type == ExecutionNodeProviderType.EC2.value or execution_mode in _REMOTE_EXECUTION_MODES
+    if not is_remote:
+        return (gateway_route_target or "").strip() or None
+
+    private_ip = (node.private_ip or "").strip()
+    if not private_ip:
+        return (gateway_route_target or "").strip() or None
+    port = _route_target_port(gateway_route_target) or _route_target_port(internal_endpoint)
+    if port is None:
+        return (gateway_route_target or "").strip() or None
+    return f"http://{private_ip}:{port}"
+
+
 def _gateway_default_public_host(workspace_id: int, base_domain: str) -> str:
     dom = (base_domain or "app.devnest.local").strip().strip(".")
     # Must match ``GET /internal/gateway/auth`` host parsing (``ws-{id}.<base_domain>``).
@@ -814,6 +866,12 @@ def _finalize_runtime_running_success(
     """
     wid = ws.workspace_id
     assert wid is not None
+    gateway_route_target = _remote_gateway_route_target_for_node(
+        session,
+        node_key=node_id,
+        gateway_route_target=gateway_route_target,
+        internal_endpoint=internal_endpoint,
+    )
     _apply_runtime_bringup_like(
         session,
         wid,

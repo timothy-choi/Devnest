@@ -355,6 +355,40 @@ def test_ssm_docker_bundle_uses_runtime_adapter(mock_runner_cls, ne_engine) -> N
 
 
 @patch("app.services.node_execution_service.factory.SsmRemoteCommandRunner")
+def test_ssm_docker_bundle_uses_private_ip_for_traefik_route_target(mock_runner_cls, ne_engine) -> None:
+    runner_inst = MagicMock()
+    runner_inst.run.return_value = ""
+    mock_runner_cls.return_value = runner_inst
+    with Session(ne_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ssm-route",
+                name="ssm-route",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                provider_instance_id="i-0ssmroute000001",
+                region="us-west-2",
+                hostname="ip-10-0-1-20.ec2.internal",
+                ssh_host="127.0.0.1",
+                private_ip="10.0.1.20",
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+            ),
+        )
+        session.commit()
+        settings = MagicMock()
+        settings.devnest_execution_mode = ""
+        settings.aws_region = ""
+        with patch("app.services.node_execution_service.factory.get_settings", return_value=settings):
+            bundle = resolve_node_execution_bundle(session, "ssm-route")
+    assert bundle.traefik_routing_host == "10.0.1.20"
+
+
+@patch("app.services.node_execution_service.factory.SsmRemoteCommandRunner")
 def test_devnest_execution_mode_ssm_overrides_ssh_docker(mock_runner_cls, ne_engine) -> None:
     """``DEVNEST_EXECUTION_MODE=ssm`` uses SSM even when the row still says ``ssh_docker``."""
     runner_inst = MagicMock()

@@ -701,6 +701,12 @@ def _reconcile_running(
         return
 
     before = _runtime_snapshot(session, wid)
+    gateway_route_target = wmod._remote_gateway_route_target_for_node(
+        session,
+        node_key=health.node_id,
+        gateway_route_target=health.gateway_route_target,
+        internal_endpoint=health.internal_endpoint,
+    )
     # ``requested_config_version`` is frozen at enqueue time (matches other job types).
     wmod._apply_runtime_bringup_like(
         session,
@@ -712,11 +718,11 @@ def _reconcile_running(
         internal_endpoint=health.internal_endpoint,
         config_version=config_version,
         probe_healthy=health.probe_healthy,
-        gateway_route_target=health.gateway_route_target,
+        gateway_route_target=gateway_route_target,
     )
     after = _runtime_snapshot(session, wid)
     runtime_changed = before != after
-    route_endpoint = health.gateway_route_target or health.internal_endpoint
+    route_endpoint = gateway_route_target or health.internal_endpoint
     if route_endpoint:
         ws.endpoint_ref = route_endpoint
     wmod._touch_workspace(session, ws)
@@ -752,7 +758,7 @@ def _reconcile_running(
     observed_upstream = (
         traefik_upstream_for_workspace_gateway(ws, rt_cur)
         if rt_cur is not None
-        else registration_upstream(health.gateway_route_target, health.internal_endpoint)
+        else registration_upstream(gateway_route_target, health.internal_endpoint)
     )
     if settings.devnest_gateway_enabled and observed_upstream:
         try:
