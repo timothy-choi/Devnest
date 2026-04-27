@@ -304,6 +304,51 @@ class TestBringUpHappyPath:
         mock_probe.check_service_reachable.assert_not_called()
         mock_probe.check_workspace_health.assert_not_called()
 
+    def test_remote_health_check_uses_private_ip_route_target_without_topology(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        mock_probe.check_container_running.return_value = ContainerProbeResult(
+            healthy=True,
+            container_id=CONTAINER_ID,
+            container_state="running",
+            issues=(),
+        )
+        mock_probe.check_service_http.return_value = ServiceProbeResult(
+            healthy=True,
+            workspace_ip="127.0.0.1",
+            port=32000,
+            latency_ms=1.0,
+            issues=(),
+        )
+
+        svc = _make_service(
+            mock_runtime,
+            mock_topology,
+            mock_probe,
+            ws_root,
+            remote_topology_attach_deferred=True,
+            traefik_routing_host="10.0.1.20",
+        )
+
+        out = svc.check_workspace_runtime_health(
+            workspace_id=WORKSPACE_ID,
+            container_id=CONTAINER_ID,
+        )
+
+        assert out.success is True
+        assert out.internal_endpoint == "127.0.0.1:32000"
+        assert out.gateway_route_target == "http://10.0.1.20:32000"
+        assert out.workspace_ip is None
+        mock_topology.ensure_node_topology.assert_not_called()
+        mock_topology.allocate_workspace_ip.assert_not_called()
+        mock_topology.attach_workspace.assert_not_called()
+        mock_probe.check_workspace_health.assert_not_called()
+
     def test_same_workspace_id_with_different_storage_keys_uses_different_project_paths(
         self,
         mock_runtime: MagicMock,

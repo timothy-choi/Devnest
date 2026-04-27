@@ -60,7 +60,11 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
 from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
-from app.services.placement_service.models import ExecutionNode
+from app.services.placement_service.models import (
+    ExecutionNode,
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+)
 from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.gateway_client.workspace_route_upstream import traefik_upstream_for_workspace_gateway
@@ -134,6 +138,12 @@ _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
 _ERROR_CODE_ORCH = "ORCHESTRATOR_EXCEPTION"
 _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
+_REMOTE_EXECUTION_MODES = frozenset(
+    {
+        ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ExecutionNodeExecutionMode.SSH_DOCKER.value,
+    }
+)
 
 
 def _clear_runtime_capacity_reservation(session: Session, workspace_id: int) -> None:
@@ -616,16 +626,38 @@ def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
             settings.devnest_base_domain,
         )
         nk = ((rt.node_id or "").strip() or None)
+        node = None
+        if nk:
+            node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+        execution_mode = (getattr(node, "execution_mode", None) or "").strip() if node is not None else None
+        provider_type = (getattr(node, "provider_type", None) or "").strip() if node is not None else None
+        topology_skipped_for_remote = bool(
+            provider_type == ExecutionNodeProviderType.EC2.value or execution_mode in _REMOTE_EXECUTION_MODES
+        )
         logger.info(
             "gateway_route_register_attempt",
             extra={
                 "workspace_id": wid,
                 "public_host": public,
                 "node_key": nk,
+                "execution_mode": execution_mode,
                 "execution_node_id": ws.execution_node_id,
+                "gateway_route_target": upstream,
                 "gateway_upstream_target": upstream,
+                "topology_skipped_for_remote": topology_skipped_for_remote,
             },
         )
+        if topology_skipped_for_remote:
+            logger.info(
+                "remote_topology_route_target_selected",
+                extra={
+                    "workspace_id": wid,
+                    "node_key": nk,
+                    "execution_mode": execution_mode,
+                    "gateway_route_target": upstream,
+                    "topology_skipped_for_remote": True,
+                },
+            )
         DevnestGatewayClient.from_settings(settings).register_route(
             str(wid),
             upstream,
@@ -801,7 +833,7 @@ def _finalize_runtime_running_success(
     _mark_job_succeeded(session, job)
     ws.status = WorkspaceStatus.RUNNING.value
     _workspace_clear_errors(ws)
-    ws.endpoint_ref = internal_endpoint or ws.endpoint_ref
+    ws.endpoint_ref = gateway_route_target or internal_endpoint or ws.endpoint_ref
     ws.last_started = _now()
     _touch_workspace(session, ws)
     revoke_all_workspace_sessions(

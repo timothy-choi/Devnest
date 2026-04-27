@@ -1915,6 +1915,40 @@ class DefaultOrchestratorService(OrchestratorService):
                 issues=_issues_or_none([f"health:container:not_running:{state or 'unknown'}"]),
             )
 
+        if self._remote_topology_attach_deferred:
+            netns_ref = None
+            try:
+                netns_ref = self._runtime_adapter.get_container_netns_ref(container_id=cid).netns_ref
+            except Exception:
+                netns_ref = None
+            running = EnsureRunningRuntimeResult(
+                container_id=cid,
+                container_state=ins.container_state,
+                pid=ins.pid or 0,
+                netns_ref=netns_ref or "remote-topology-deferred",
+                resolved_ports=ins.ports,
+                node_id=nid,
+            )
+            return self._bring_up_run_remote_host_port_probe(
+                _BringUpContext(
+                    wid=wid,
+                    ws_int=_parse_topology_workspace_id(wid),
+                    container_name=_sanitize_container_name(wid),
+                    workspace_host_path="",
+                    project_storage_key=None,
+                    launch_mode="health",
+                    labels={},
+                ),
+                running,
+                NetnsRefResult(
+                    container_id=cid,
+                    pid=ins.pid or 0,
+                    netns_ref=netns_ref or "remote-topology-deferred",
+                ),
+                wait_total=5.0,
+                poll_interval=1.0,
+            )
+
         try:
             health = self._probe_runner.check_workspace_health(
                 workspace_id=wid,

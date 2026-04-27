@@ -464,6 +464,44 @@ class TestDispatchCreate:
             )
             assert len(deliveries) == 3
 
+    def test_create_persists_gateway_route_target_as_workspace_endpoint(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        gateway_target = "http://10.0.1.20:32771"
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            out = _bringup_ok(str(wid))
+            out.internal_endpoint = "127.0.0.1:32771"
+            out.gateway_route_target = gateway_target
+            orch.bring_up_workspace_runtime.return_value = out
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert ws is not None
+            assert rt is not None
+            assert ws.endpoint_ref == gateway_target
+            assert rt.internal_endpoint == "127.0.0.1:32771"
+            assert rt.gateway_route_target == gateway_target
+
     def test_create_dispatch_merges_encrypted_workspace_secrets_into_runtime_env(
         self,
         workspace_job_worker_engine,
