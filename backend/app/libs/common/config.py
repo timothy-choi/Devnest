@@ -838,9 +838,16 @@ class Settings(BaseSettings):
 
     # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
     devnest_autoscaler_enabled: bool = False
+    # Phase 1 controller mode: evaluate and log fleet decisions without provisioning, draining, or terminating.
+    devnest_autoscaler_evaluate_only: bool = True
+    devnest_autoscaler_min_nodes: int = 1
+    devnest_autoscaler_max_nodes: int = 10
+    devnest_autoscaler_min_idle_slots: int = 1
     # When set with ``devnest_autoscaler_enabled``, worker triggers one EC2 provision on NoSchedulableNodeError.
     devnest_autoscaler_provision_on_no_capacity: bool = False
     devnest_autoscaler_max_concurrent_provisioning: int = 3
+    devnest_autoscaler_scale_out_cooldown_seconds: int = 300
+    devnest_autoscaler_scale_in_cooldown_seconds: int = 900
     # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist (last-node safety).
     # Values below 2 are coerced to 2 so scale-down cannot target the sole READY EC2 node via misconfiguration.
     devnest_autoscaler_min_ec2_nodes_before_reclaim: int = 2
@@ -968,6 +975,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "devnest_autoscaler_enabled",
+        "devnest_autoscaler_evaluate_only",
         "devnest_autoscaler_provision_on_no_capacity",
         "devnest_require_distributed_rate_limiting",
         mode="before",
@@ -1018,6 +1026,46 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 3
         return max(1, min(n, 50))
+
+    @field_validator("devnest_autoscaler_min_nodes", mode="before")
+    @classmethod
+    def _autoscaler_min_nodes(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 1
+        return max(0, min(n, 100))
+
+    @field_validator("devnest_autoscaler_max_nodes", mode="before")
+    @classmethod
+    def _autoscaler_max_nodes(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 10
+        return max(1, min(n, 500))
+
+    @field_validator("devnest_autoscaler_min_idle_slots", mode="before")
+    @classmethod
+    def _autoscaler_min_idle_slots(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 1
+        return max(0, min(n, 10_000))
+
+    @field_validator(
+        "devnest_autoscaler_scale_out_cooldown_seconds",
+        "devnest_autoscaler_scale_in_cooldown_seconds",
+        mode="before",
+    )
+    @classmethod
+    def _autoscaler_cooldown_seconds(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 300
+        return max(0, min(n, 86_400))
 
     @field_validator("devnest_autoscaler_min_ec2_nodes_before_reclaim", mode="before")
     @classmethod

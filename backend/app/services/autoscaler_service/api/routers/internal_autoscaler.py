@@ -25,12 +25,15 @@ from app.services.policy_service.service import evaluate_node_provisioning
 from ...models import ScaleDownEvaluation, ScaleUpEvaluation
 from ...service import (
     evaluate_scale_down,
+    evaluate_fleet_autoscaler_tick,
     evaluate_scale_up,
     provision_capacity_if_needed,
     reclaim_one_idle_ec2_node,
 )
 from ..schemas import (
     AutoscalerEvaluateResponse,
+    FleetAutoscalerDecisionResponse,
+    FleetCapacitySnapshotResponse,
     ProvisionOneResponse,
     ReclaimOneResponse,
     ScaleDownEvaluationResponse,
@@ -63,15 +66,57 @@ def _down(ev: ScaleDownEvaluation) -> ScaleDownEvaluationResponse:
     )
 
 
+def _decision(decision) -> FleetAutoscalerDecisionResponse:
+    cap = decision.capacity
+    return FleetAutoscalerDecisionResponse(
+        action=decision.action,
+        scale_out_recommended=decision.scale_out_recommended,
+        scale_in_recommended=decision.scale_in_recommended,
+        no_action=decision.no_action,
+        suppressed_by_cooldown=decision.suppressed_by_cooldown,
+        suppressed_by_cap=decision.suppressed_by_cap,
+        suppressed_by_config=decision.suppressed_by_config,
+        reasons=list(decision.reasons),
+        capacity=FleetCapacitySnapshotResponse(
+            total_nodes=cap.total_nodes,
+            ec2_nodes_active=cap.ec2_nodes_active,
+            ready_schedulable_nodes=cap.ready_schedulable_nodes,
+            ready_schedulable_ec2_nodes=cap.ready_schedulable_ec2_nodes,
+            provisioning_nodes=cap.provisioning_nodes,
+            draining_nodes=cap.draining_nodes,
+            active_slots=cap.active_slots,
+            free_slots=cap.free_slots,
+            pending_workspace_jobs=cap.pending_workspace_jobs,
+            pending_placement_jobs=cap.pending_placement_jobs,
+            total_allocatable_cpu=cap.total_allocatable_cpu,
+            free_cpu=cap.free_cpu,
+            total_allocatable_memory_mb=cap.total_allocatable_memory_mb,
+            free_memory_mb=cap.free_memory_mb,
+            total_allocatable_disk_mb=cap.total_allocatable_disk_mb,
+            free_disk_mb=cap.free_disk_mb,
+            idle_ec2_node_count=cap.idle_ec2_node_count,
+        ),
+        min_nodes=decision.min_nodes,
+        max_nodes=decision.max_nodes,
+        min_idle_slots=decision.min_idle_slots,
+        max_concurrent_provisioning=decision.max_concurrent_provisioning,
+        scale_out_cooldown_seconds=decision.scale_out_cooldown_seconds,
+        scale_in_cooldown_seconds=decision.scale_in_cooldown_seconds,
+        evaluate_only=decision.evaluate_only,
+        enabled=decision.enabled,
+    )
+
+
 @router.get(
     "/evaluate",
     response_model=AutoscalerEvaluateResponse,
-    summary="Dry-run scale-up and scale-down decisions",
+    summary="Evaluate autoscaler decisions without mutating nodes",
 )
 def get_autoscaler_evaluate(session: Session = Depends(get_db)) -> AutoscalerEvaluateResponse:
+    decision = evaluate_fleet_autoscaler_tick(session)
     up = evaluate_scale_up(session, insufficient_capacity=True)
     down = evaluate_scale_down(session)
-    return AutoscalerEvaluateResponse(scale_up=_up(up), scale_down=_down(down))
+    return AutoscalerEvaluateResponse(scale_up=_up(up), scale_down=_down(down), decision=_decision(decision))
 
 
 @router.post(

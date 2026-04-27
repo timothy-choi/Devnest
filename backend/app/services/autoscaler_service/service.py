@@ -26,18 +26,45 @@ from app.services.infrastructure_service.lifecycle import (
 )
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
 from app.services.placement_service.capacity import max_effective_free_resources_across_schedulable
+from app.services.placement_service.capacity import (
+    count_active_workloads_on_node_key,
+    total_reserved_disk_mb_on_node_key,
+    total_reserved_on_node_key,
+)
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeProviderType,
     ExecutionNodeStatus,
 )
 from app.services.placement_service.node_placement import schedulable_placement_predicates
-from app.services.workspace_service.models import Workspace, WorkspaceRuntime
-from app.services.workspace_service.models.enums import WorkspaceStatus
+from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
+from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceJobType, WorkspaceStatus
 
-from .models import ScaleDownEvaluation, ScaleUpEvaluation
+from .models import FleetAutoscalerDecision, FleetCapacitySnapshot, ScaleDownEvaluation, ScaleUpEvaluation
 
 logger = logging.getLogger(__name__)
+
+_PENDING_PLACEMENT_DEMAND_JOB_TYPES = frozenset(
+    {
+        WorkspaceJobType.CREATE.value,
+        WorkspaceJobType.START.value,
+        WorkspaceJobType.RESTART.value,
+        WorkspaceJobType.UPDATE.value,
+        WorkspaceJobType.SNAPSHOT_RESTORE.value,
+        WorkspaceJobType.REPO_IMPORT.value,
+    },
+)
+
+_ACTIVE_EC2_NODE_STATUSES = frozenset(
+    {
+        ExecutionNodeStatus.PROVISIONING.value,
+        ExecutionNodeStatus.READY.value,
+        ExecutionNodeStatus.NOT_READY.value,
+        ExecutionNodeStatus.DRAINING.value,
+        ExecutionNodeStatus.TERMINATING.value,
+        ExecutionNodeStatus.ERROR.value,
+    },
+)
 
 
 def _provider_allows_ec2_autoscale() -> bool:
@@ -155,6 +182,281 @@ def workload_count_on_node(session: Session, node_key: str) -> int:
     if not key:
         return 0
     return int(_workload_counts_by_node_keys(session, [key]).get(key, 0))
+
+
+def _count_queued_jobs(session: Session, *, job_types: frozenset[str] | None = None) -> int:
+    preds = [WorkspaceJob.status == WorkspaceJobStatus.QUEUED.value]
+    if job_types is not None:
+        preds.append(WorkspaceJob.job_type.in_(sorted(job_types)))
+    stmt = select(func.count()).select_from(WorkspaceJob).where(and_(*preds))
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _seconds_since(ts: datetime | None) -> float | None:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
+def _latest_ec2_created_at(nodes: list[ExecutionNode]) -> datetime | None:
+    vals = [
+        n.created_at
+        for n in nodes
+        if n.provider_type == ExecutionNodeProviderType.EC2.value
+        and n.status in (ExecutionNodeStatus.PROVISIONING.value, ExecutionNodeStatus.READY.value)
+    ]
+    return max(vals) if vals else None
+
+
+def _latest_ec2_scale_in_at(nodes: list[ExecutionNode]) -> datetime | None:
+    vals = [
+        n.updated_at
+        for n in nodes
+        if n.provider_type == ExecutionNodeProviderType.EC2.value
+        and n.status
+        in (
+            ExecutionNodeStatus.DRAINING.value,
+            ExecutionNodeStatus.TERMINATING.value,
+            ExecutionNodeStatus.TERMINATED.value,
+        )
+    ]
+    return max(vals) if vals else None
+
+
+def _config_int(settings: object, name: str, default: int) -> int:
+    try:
+        return int(getattr(settings, name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _config_bool(settings: object, name: str, default: bool) -> bool:
+    raw = getattr(settings, name, default)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw)
+
+
+def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
+    """Read-only fleet capacity rollup for Phase 1 evaluate-only autoscaler decisions."""
+    nodes = list(session.exec(select(ExecutionNode)).all())
+    ready_nodes = list(
+        session.exec(select(ExecutionNode).where(and_(*schedulable_placement_predicates()))).all(),
+    )
+    total_nodes = len(nodes)
+    ec2_nodes_active = sum(
+        1
+        for n in nodes
+        if n.provider_type == ExecutionNodeProviderType.EC2.value and (n.status or "") in _ACTIVE_EC2_NODE_STATUSES
+    )
+    provisioning_nodes = sum(
+        1
+        for n in nodes
+        if n.provider_type == ExecutionNodeProviderType.EC2.value
+        and n.status == ExecutionNodeStatus.PROVISIONING.value
+    )
+    draining_nodes = sum(
+        1
+        for n in nodes
+        if n.provider_type == ExecutionNodeProviderType.EC2.value and n.status == ExecutionNodeStatus.DRAINING.value
+    )
+
+    active_slots = 0
+    free_slots = 0
+    total_cpu = 0.0
+    free_cpu = 0.0
+    total_mem = 0
+    free_mem = 0
+    total_disk = 0
+    free_disk = 0
+    for node in ready_nodes:
+        key = (node.node_key or "").strip()
+        if not key:
+            continue
+        used_cpu, used_mem = total_reserved_on_node_key(session, key)
+        used_disk = total_reserved_disk_mb_on_node_key(session, key)
+        slots = count_active_workloads_on_node_key(session, key)
+        max_slots = max(0, int(node.max_workspaces or 0))
+        alloc_cpu = max(0.0, float(node.allocatable_cpu or 0.0))
+        alloc_mem = max(0, int(node.allocatable_memory_mb or 0))
+        alloc_disk = max(0, int(node.allocatable_disk_mb or 0))
+        active_slots += slots
+        free_slots += max(0, max_slots - slots)
+        total_cpu += alloc_cpu
+        free_cpu += max(0.0, alloc_cpu - used_cpu)
+        total_mem += alloc_mem
+        free_mem += max(0, alloc_mem - used_mem)
+        total_disk += alloc_disk
+        free_disk += max(0, alloc_disk - used_disk)
+
+    return FleetCapacitySnapshot(
+        total_nodes=total_nodes,
+        ec2_nodes_active=ec2_nodes_active,
+        ready_schedulable_nodes=len(ready_nodes),
+        ready_schedulable_ec2_nodes=sum(
+            1 for n in ready_nodes if n.provider_type == ExecutionNodeProviderType.EC2.value
+        ),
+        provisioning_nodes=provisioning_nodes,
+        draining_nodes=draining_nodes,
+        active_slots=active_slots,
+        free_slots=free_slots,
+        pending_workspace_jobs=_count_queued_jobs(session),
+        pending_placement_jobs=_count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES),
+        total_allocatable_cpu=round(total_cpu, 4),
+        free_cpu=round(free_cpu, 4),
+        total_allocatable_memory_mb=total_mem,
+        free_memory_mb=free_mem,
+        total_allocatable_disk_mb=total_disk,
+        free_disk_mb=free_disk,
+        idle_ec2_node_count=_count_idle_ec2_nodes(session),
+    )
+
+
+def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
+    """
+    Phase 1 autoscaler controller tick.
+
+    This function is intentionally read-only: it does not call EC2, drain, terminate,
+    register, or update ``execution_node`` rows. It returns/logs what the controller would do.
+    """
+    settings = get_settings()
+    enabled = _config_bool(settings, "devnest_autoscaler_enabled", False)
+    evaluate_only = _config_bool(settings, "devnest_autoscaler_evaluate_only", True)
+    min_nodes = _config_int(settings, "devnest_autoscaler_min_nodes", 1)
+    max_nodes = _config_int(settings, "devnest_autoscaler_max_nodes", 10)
+    min_idle_slots = _config_int(settings, "devnest_autoscaler_min_idle_slots", 1)
+    max_concurrent = _config_int(settings, "devnest_autoscaler_max_concurrent_provisioning", 3)
+    out_cooldown = _config_int(settings, "devnest_autoscaler_scale_out_cooldown_seconds", 300)
+    in_cooldown = _config_int(settings, "devnest_autoscaler_scale_in_cooldown_seconds", 900)
+
+    cap = build_fleet_capacity_snapshot(session)
+    nodes = list(session.exec(select(ExecutionNode)).all())
+
+    pending = int(cap.pending_placement_jobs)
+    idle_after_pending = int(cap.free_slots) - pending
+    scale_out_recommended = (
+        pending > int(cap.free_slots)
+        or idle_after_pending < min_idle_slots
+        or (pending > 0 and cap.ready_schedulable_nodes == 0)
+    )
+    scale_in_recommended = (
+        pending == 0
+        and cap.idle_ec2_node_count > 0
+        and cap.ec2_nodes_active > min_nodes
+        and cap.free_slots > min_idle_slots
+        and cap.draining_nodes == 0
+    )
+
+    reasons: list[str] = []
+    suppressed_by_config = False
+    suppressed_by_cap = False
+    suppressed_by_cooldown = False
+
+    if scale_out_recommended:
+        reasons.append(
+            "scale-out recommended: pending placement demand plus idle-slot buffer exceeds ready capacity",
+        )
+        if not enabled:
+            suppressed_by_config = True
+            reasons.append("suppressed by config: DEVNEST_AUTOSCALER_ENABLED=false")
+        if evaluate_only:
+            suppressed_by_config = True
+            reasons.append("suppressed by config: DEVNEST_AUTOSCALER_EVALUATE_ONLY=true")
+        if cap.ec2_nodes_active >= max_nodes:
+            suppressed_by_cap = True
+            reasons.append(f"suppressed by cap: active EC2 nodes {cap.ec2_nodes_active} >= max_nodes {max_nodes}")
+        if cap.provisioning_nodes >= max_concurrent:
+            suppressed_by_cap = True
+            reasons.append(
+                f"suppressed by cap: provisioning nodes {cap.provisioning_nodes} >= "
+                f"max_concurrent_provisioning {max_concurrent}",
+            )
+        age = _seconds_since(_latest_ec2_created_at(nodes))
+        if age is not None and age >= 0 and age < out_cooldown:
+            suppressed_by_cooldown = True
+            reasons.append(
+                f"suppressed by cooldown: last EC2 provision-like event {int(age)}s ago "
+                f"< scale_out_cooldown_seconds {out_cooldown}",
+            )
+    elif scale_in_recommended:
+        reasons.append("scale-in recommended: idle EC2 capacity exceeds configured floor and queue is empty")
+        if not enabled:
+            suppressed_by_config = True
+            reasons.append("suppressed by config: DEVNEST_AUTOSCALER_ENABLED=false")
+        if evaluate_only:
+            suppressed_by_config = True
+            reasons.append("suppressed by config: DEVNEST_AUTOSCALER_EVALUATE_ONLY=true")
+        if cap.ec2_nodes_active <= min_nodes:
+            suppressed_by_cap = True
+            reasons.append(f"suppressed by cap: active EC2 nodes {cap.ec2_nodes_active} <= min_nodes {min_nodes}")
+        age = _seconds_since(_latest_ec2_scale_in_at(nodes))
+        if age is not None and age >= 0 and age < in_cooldown:
+            suppressed_by_cooldown = True
+            reasons.append(
+                f"suppressed by cooldown: last EC2 scale-in-like event {int(age)}s ago "
+                f"< scale_in_cooldown_seconds {in_cooldown}",
+            )
+    else:
+        reasons.append("no action: ready capacity, pending demand, idle buffer, and node floors are within policy")
+
+    if suppressed_by_config:
+        action = "suppressed_by_config"
+    elif suppressed_by_cap:
+        action = "suppressed_by_cap"
+    elif suppressed_by_cooldown:
+        action = "suppressed_by_cooldown"
+    elif scale_out_recommended:
+        action = "scale_out_recommended"
+    elif scale_in_recommended:
+        action = "scale_in_recommended"
+    else:
+        action = "no_action"
+
+    decision = FleetAutoscalerDecision(
+        action=action,
+        scale_out_recommended=scale_out_recommended,
+        scale_in_recommended=scale_in_recommended,
+        no_action=action == "no_action",
+        suppressed_by_cooldown=suppressed_by_cooldown,
+        suppressed_by_cap=suppressed_by_cap,
+        suppressed_by_config=suppressed_by_config,
+        reasons=reasons,
+        capacity=cap,
+        min_nodes=min_nodes,
+        max_nodes=max_nodes,
+        min_idle_slots=min_idle_slots,
+        max_concurrent_provisioning=max_concurrent,
+        scale_out_cooldown_seconds=out_cooldown,
+        scale_in_cooldown_seconds=in_cooldown,
+        evaluate_only=evaluate_only,
+        enabled=enabled,
+    )
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_EVALUATE_ONLY_DECISION,
+        action=decision.action,
+        scale_out_recommended=decision.scale_out_recommended,
+        scale_in_recommended=decision.scale_in_recommended,
+        suppressed_by_config=decision.suppressed_by_config,
+        suppressed_by_cap=decision.suppressed_by_cap,
+        suppressed_by_cooldown=decision.suppressed_by_cooldown,
+        ready_schedulable_nodes=cap.ready_schedulable_nodes,
+        ready_schedulable_ec2_nodes=cap.ready_schedulable_ec2_nodes,
+        provisioning_nodes=cap.provisioning_nodes,
+        draining_nodes=cap.draining_nodes,
+        active_slots=cap.active_slots,
+        free_slots=cap.free_slots,
+        pending_workspace_jobs=cap.pending_workspace_jobs,
+        pending_placement_jobs=cap.pending_placement_jobs,
+        idle_ec2_node_count=cap.idle_ec2_node_count,
+        reasons=" | ".join(reasons)[:2000],
+    )
+    return decision
 
 
 def evaluate_scale_up(
