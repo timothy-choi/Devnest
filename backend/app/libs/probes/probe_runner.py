@@ -694,10 +694,17 @@ class DefaultProbeRunner(ProbeRunner):
     ) -> ServiceProbeResult:
         """HTTP GET to the configured IDE health path; accept 2xx/3xx as HTTP-ready.
 
-        Uses ``urllib.request`` (stdlib-only; no new dependencies). TCP-level errors
-        (connection refused, timeout, DNS failure) are treated as not-ready and the
-        workspace stays in the probe loop until the service is fully initialised.
+        Uses the injected execution-host runner when available, otherwise ``urllib.request``
+        locally. TCP-level errors (connection refused, timeout, DNS failure) are treated as
+        not-ready and the workspace stays in the probe loop until the service is fully initialised.
         """
+        if self._service_reachability_runner is not None:
+            return self._check_service_http_via_runner(
+                workspace_ip=workspace_ip,
+                port=port,
+                timeout_seconds=timeout_seconds,
+            )
+
         ip = (workspace_ip or "").strip()
         url = f"http://{ip}:{port}{_ide_health_http_path()}"
         try:

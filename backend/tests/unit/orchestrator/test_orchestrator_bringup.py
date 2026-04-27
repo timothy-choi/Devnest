@@ -10,6 +10,7 @@ import pytest
 from app.libs.common.config import get_settings
 from app.libs.probes.interfaces import ProbeRunner
 from app.libs.probes.results import (
+    ContainerProbeResult,
     HealthIssue,
     HealthIssueSeverity,
     ServiceProbeResult,
@@ -156,6 +157,9 @@ def _make_service(
     mock_topology: MagicMock,
     mock_probe: MagicMock,
     ws_root: Path,
+    *,
+    remote_topology_attach_deferred: bool = False,
+    traefik_routing_host: str | None = None,
 ) -> DefaultOrchestratorService:
     return DefaultOrchestratorService(
         mock_runtime,
@@ -164,6 +168,8 @@ def _make_service(
         topology_id=TOPOLOGY_ID,
         node_id=NODE_ID,
         workspace_projects_base=str(ws_root),
+        traefik_routing_host=traefik_routing_host,
+        remote_topology_attach_deferred=remote_topology_attach_deferred,
     )
 
 
@@ -248,6 +254,55 @@ class TestBringUpHappyPath:
             expected_port=WORKSPACE_IDE_CONTAINER_PORT,
             timeout_seconds=8.0,
         )
+
+    def test_remote_node_skips_local_topology_attach_and_uses_host_port_probe(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        mock_probe.check_container_running.return_value = ContainerProbeResult(
+            healthy=True,
+            container_id=CONTAINER_ID,
+            container_state="running",
+            issues=(),
+        )
+        mock_probe.check_service_http.return_value = ServiceProbeResult(
+            healthy=True,
+            workspace_ip="127.0.0.1",
+            port=32000,
+            latency_ms=1.0,
+            issues=(),
+        )
+
+        svc = _make_service(
+            mock_runtime,
+            mock_topology,
+            mock_probe,
+            ws_root,
+            remote_topology_attach_deferred=True,
+            traefik_routing_host="10.0.1.20",
+        )
+
+        out = svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
+
+        assert out.success is True
+        assert out.workspace_ip is None
+        assert out.internal_endpoint == "127.0.0.1:32000"
+        assert out.gateway_route_target == "http://10.0.1.20:32000"
+        assert out.netns_ref == "/devnest-skip-linux-topology-attachment"
+        mock_topology.ensure_node_topology.assert_not_called()
+        mock_topology.allocate_workspace_ip.assert_not_called()
+        mock_topology.attach_workspace.assert_not_called()
+        mock_runtime.get_container_netns_ref.assert_not_called()
+        reach_kwargs = mock_probe.check_service_http.call_args.kwargs
+        assert reach_kwargs["workspace_ip"] == "127.0.0.1"
+        assert reach_kwargs["port"] == 32000
+        assert reach_kwargs["timeout_seconds"] > 0
+        mock_probe.check_service_reachable.assert_not_called()
+        mock_probe.check_workspace_health.assert_not_called()
 
     def test_same_workspace_id_with_different_storage_keys_uses_different_project_paths(
         self,

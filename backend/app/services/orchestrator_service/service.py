@@ -214,6 +214,7 @@ class DefaultOrchestratorService(OrchestratorService):
         ensure_workspace_project_dir: _EnsureWorkspaceProjectDir | None = None,
         traefik_routing_host: str | None = None,
         snapshot_ssh_runner: SshRemoteCommandRunner | None = None,
+        remote_topology_attach_deferred: bool = False,
     ) -> None:
         self._runtime_adapter = runtime_adapter
         self._topology_service = topology_service
@@ -222,6 +223,7 @@ class DefaultOrchestratorService(OrchestratorService):
         self._node_id = node_id.strip() or "node-1"
         self._traefik_routing_host = (traefik_routing_host or "").strip() or None
         self._snapshot_ssh_runner = snapshot_ssh_runner
+        self._remote_topology_attach_deferred = bool(remote_topology_attach_deferred)
         self._workspace_projects_base = workspace_projects_base or os.path.join(
             tempfile.gettempdir(),
             "devnest-workspaces",
@@ -603,7 +605,9 @@ class DefaultOrchestratorService(OrchestratorService):
                 ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
                 labels=ctx.labels,
                 workspace_host_path=ctx.workspace_host_path,
-                skip_netns_resolution=_env_skip_linux_topology_attachment(),
+                skip_netns_resolution=(
+                    _env_skip_linux_topology_attachment() or self._remote_topology_attach_deferred
+                ),
                 cpu_limit=cpu_limit_cores,
                 memory_limit_bytes=memory_limit_bytes,
                 env=merged_env,
@@ -722,6 +726,31 @@ class DefaultOrchestratorService(OrchestratorService):
         running: EnsureRunningRuntimeResult,
     ) -> tuple[NetnsRefResult, AttachWorkspaceResult]:
         """Ensure node topology, allocate IP, attach workspace veth to bridge."""
+        if self._remote_topology_attach_deferred:
+            logger.info(
+                "remote_topology_attach_deferred",
+                extra={
+                    "workspace_id": ctx.wid,
+                    "node_id": self._node_id,
+                    "topology_id": self._topology_id,
+                    "container_id": running.container_id,
+                    "detail": "skipping local nsenter/netns attach for remote execution node",
+                },
+            )
+            netns = NetnsRefResult(
+                container_id=running.container_id,
+                pid=running.pid,
+                netns_ref=running.netns_ref or "remote-topology-deferred",
+            )
+            attach_res = AttachWorkspaceResult(
+                attachment_id=0,
+                workspace_ip="",
+                bridge_name=None,
+                gateway_ip=None,
+                internal_endpoint="",
+            )
+            return netns, attach_res
+
         try:
             self._bring_up_wait_workspace_alive_for_topology(
                 ctx,
@@ -844,6 +873,15 @@ class DefaultOrchestratorService(OrchestratorService):
         wait_total = max(1.0, min(600.0, wait_total))
         poll_interval = max(0.05, min(30.0, poll_interval))
 
+        if self._remote_topology_attach_deferred:
+            return self._bring_up_run_remote_host_port_probe(
+                ctx,
+                running,
+                netns,
+                wait_total=wait_total,
+                poll_interval=poll_interval,
+            )
+
         ws_ip = (attach_res.workspace_ip or "").strip()
         tcp_reached = False
         try:
@@ -904,6 +942,71 @@ class DefaultOrchestratorService(OrchestratorService):
             internal_endpoint=internal_ep,
             gateway_route_target=gw,
             probe_healthy=health.healthy,
+            issues=_issues_or_none(issue_msgs),
+        )
+
+    def _bring_up_run_remote_host_port_probe(
+        self,
+        ctx: _BringUpContext,
+        running: EnsureRunningRuntimeResult,
+        netns: NetnsRefResult,
+        *,
+        wait_total: float,
+        poll_interval: float,
+    ) -> WorkspaceBringUpResult:
+        host_port = next(
+            (int(host) for host, container in running.resolved_ports if int(container) == WORKSPACE_IDE_CONTAINER_PORT),
+            None,
+        )
+        ctr = self._probe_runner.check_container_running(container_id=running.container_id)
+        service_healthy = False
+        service_issues = ()
+        if host_port is None:
+            service_issues = (
+                "service:published_port_missing:"
+                f"no published host port for IDE container port {WORKSPACE_IDE_CONTAINER_PORT}",
+            )
+        else:
+            deadline = time.monotonic() + wait_total
+            last_http = None
+            while time.monotonic() < deadline:
+                remaining = max(0.5, deadline - time.monotonic())
+                per_try = min(5.0, remaining)
+                last_http = self._probe_runner.check_service_http(
+                    workspace_ip="127.0.0.1",
+                    port=host_port,
+                    timeout_seconds=per_try,
+                )
+                if last_http.healthy:
+                    service_healthy = True
+                    break
+                time.sleep(poll_interval)
+            if not service_healthy and last_http is not None:
+                service_issues = tuple(
+                    f"{i.component}:{i.code}:{i.message}" for i in last_http.issues
+                )
+
+        issue_msgs = [f"{i.component}:{i.code}:{i.message}" for i in ctr.issues]
+        issue_msgs.extend(str(i) for i in service_issues)
+        internal_ep = f"127.0.0.1:{host_port}" if host_port is not None else None
+        gw = compose_traefik_upstream_target(
+            traefik_routing_host=self._traefik_routing_host,
+            resolved_ports=running.resolved_ports,
+            topology_internal_endpoint=internal_ep,
+            ide_container_port=WORKSPACE_IDE_CONTAINER_PORT,
+        )
+        return WorkspaceBringUpResult(
+            workspace_id=ctx.wid,
+            success=bool(ctr.healthy and service_healthy),
+            node_id=self._node_id,
+            topology_id=str(self._topology_id),
+            container_id=running.container_id,
+            container_state=running.container_state,
+            netns_ref=netns.netns_ref,
+            workspace_ip=None,
+            internal_endpoint=internal_ep,
+            gateway_route_target=gw,
+            probe_healthy=bool(ctr.healthy and service_healthy),
             issues=_issues_or_none(issue_msgs),
         )
 
