@@ -70,6 +70,7 @@ class AutoscalerEvaluateResponse(BaseModel):
 class ProvisionOneResponse(BaseModel):
     provisioned: bool
     evaluation: ScaleUpEvaluationResponse
+    decision: FleetAutoscalerDecisionResponse | None = None
     node_key: str | None = None
     instance_id: str | None = None
 

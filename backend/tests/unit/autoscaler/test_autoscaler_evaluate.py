@@ -16,6 +16,7 @@ from app.services.autoscaler_service.service import (
     evaluate_scale_down,
     evaluate_scale_up,
     maybe_provision_on_no_schedulable_capacity,
+    run_scale_out_tick,
 )
 from app.services.auth_service.models import UserAuth
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
@@ -287,6 +288,13 @@ def test_evaluate_only_tick_recommends_scale_out_without_mutating_nodes(autoscal
                 devnest_enable_multi_node_scheduling=True,
                 devnest_node_provider="all",
                 devnest_require_fresh_node_heartbeat=False,
+                aws_region="us-east-1",
+                devnest_ec2_ami_id="ami-12345678",
+                devnest_ec2_instance_type="t3.micro",
+                devnest_ec2_subnet_id="subnet-12345678",
+                devnest_ec2_security_group_ids="sg-12345678",
+                devnest_ec2_instance_profile="",
+                devnest_ec2_key_name="",
             )
             decision = evaluate_fleet_autoscaler_tick(session)
         after = [(n.node_key, n.status, n.schedulable) for n in session.exec(select(ExecutionNode)).all()]
@@ -329,6 +337,13 @@ def test_evaluate_only_tick_reports_no_action_for_idle_capacity(autoscaler_unit_
                 devnest_enable_multi_node_scheduling=True,
                 devnest_node_provider="all",
                 devnest_require_fresh_node_heartbeat=False,
+                aws_region="us-east-1",
+                devnest_ec2_ami_id="ami-12345678",
+                devnest_ec2_instance_type="t3.micro",
+                devnest_ec2_subnet_id="subnet-12345678",
+                devnest_ec2_security_group_ids="sg-12345678",
+                devnest_ec2_instance_profile="",
+                devnest_ec2_key_name="",
             )
             decision = evaluate_fleet_autoscaler_tick(session)
 
@@ -336,3 +351,110 @@ def test_evaluate_only_tick_reports_no_action_for_idle_capacity(autoscaler_unit_
     assert decision.no_action is True
     assert decision.capacity.ready_schedulable_ec2_nodes == 1
     assert decision.capacity.free_slots == 4
+
+
+def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(autoscaler_unit_engine) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        with (
+            patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+            patch("app.services.autoscaler_service.service.provision_ec2_node") as mock_provision,
+        ):
+            mock_settings.return_value = SimpleNamespace(
+                devnest_autoscaler_enabled=True,
+                devnest_autoscaler_evaluate_only=False,
+                devnest_autoscaler_min_nodes=1,
+                devnest_autoscaler_max_nodes=5,
+                devnest_autoscaler_min_idle_slots=1,
+                devnest_autoscaler_max_concurrent_provisioning=3,
+                devnest_autoscaler_scale_out_cooldown_seconds=0,
+                devnest_autoscaler_scale_in_cooldown_seconds=0,
+                devnest_enable_multi_node_scheduling=True,
+                devnest_node_provider="all",
+                devnest_require_fresh_node_heartbeat=False,
+                aws_region="us-east-1",
+                devnest_ec2_ami_id="ami-12345678",
+                devnest_ec2_instance_type="t3.micro",
+                devnest_ec2_subnet_id="subnet-12345678",
+                devnest_ec2_security_group_ids="sg-12345678",
+                devnest_ec2_instance_profile="",
+                devnest_ec2_key_name="",
+            )
+
+            def _fake_provision(sess, request=None, wait_until_running=True):
+                node = ExecutionNode(
+                    node_key="ec2-new",
+                    name="ec2-new",
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    provider_instance_id="i-0123456789abcdef0",
+                    status=ExecutionNodeStatus.PROVISIONING.value,
+                    schedulable=False,
+                    total_cpu=2.0,
+                    total_memory_mb=4096,
+                    allocatable_cpu=2.0,
+                    allocatable_memory_mb=4096,
+                )
+                sess.add(node)
+                sess.flush()
+                return node
+
+            mock_provision.side_effect = _fake_provision
+            decision, node = run_scale_out_tick(session)
+            session.commit()
+
+        rows = list(session.exec(select(ExecutionNode)).all())
+
+    assert decision.action == "scale_out_recommended"
+    assert node is not None
+    assert mock_provision.call_count == 1
+    assert len(rows) == 1
+    assert rows[0].status == ExecutionNodeStatus.PROVISIONING.value
+    assert rows[0].schedulable is False
+
+
+def test_phase2_scale_out_tick_respects_max_nodes_cap(autoscaler_unit_engine) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-existing",
+                name="ec2-existing",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                provider_instance_id="i-0123456789abcdef0",
+                status=ExecutionNodeStatus.NOT_READY.value,
+                schedulable=False,
+                total_cpu=2.0,
+                total_memory_mb=4096,
+                allocatable_cpu=2.0,
+                allocatable_memory_mb=4096,
+            ),
+        )
+        session.commit()
+        with (
+            patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+            patch("app.services.autoscaler_service.service.provision_ec2_node") as mock_provision,
+        ):
+            mock_settings.return_value = SimpleNamespace(
+                devnest_autoscaler_enabled=True,
+                devnest_autoscaler_evaluate_only=False,
+                devnest_autoscaler_min_nodes=1,
+                devnest_autoscaler_max_nodes=1,
+                devnest_autoscaler_min_idle_slots=1,
+                devnest_autoscaler_max_concurrent_provisioning=3,
+                devnest_autoscaler_scale_out_cooldown_seconds=0,
+                devnest_autoscaler_scale_in_cooldown_seconds=0,
+                devnest_enable_multi_node_scheduling=True,
+                devnest_node_provider="all",
+                devnest_require_fresh_node_heartbeat=False,
+                aws_region="us-east-1",
+                devnest_ec2_ami_id="ami-12345678",
+                devnest_ec2_instance_type="t3.micro",
+                devnest_ec2_subnet_id="subnet-12345678",
+                devnest_ec2_security_group_ids="sg-12345678",
+                devnest_ec2_instance_profile="",
+                devnest_ec2_key_name="",
+            )
+            decision, node = run_scale_out_tick(session)
+
+    assert decision.action == "suppressed_by_cap"
+    assert decision.suppressed_by_cap is True
+    assert node is None
+    mock_provision.assert_not_called()

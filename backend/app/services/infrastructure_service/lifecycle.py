@@ -701,6 +701,21 @@ def terminate_ec2_node(
     return row
 
 
+def _provisioning_heartbeat_reports_docker_ready(row: ExecutionNode) -> bool:
+    """Require a fresh node heartbeat with ``docker_ok=true`` before admitting EC2 capacity."""
+    hb = row.last_heartbeat_at
+    if hb is None:
+        return False
+    if hb.tzinfo is None:
+        hb = hb.replace(tzinfo=timezone.utc)
+    max_age = int(get_settings().devnest_node_heartbeat_max_age_seconds or 300)
+    age = (_now() - hb).total_seconds()
+    if age < 0 or age > max_age:
+        return False
+    heartbeat = dict((row.metadata_json or {}).get("heartbeat") or {})
+    return heartbeat.get("docker_ok") is True
+
+
 def sync_node_state(
     session: Session,
     *,
@@ -712,7 +727,8 @@ def sync_node_state(
 ) -> ExecutionNode:
     """
     Refresh EC2 fields via :func:`register_ec2_instance`, then optionally promote ``PROVISIONING`` →
-    ``READY`` when the instance is running and (for ``ssm_docker``) SSM reports the agent online.
+    ``READY`` when the instance is running, the control transport is available, and a fresh heartbeat
+    has reported ``docker_ok=true``.
     """
     row = get_node(session, node_id=node_id, node_key=node_key)
     _assert_ec2_node(row, op="sync_node_state")
@@ -755,6 +771,13 @@ def sync_node_state(
     if desc.state != "running":
         return row
 
+    if not _provisioning_heartbeat_reports_docker_ready(row):
+        logger.info(
+            "ec2_node_provisioning_waiting_heartbeat_docker",
+            extra={"node_key": row.node_key, "instance_id": iid},
+        )
+        return row
+
     mode = (row.execution_mode or "").strip().lower()
     if mode == ExecutionNodeExecutionMode.SSM_DOCKER.value:
         ssm = ssm_client or build_ssm_client(region=(row.region or "").strip() or None)
@@ -774,9 +797,10 @@ def sync_node_state(
     row.last_error_code = None
     row.last_error_message = None
     row.updated_at = _now()
+    readiness = "ssm" if mode == ExecutionNodeExecutionMode.SSM_DOCKER.value else "ssh_docker_running"
     row.metadata_json = _merge_metadata(
         row,
-        {"lifecycle": {"ready_at": _now().isoformat(), "readiness": "ssm" if mode == ExecutionNodeExecutionMode.SSM_DOCKER.value else "ssh_docker_running"}},
+        {"lifecycle": {"ready_at": _now().isoformat(), "readiness": readiness}},
     )
     session.add(row)
     session.flush()

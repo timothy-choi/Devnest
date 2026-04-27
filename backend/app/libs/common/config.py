@@ -836,10 +836,10 @@ class Settings(BaseSettings):
     devnest_reconcile_lock_backend: str = "postgres_advisory"
     devnest_require_prod_reconcile_locking: bool = True
 
-    # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
-    devnest_autoscaler_enabled: bool = False
-    # Phase 1 controller mode: evaluate and log fleet decisions without provisioning, draining, or terminating.
-    devnest_autoscaler_evaluate_only: bool = True
+    # Autoscaler (V1/V2): fleet-level EC2 capacity. Phase 2 allows safe scale-out only by default.
+    devnest_autoscaler_enabled: bool = True
+    # When true, log fleet decisions without provisioning, draining, or terminating.
+    devnest_autoscaler_evaluate_only: bool = False
     devnest_autoscaler_min_nodes: int = 1
     devnest_autoscaler_max_nodes: int = 10
     devnest_autoscaler_min_idle_slots: int = 1

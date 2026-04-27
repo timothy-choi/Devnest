@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -277,7 +278,8 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
         total_memory_mb=4096,
         allocatable_cpu=2.0,
         allocatable_memory_mb=4096,
-        metadata_json={},
+        last_heartbeat_at=datetime.now(timezone.utc),
+        metadata_json={"heartbeat": {"docker_ok": True}},
     )
     with Session(infrastructure_unit_engine) as session:
         session.add(row)
@@ -312,6 +314,56 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
     assert out.status == ExecutionNodeStatus.READY.value
     assert out.schedulable is True
     assert out.private_ip == "10.0.0.10"
+
+
+def test_sync_does_not_promote_provisioning_without_healthy_heartbeat(infrastructure_unit_engine) -> None:
+    iid = "i-0123456789abcdeff"
+    row = ExecutionNode(
+        node_key="ssm-waits-heartbeat",
+        name="ssm-waits-heartbeat",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.PROVISIONING.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        metadata_json={},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+
+        def _fake_register(sess, instance_id, *, ec2_client=None, node_key=None, ssh_user=None, execution_mode=None):
+            r = sess.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ssm-waits-heartbeat")).first()
+            assert r is not None
+            sess.add(r)
+            sess.flush()
+
+        with (
+            patch(
+                "app.services.infrastructure_service.lifecycle.register_ec2_instance",
+                side_effect=_fake_register,
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+                return_value=SimpleNamespace(state="running"),
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.is_instance_ssm_online",
+                return_value=True,
+            ),
+        ):
+            out = sync_node_state(session, node_key="ssm-waits-heartbeat")
+            session.commit()
+            session.refresh(out)
+
+    assert out.status == ExecutionNodeStatus.PROVISIONING.value
+    assert out.schedulable is False
 
 
 def test_mark_node_draining_skips_terminated(infrastructure_unit_engine) -> None:

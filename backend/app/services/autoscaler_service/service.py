@@ -22,6 +22,7 @@ from app.services.infrastructure_service.errors import Ec2ProvisionConfiguration
 from app.services.infrastructure_service.lifecycle import (
     mark_node_draining,
     provision_ec2_node,
+    sync_node_state,
     terminate_ec2_node,
 )
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
@@ -319,10 +320,11 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
 
 def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     """
-    Phase 1 autoscaler controller tick.
+    Autoscaler controller evaluation.
 
     This function is intentionally read-only: it does not call EC2, drain, terminate,
-    register, or update ``execution_node`` rows. It returns/logs what the controller would do.
+    register, or update ``execution_node`` rows. Phase 2 scale-out uses the returned decision
+    in :func:`run_scale_out_tick`.
     """
     settings = get_settings()
     enabled = _config_bool(settings, "devnest_autoscaler_enabled", False)
@@ -339,18 +341,14 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
 
     pending = int(cap.pending_placement_jobs)
     idle_after_pending = int(cap.free_slots) - pending
+    provider_mode = (getattr(settings, "devnest_node_provider", "all") or "all").strip().lower()
+    ec2_allowed = provider_mode in ("all", "ec2")
     scale_out_recommended = (
-        pending > int(cap.free_slots)
+        cap.ready_schedulable_nodes == 0
+        or pending > int(cap.free_slots)
         or idle_after_pending < min_idle_slots
-        or (pending > 0 and cap.ready_schedulable_nodes == 0)
     )
-    scale_in_recommended = (
-        pending == 0
-        and cap.idle_ec2_node_count > 0
-        and cap.ec2_nodes_active > min_nodes
-        and cap.free_slots > min_idle_slots
-        and cap.draining_nodes == 0
-    )
+    scale_in_recommended = False
 
     reasons: list[str] = []
     suppressed_by_config = False
@@ -367,6 +365,15 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         if evaluate_only:
             suppressed_by_config = True
             reasons.append("suppressed by config: DEVNEST_AUTOSCALER_EVALUATE_ONLY=true")
+        if not ec2_allowed:
+            suppressed_by_config = True
+            reasons.append(f"suppressed by config: devnest_node_provider={provider_mode!r} does not allow EC2")
+        if enabled and not evaluate_only and ec2_allowed:
+            try:
+                Ec2ProvisionRequest.from_settings(settings).validate()
+            except Exception as e:
+                suppressed_by_config = True
+                reasons.append(f"suppressed by config: EC2 provision request invalid: {e}")
         if cap.ec2_nodes_active >= max_nodes:
             suppressed_by_cap = True
             reasons.append(f"suppressed by cap: active EC2 nodes {cap.ec2_nodes_active} >= max_nodes {max_nodes}")
@@ -457,6 +464,76 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         reasons=" | ".join(reasons)[:2000],
     )
     return decision
+
+
+def _sync_provisioning_ec2_nodes(session: Session) -> None:
+    """Best-effort readiness reconciliation for nodes already launched by autoscaling/lifecycle."""
+    rows = list(
+        session.exec(
+            select(ExecutionNode)
+            .where(
+                and_(
+                    ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+                    ExecutionNode.status == ExecutionNodeStatus.PROVISIONING.value,
+                ),
+            )
+            .order_by(ExecutionNode.node_key.asc()),
+        ).all(),
+    )
+    for row in rows:
+        try:
+            sync_node_state(session, node_key=row.node_key)
+            session.flush()
+        except Exception as e:
+            logger.warning(
+                "autoscaler_provisioning_node_sync_failed",
+                extra={"node_key": row.node_key, "error": str(e)[:1000]},
+            )
+
+
+def provision_one_from_fleet_decision(session: Session, decision: FleetAutoscalerDecision) -> ExecutionNode | None:
+    """Provision at most one EC2 node when the Phase 2 scale-out decision permits it."""
+    if decision.action != "scale_out_recommended":
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_UP_SUPPRESSED,
+            detail="scale-out tick did not provision because decision was not scale_out_recommended",
+            autoscaler_action=decision.action,
+            reasons=" | ".join(decision.reasons)[:2000],
+        )
+        return None
+    node = provision_ec2_node(session, request=None, wait_until_running=True)
+    session.flush()
+    record_autoscaler_scale_up()
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_SCALE_UP_TRIGGERED,
+        node_key=node.node_key,
+        instance_id=(node.provider_instance_id or "").strip() or None,
+        provisioning_in_flight_before=decision.capacity.provisioning_nodes,
+        autoscaler_action=decision.action,
+    )
+    logger.info(
+        "autoscaler_scale_out_provisioned_one_ec2_node",
+        extra={
+            "node_key": node.node_key,
+            "instance_id": (node.provider_instance_id or "").strip() or None,
+            "provisioning_in_flight_before": decision.capacity.provisioning_nodes,
+        },
+    )
+    return node
+
+
+def run_scale_out_tick(session: Session) -> tuple[FleetAutoscalerDecision, ExecutionNode | None]:
+    """
+    Phase 2 autoscaler tick: reconcile provisioning readiness, then provision at most one EC2 node.
+
+    No scale-in is performed here.
+    """
+    _sync_provisioning_ec2_nodes(session)
+    decision = evaluate_fleet_autoscaler_tick(session)
+    node = provision_one_from_fleet_decision(session, decision)
+    return decision, node
 
 
 def evaluate_scale_up(
@@ -591,29 +668,33 @@ def maybe_provision_on_no_schedulable_capacity(session: Session) -> ExecutionNod
     settings = get_settings()
     if not settings.devnest_autoscaler_enabled or not settings.devnest_autoscaler_provision_on_no_capacity:
         return None
-    ev = evaluate_scale_up(session, insufficient_capacity=True)
-    if not ev.should_provision:
+    decision = evaluate_fleet_autoscaler_tick(session)
+    if decision.action != "scale_out_recommended":
         logger.info(
             "autoscaler_skip_provision",
-            extra={"reason": ev.reason, "provisioning_in_flight": ev.provisioning_in_flight},
+            extra={
+                "reason": " | ".join(decision.reasons)[:1000],
+                "autoscaler_action": decision.action,
+                "provisioning_in_flight": decision.capacity.provisioning_nodes,
+            },
         )
         return None
     try:
-        node = provision_capacity_if_needed(session, ev)
+        node = provision_one_from_fleet_decision(session, decision)
         if node is not None:
             logger.info(
                 "autoscaler_provisioned_after_no_schedulable_capacity",
                 extra={
                     "node_key": node.node_key,
                     "instance_id": (node.provider_instance_id or "").strip() or None,
-                    "provisioning_in_flight_before": ev.provisioning_in_flight,
+                    "provisioning_in_flight_before": decision.capacity.provisioning_nodes,
                 },
             )
         return node
     except Exception as e:
         logger.warning(
             "autoscaler_provision_failed",
-            extra={"error": str(e), "provisioning_in_flight_before": ev.provisioning_in_flight},
+            extra={"error": str(e), "provisioning_in_flight_before": decision.capacity.provisioning_nodes},
         )
         return None
 
