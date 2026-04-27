@@ -403,7 +403,8 @@ def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(au
             def _fake_provision(sess, request=None, wait_until_running=True):
                 assert request is not None
                 assert request.node_key.startswith("ec2-autoscale-")
-                assert "dnf install -y docker curl" in (request.user_data or "")
+                assert "dnf install -y docker" in (request.user_data or "")
+                assert "dnf install -y docker curl" not in (request.user_data or "")
                 assert "devnest-node-heartbeat.service" in (request.user_data or "")
                 assert request.node_key in (request.user_data or "")
                 assert "/var/lib/devnest/workspace-projects" in (request.user_data or "")

@@ -91,7 +91,8 @@ def test_run_instances_params_include_generated_user_data() -> None:
     params = _run_instances_params(req, get_settings())
 
     assert params["UserData"] == user_data
-    assert "dnf install -y docker curl" in params["UserData"]
+    assert "dnf install -y docker" in params["UserData"]
+    assert "dnf install -y docker curl" not in params["UserData"]
     assert "NODE_KEY=ec2-autoscale-test123" in params["UserData"]
     assert "devnest-node-heartbeat.service" in params["UserData"]
     assert "/opt/devnest" in params["UserData"]
