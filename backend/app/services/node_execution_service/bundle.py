@@ -35,6 +35,8 @@ class NodeExecutionBundle:
     runtime_adapter: RuntimeAdapter | None = None
     # When set (typically EC2), Traefik targets ``http://{traefik_routing_host}:{published_ide_host_port}``.
     traefik_routing_host: str | None = None
+    # Phase 2 remote execution: do not attempt control-plane-local Linux netns/veth attach.
+    defer_topology_attach: bool = False
 
     def ensure_workspace_project_dir(
         self,

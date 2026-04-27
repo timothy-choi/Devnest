@@ -201,6 +201,7 @@ def test_ssh_docker_uses_ssh_url(mock_docker_client_cls, ne_engine) -> None:
     assert "10.0.0.5" in call_kw["base_url"]
     mock_client.ping.assert_called_once()
     assert bundle.service_reachability_runner is not None
+    assert bundle.defer_topology_attach is True
 
 
 @patch("app.services.node_execution_service.factory.docker.DockerClient")
@@ -348,6 +349,7 @@ def test_ssm_docker_bundle_uses_runtime_adapter(mock_runner_cls, ne_engine) -> N
     assert bundle.docker_client is None
     assert isinstance(bundle.runtime_adapter, SsmDockerRuntimeAdapter)
     assert bundle.topology_command_runner is runner_inst
+    assert bundle.defer_topology_attach is True
     runner_inst.run.assert_called()
     mock_runner_cls.assert_called_once_with(instance_id="i-0ssmtest00000001", region="us-west-2")
 
@@ -384,6 +386,7 @@ def test_devnest_execution_mode_ssm_overrides_ssh_docker(mock_runner_cls, ne_eng
             bundle = resolve_node_execution_bundle(session, "ec2-ssh-row")
     assert bundle.docker_client is None
     assert isinstance(bundle.runtime_adapter, SsmDockerRuntimeAdapter)
+    assert bundle.defer_topology_attach is True
     mock_runner_cls.assert_called_once_with(instance_id="i-0override0000001", region="eu-west-1")
 
 

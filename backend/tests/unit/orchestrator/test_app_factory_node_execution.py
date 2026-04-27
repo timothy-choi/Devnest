@@ -20,6 +20,7 @@ def test_build_default_orchestrator_passes_bundle_ensure_dir() -> None:
     bundle.topology_command_runner = MagicMock()
     bundle.service_reachability_runner = None
     bundle.traefik_routing_host = None
+    bundle.defer_topology_attach = False
     bundle.ensure_workspace_project_dir = MagicMock(return_value="/remote/devnest/7")
 
     with patch(
@@ -35,6 +36,7 @@ def test_build_default_orchestrator_passes_bundle_ensure_dir() -> None:
     mock_resolve.assert_called_once_with(session, "node-1")
     assert orch._ensure_workspace_project_dir is bundle.ensure_workspace_project_dir
     assert orch._traefik_routing_host is None
+    assert orch._remote_topology_attach_deferred is False
 
 
 def test_build_default_orchestrator_passes_traefik_routing_host_from_bundle() -> None:
@@ -45,6 +47,7 @@ def test_build_default_orchestrator_passes_traefik_routing_host_from_bundle() ->
     bundle.topology_command_runner = MagicMock()
     bundle.service_reachability_runner = None
     bundle.traefik_routing_host = "10.20.30.40"
+    bundle.defer_topology_attach = True
     bundle.ensure_workspace_project_dir = MagicMock(return_value="/x")
 
     with patch(
@@ -54,6 +57,7 @@ def test_build_default_orchestrator_passes_traefik_routing_host_from_bundle() ->
         orch = build_default_orchestrator_for_session(session, execution_node_key="node-ec2")
 
     assert orch._traefik_routing_host == "10.20.30.40"
+    assert orch._remote_topology_attach_deferred is True
 
 
 def test_build_default_orchestrator_uses_runtime_adapter_when_set() -> None:
@@ -64,6 +68,7 @@ def test_build_default_orchestrator_uses_runtime_adapter_when_set() -> None:
     bundle.topology_command_runner = MagicMock()
     bundle.service_reachability_runner = MagicMock()
     bundle.traefik_routing_host = None
+    bundle.defer_topology_attach = True
     bundle.ensure_workspace_project_dir = MagicMock(return_value="/remote/ws/1")
 
     with patch(
@@ -73,6 +78,7 @@ def test_build_default_orchestrator_uses_runtime_adapter_when_set() -> None:
         orch = build_default_orchestrator_for_session(session, execution_node_key="ec2-node")
 
     assert orch._runtime_adapter is bundle.runtime_adapter
+    assert orch._remote_topology_attach_deferred is True
 
 
 def test_build_default_orchestrator_raises_when_no_docker_or_adapter() -> None:
@@ -83,6 +89,7 @@ def test_build_default_orchestrator_raises_when_no_docker_or_adapter() -> None:
     bundle.topology_command_runner = MagicMock()
     bundle.service_reachability_runner = None
     bundle.traefik_routing_host = None
+    bundle.defer_topology_attach = False
     bundle.ensure_workspace_project_dir = MagicMock()
 
     with patch(

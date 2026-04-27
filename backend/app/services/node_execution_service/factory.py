@@ -144,6 +144,7 @@ def _bundle_local_docker() -> NodeExecutionBundle:
         _ensure_project_dir=default_local_ensure_workspace_project_dir,
         runtime_adapter=None,
         traefik_routing_host=None,
+        defer_topology_attach=False,
     )
 
 
@@ -196,6 +197,7 @@ def _bundle_ssm_docker(node: ExecutionNode) -> NodeExecutionBundle:
         _ensure_project_dir=_ensure,
         runtime_adapter=runtime,
         traefik_routing_host=_ec2_traefik_routing_host(node),
+        defer_topology_attach=True,
     )
 
 
@@ -248,4 +250,5 @@ def _bundle_ssh_docker(node: ExecutionNode) -> NodeExecutionBundle:
         _ensure_project_dir=_ensure,
         runtime_adapter=None,
         traefik_routing_host=_ec2_traefik_routing_host(node),
+        defer_topology_attach=True,
     )

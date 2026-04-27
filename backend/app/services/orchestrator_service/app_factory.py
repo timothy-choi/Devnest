@@ -148,7 +148,7 @@ def build_default_orchestrator_for_session(
         if isinstance(bundle.topology_command_runner, SshRemoteCommandRunner)
         else None
     )
-    remote_topology_attach_deferred = bool(bundle.traefik_routing_host)
+    remote_topology_attach_deferred = bool(getattr(bundle, "defer_topology_attach", False))
 
     return DefaultOrchestratorService(
         runtime,
