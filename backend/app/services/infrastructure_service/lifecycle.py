@@ -274,6 +274,9 @@ def _run_instances_params(req: Ec2ProvisionRequest, settings: Any) -> dict[str, 
     key = (req.key_name or "").strip()
     if key:
         params["KeyName"] = key
+    user_data = (req.user_data or "").strip()
+    if user_data:
+        params["UserData"] = user_data
     return params
 
 

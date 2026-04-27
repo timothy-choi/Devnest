@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from dataclasses import dataclass, field
 
 from app.libs.common.config import Settings, get_settings
@@ -24,6 +27,7 @@ class Ec2ProvisionRequest:
     name_tag: str | None = None
     execution_mode: str | None = None
     ssh_user: str | None = None
+    user_data: str | None = None
     extra_tags: dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -55,4 +59,42 @@ class Ec2ProvisionRequest:
             iam_instance_profile_name=prof,
             key_name=key,
             region=region,
+            user_data=_user_data_from_settings(s),
+            extra_tags=_extra_tags_from_settings(s),
         )
+
+
+def _user_data_from_settings(settings: Settings) -> str | None:
+    raw_b64 = (getattr(settings, "devnest_ec2_user_data_b64", "") or "").strip()
+    raw = getattr(settings, "devnest_ec2_user_data", "") or ""
+    if raw_b64:
+        try:
+            return base64.b64decode(raw_b64, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as e:
+            raise Ec2ProvisionConfigurationError("DEVNEST_EC2_USER_DATA_B64 must be valid UTF-8 base64") from e
+    return raw if raw.strip() else None
+
+
+def _extra_tags_from_settings(settings: Settings) -> dict[str, str]:
+    raw = (getattr(settings, "devnest_ec2_extra_tags", "") or "").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise Ec2ProvisionConfigurationError("DEVNEST_EC2_EXTRA_TAGS must be JSON or comma key=value pairs") from e
+        if not isinstance(data, dict):
+            raise Ec2ProvisionConfigurationError("DEVNEST_EC2_EXTRA_TAGS JSON must be an object")
+        return {str(k).strip(): str(v).strip() for k, v in data.items() if str(k).strip() and str(v).strip()}
+    out: dict[str, str] = {}
+    for part in raw.replace(";", ",").split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise Ec2ProvisionConfigurationError("DEVNEST_EC2_EXTRA_TAGS entries must use key=value")
+        k, v = item.split("=", 1)
+        if k.strip() and v.strip():
+            out[k.strip()] = v.strip()
+    return out

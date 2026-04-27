@@ -721,6 +721,13 @@ class Settings(BaseSettings):
     devnest_ec2_key_name: str = ""
     # Prefix for ``{prefix}:managed`` and ``{prefix}:node_key`` tags on provisioned instances.
     devnest_ec2_tag_prefix: str = "devnest"
+    # Optional comma-separated tags for autoscaled EC2 nodes: ``key=value,owner=devnest``.
+    devnest_ec2_extra_tags: str = ""
+    # Optional EC2 user-data bootstrap. Prefer ``DEVNEST_EC2_USER_DATA_B64`` for multi-line cloud-init.
+    devnest_ec2_user_data: str = ""
+    devnest_ec2_user_data_b64: str = ""
+    # Set true only when the AMI already installs Docker and starts the DevNest heartbeat agent.
+    devnest_ec2_bootstrap_prebaked: bool = False
 
     # ── Built-in background job worker ──────────────────────────────────────────
     # When true, the FastAPI process runs the job poll loop in an asyncio background
@@ -977,6 +984,7 @@ class Settings(BaseSettings):
         "devnest_autoscaler_enabled",
         "devnest_autoscaler_evaluate_only",
         "devnest_autoscaler_provision_on_no_capacity",
+        "devnest_ec2_bootstrap_prebaked",
         "devnest_require_distributed_rate_limiting",
         mode="before",
     )

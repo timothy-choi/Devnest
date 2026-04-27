@@ -243,6 +243,47 @@ def _config_bool(settings: object, name: str, default: bool) -> bool:
     return bool(raw)
 
 
+def ec2_autoscaler_provisioning_config_errors(settings: object | None = None) -> list[str]:
+    """Return all missing/invalid EC2 settings that would block autoscaler scale-out."""
+    s = settings or get_settings()
+    errors: list[str] = []
+    if not (getattr(s, "aws_region", "") or "").strip():
+        errors.append("AWS_REGION is required for EC2 autoscaler provisioning")
+    if not (getattr(s, "devnest_ec2_ami_id", "") or "").strip():
+        errors.append("DEVNEST_EC2_AMI_ID is required")
+    if not (getattr(s, "devnest_ec2_instance_type", "") or "").strip():
+        errors.append("DEVNEST_EC2_INSTANCE_TYPE is required")
+    if not (getattr(s, "devnest_ec2_subnet_id", "") or "").strip():
+        errors.append("DEVNEST_EC2_SUBNET_ID is required")
+    raw_sg = (getattr(s, "devnest_ec2_security_group_ids", "") or "").strip()
+    if not [x.strip() for x in raw_sg.split(",") if x.strip()]:
+        errors.append("DEVNEST_EC2_SECURITY_GROUP_IDS must contain at least one security group id")
+
+    mode = (getattr(s, "devnest_ec2_default_execution_mode", "ssm_docker") or "ssm_docker").strip().lower()
+    if mode == "ssm_docker" and not (getattr(s, "devnest_ec2_instance_profile", "") or "").strip():
+        errors.append("DEVNEST_EC2_INSTANCE_PROFILE is required when DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker")
+    if mode == "ssh_docker" and not (getattr(s, "devnest_ec2_key_name", "") or "").strip():
+        errors.append("DEVNEST_EC2_KEY_NAME is required when DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssh_docker")
+
+    has_user_data = bool(
+        (getattr(s, "devnest_ec2_user_data", "") or "").strip()
+        or (getattr(s, "devnest_ec2_user_data_b64", "") or "").strip()
+    )
+    if not has_user_data and not _config_bool(s, "devnest_ec2_bootstrap_prebaked", False):
+        errors.append(
+            "bootstrap config is required: set DEVNEST_EC2_USER_DATA_B64, DEVNEST_EC2_USER_DATA, "
+            "or DEVNEST_EC2_BOOTSTRAP_PREBAKED=true for an AMI that starts Docker and heartbeat",
+        )
+
+    try:
+        Ec2ProvisionRequest.from_settings(s).validate()
+    except Exception as e:
+        msg = str(e)
+        if msg and all(msg not in existing for existing in errors):
+            errors.append(msg)
+    return errors
+
+
 def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
     """Read-only fleet capacity rollup for Phase 1 evaluate-only autoscaler decisions."""
     nodes = list(session.exec(select(ExecutionNode)).all())
@@ -369,11 +410,10 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
             suppressed_by_config = True
             reasons.append(f"suppressed by config: devnest_node_provider={provider_mode!r} does not allow EC2")
         if enabled and not evaluate_only and ec2_allowed:
-            try:
-                Ec2ProvisionRequest.from_settings(settings).validate()
-            except Exception as e:
+            config_errors = ec2_autoscaler_provisioning_config_errors(settings)
+            if config_errors:
                 suppressed_by_config = True
-                reasons.append(f"suppressed by config: EC2 provision request invalid: {e}")
+                reasons.append("suppressed by config: EC2 provision request invalid: " + "; ".join(config_errors))
         if cap.ec2_nodes_active >= max_nodes:
             suppressed_by_cap = True
             reasons.append(f"suppressed by cap: active EC2 nodes {cap.ec2_nodes_active} >= max_nodes {max_nodes}")

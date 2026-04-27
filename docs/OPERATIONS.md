@@ -342,3 +342,32 @@ Filter by `service=autoscaler`:
 ```bash
 journalctl -u devnest-api | jq 'select(.service=="autoscaler")'
 ```
+
+For Phase 2 EC2 scale-out, `/internal/autoscaler/evaluate` reports all missing launch settings in
+`decision.reasons`. A launch-capable environment needs:
+
+```bash
+AWS_REGION=us-east-1
+DEVNEST_AUTOSCALER_ENABLED=true
+DEVNEST_AUTOSCALER_EVALUATE_ONLY=false
+DEVNEST_AUTOSCALER_MAX_NODES=3
+DEVNEST_AUTOSCALER_MAX_CONCURRENT_PROVISIONING=1
+DEVNEST_EC2_AMI_ID=ami-...
+DEVNEST_EC2_INSTANCE_TYPE=t3.medium
+DEVNEST_EC2_SUBNET_ID=subnet-...
+DEVNEST_EC2_SECURITY_GROUP_IDS=sg-...
+DEVNEST_EC2_INSTANCE_PROFILE=DevNestExecutionNodeProfile
+DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker
+DEVNEST_EC2_TAG_PREFIX=devnest
+DEVNEST_EC2_EXTRA_TAGS=env=prod,service=execution-node
+DEVNEST_EC2_USER_DATA_B64=<base64 cloud-init>
+# Or, only for AMIs that already start Docker + heartbeat:
+# DEVNEST_EC2_BOOTSTRAP_PREBAKED=true
+```
+
+Trigger one scale-out tick:
+
+```bash
+curl -X POST -H "X-Internal-API-Key: $INTERNAL_API_KEY_AUTOSCALER" \
+  "$INTERNAL_API_BASE_URL/internal/autoscaler/provision-one"
+```

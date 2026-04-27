@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from sqlmodel import SQLModel, create_engine
 
 from app.services.autoscaler_service.service import (
+    ec2_autoscaler_provisioning_config_errors,
     evaluate_fleet_autoscaler_tick,
     evaluate_scale_down,
     evaluate_scale_up,
@@ -293,8 +294,12 @@ def test_evaluate_only_tick_recommends_scale_out_without_mutating_nodes(autoscal
                 devnest_ec2_instance_type="t3.micro",
                 devnest_ec2_subnet_id="subnet-12345678",
                 devnest_ec2_security_group_ids="sg-12345678",
-                devnest_ec2_instance_profile="",
+                devnest_ec2_instance_profile="DevNestExecutionNodeProfile",
                 devnest_ec2_key_name="",
+                devnest_ec2_default_execution_mode="ssm_docker",
+                devnest_ec2_bootstrap_prebaked=True,
+                devnest_ec2_user_data="",
+                devnest_ec2_user_data_b64="",
             )
             decision = evaluate_fleet_autoscaler_tick(session)
         after = [(n.node_key, n.status, n.schedulable) for n in session.exec(select(ExecutionNode)).all()]
@@ -342,8 +347,12 @@ def test_evaluate_only_tick_reports_no_action_for_idle_capacity(autoscaler_unit_
                 devnest_ec2_instance_type="t3.micro",
                 devnest_ec2_subnet_id="subnet-12345678",
                 devnest_ec2_security_group_ids="sg-12345678",
-                devnest_ec2_instance_profile="",
+                devnest_ec2_instance_profile="DevNestExecutionNodeProfile",
                 devnest_ec2_key_name="",
+                devnest_ec2_default_execution_mode="ssm_docker",
+                devnest_ec2_bootstrap_prebaked=True,
+                devnest_ec2_user_data="",
+                devnest_ec2_user_data_b64="",
             )
             decision = evaluate_fleet_autoscaler_tick(session)
 
@@ -376,8 +385,12 @@ def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(au
                 devnest_ec2_instance_type="t3.micro",
                 devnest_ec2_subnet_id="subnet-12345678",
                 devnest_ec2_security_group_ids="sg-12345678",
-                devnest_ec2_instance_profile="",
+                devnest_ec2_instance_profile="DevNestExecutionNodeProfile",
                 devnest_ec2_key_name="",
+                devnest_ec2_default_execution_mode="ssm_docker",
+                devnest_ec2_bootstrap_prebaked=True,
+                devnest_ec2_user_data="",
+                devnest_ec2_user_data_b64="",
             )
 
             def _fake_provision(sess, request=None, wait_until_running=True):
@@ -449,8 +462,12 @@ def test_phase2_scale_out_tick_respects_max_nodes_cap(autoscaler_unit_engine) ->
                 devnest_ec2_instance_type="t3.micro",
                 devnest_ec2_subnet_id="subnet-12345678",
                 devnest_ec2_security_group_ids="sg-12345678",
-                devnest_ec2_instance_profile="",
+                devnest_ec2_instance_profile="DevNestExecutionNodeProfile",
                 devnest_ec2_key_name="",
+                devnest_ec2_default_execution_mode="ssm_docker",
+                devnest_ec2_bootstrap_prebaked=True,
+                devnest_ec2_user_data="",
+                devnest_ec2_user_data_b64="",
             )
             decision, node = run_scale_out_tick(session)
 
@@ -458,3 +475,29 @@ def test_phase2_scale_out_tick_respects_max_nodes_cap(autoscaler_unit_engine) ->
     assert decision.suppressed_by_cap is True
     assert node is None
     mock_provision.assert_not_called()
+
+
+def test_ec2_autoscaler_config_errors_are_aggregated() -> None:
+    settings = SimpleNamespace(
+        aws_region="",
+        devnest_ec2_ami_id="",
+        devnest_ec2_instance_type="",
+        devnest_ec2_subnet_id="",
+        devnest_ec2_security_group_ids="",
+        devnest_ec2_instance_profile="",
+        devnest_ec2_key_name="",
+        devnest_ec2_default_execution_mode="ssm_docker",
+        devnest_ec2_bootstrap_prebaked=False,
+        devnest_ec2_user_data="",
+        devnest_ec2_user_data_b64="",
+        devnest_ec2_extra_tags="",
+    )
+
+    errors = ec2_autoscaler_provisioning_config_errors(settings)
+
+    assert any("AWS_REGION" in e for e in errors)
+    assert any("DEVNEST_EC2_AMI_ID" in e for e in errors)
+    assert any("DEVNEST_EC2_SUBNET_ID" in e for e in errors)
+    assert any("DEVNEST_EC2_SECURITY_GROUP_IDS" in e for e in errors)
+    assert any("DEVNEST_EC2_INSTANCE_PROFILE" in e for e in errors)
+    assert any("bootstrap config" in e for e in errors)

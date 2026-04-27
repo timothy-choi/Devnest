@@ -51,6 +51,7 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
             "SubnetId": "subnet-aaaabbbb",
             "SecurityGroupIds": ["sg-test123"],
             "TagSpecifications": ANY,
+            "UserData": "#!/bin/bash\necho devnest",
         },
     )
     stubber.add_response(
@@ -80,6 +81,7 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
         iam_instance_profile_name=None,
         region=region,
         node_key="stub-node-a",
+        user_data="#!/bin/bash\necho devnest\n",
     )
     try:
         with Session(infrastructure_unit_engine) as session:
