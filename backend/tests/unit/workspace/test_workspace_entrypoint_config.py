@@ -12,9 +12,16 @@ def _repo_root() -> Path:
 def test_workspace_entrypoint_forces_auth_argument_and_default_none() -> None:
     text = (_repo_root() / "docker" / "workspace-entrypoint.sh").read_text(encoding="utf-8")
     assert "auth_mode=\"${DEVNEST_WORKSPACE_AUTH_MODE:-${CODE_SERVER_AUTH:-none}}\"" in text
+    assert 'code_server_home="${DEVNEST_WORKSPACE_HOME:-/home/coder}"' in text
+    assert 'code_server_config="${code_server_config_dir}/config.yaml"' in text
+    assert "cat > \"${code_server_config}\" <<EOF" in text
+    assert "bind-addr: 0.0.0.0:8080" in text
+    assert "auth: ${auth_mode}" in text
+    assert "cert: false" in text
     assert "code_server_args=()" in text
     assert "--auth=*)" in text
-    assert "exec /usr/bin/entrypoint.sh --auth \"${auth_mode}\" \"${code_server_args[@]}\"" in text
+    assert 'code_server_entrypoint="${DEVNEST_CODE_SERVER_ENTRYPOINT:-/usr/bin/entrypoint.sh}"' in text
+    assert "exec \"${code_server_entrypoint}\" --auth \"${auth_mode}\" \"${code_server_args[@]}\"" in text
     assert "unset PASSWORD" in text
 
 

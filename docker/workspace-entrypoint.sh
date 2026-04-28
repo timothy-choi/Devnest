@@ -5,6 +5,10 @@ auth_mode="${DEVNEST_WORKSPACE_AUTH_MODE:-${CODE_SERVER_AUTH:-none}}"
 auth_mode="$(printf '%s' "${auth_mode}" | tr '[:upper:]' '[:lower:]')"
 workspace_id="${DEVNEST_WORKSPACE_ID:-}"
 node_key="${DEVNEST_NODE_KEY:-}"
+code_server_home="${DEVNEST_WORKSPACE_HOME:-/home/coder}"
+code_server_config_dir="${code_server_home}/.config/code-server"
+code_server_config="${code_server_config_dir}/config.yaml"
+code_server_entrypoint="${DEVNEST_CODE_SERVER_ENTRYPOINT:-/usr/bin/entrypoint.sh}"
 
 case "${auth_mode}" in
   none)
@@ -23,6 +27,13 @@ case "${auth_mode}" in
     exit 64
     ;;
 esac
+
+mkdir -p "${code_server_config_dir}"
+cat > "${code_server_config}" <<EOF
+bind-addr: 0.0.0.0:8080
+auth: ${auth_mode}
+cert: false
+EOF
 
 echo "DevNest workspace starting: workspace_id=${workspace_id:-unknown} node_key=${node_key:-unknown} auth_mode=${auth_mode}"
 
@@ -47,7 +58,7 @@ for arg in "$@"; do
 done
 
 SEED_ROOT="/opt/devnest/code-server/extensions"
-TARGET_ROOT="/home/coder/.local/share/code-server/extensions"
+TARGET_ROOT="${code_server_home}/.local/share/code-server/extensions"
 
 mkdir -p "${TARGET_ROOT}"
 
@@ -62,4 +73,4 @@ if ! has_real_extensions && [ -d "${SEED_ROOT}" ]; then
   fi
 fi
 
-exec /usr/bin/entrypoint.sh --auth "${auth_mode}" "${code_server_args[@]}"
+exec "${code_server_entrypoint}" --auth "${auth_mode}" "${code_server_args[@]}"
