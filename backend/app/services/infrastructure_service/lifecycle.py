@@ -30,6 +30,7 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 from app.libs.observability.log_events import LogEvent, log_event
 from app.services.placement_service import get_node
+from app.services.placement_service.bootstrap import system_default_topology_id
 from app.services.placement_service.constants import (
     DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
     DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
@@ -255,6 +256,7 @@ def provision_ec2_node(
         total_memory_mb=mem_mb,
         allocatable_cpu=vcpu,
         allocatable_memory_mb=mem_mb,
+        default_topology_id=system_default_topology_id(),
         metadata_json=meta,
         iam_instance_profile_name=(req.iam_instance_profile_name or "").strip() or None,
         last_synced_at=None,
@@ -275,7 +277,16 @@ def provision_ec2_node(
             "node_key": node_key,
             "instance_id": iid,
             "private_ip": row.private_ip,
+            "default_topology_id": row.default_topology_id,
             "provision_correlation_id": corr,
+        },
+    )
+    logger.info(
+        "execution_node.topology.assigned",
+        extra={
+            "node_key": row.node_key,
+            "execution_node_id": row.id,
+            "default_topology_id": row.default_topology_id,
         },
     )
     return row

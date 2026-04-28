@@ -235,9 +235,10 @@ def test_repo_import_without_runtime_raises_when_strict(bind_engine: Engine) -> 
                 resolve_orchestrator_placement(session, ws, job)
 
 
-def test_create_requires_default_topology_on_node_when_strict(bind_engine: Engine) -> None:
+def test_create_repairs_missing_default_topology_when_strict(bind_engine: Engine) -> None:
     with Session(bind_engine) as session:
         uid = _seed_user(session)
+        _seed_topology(session, 1)
         _add_node(session, default_topology_id=None)
         ws, job = _ws_job(session, uid, WorkspaceJobType.CREATE.value)
         ws_id = ws.workspace_id
@@ -257,8 +258,12 @@ def test_create_requires_default_topology_on_node_when_strict(bind_engine: Engin
         job = session.get(WorkspaceJob, job_id)
         assert ws is not None and job is not None
         with patch("app.services.placement_service.runtime_policy.get_settings", return_value=fake_settings):
-            with pytest.raises(InvalidPlacementParametersError, match="default_topology_id"):
-                resolve_orchestrator_placement(session, ws, job)
+            node_key, topology_id = resolve_orchestrator_placement(session, ws, job)
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "n1")).first()
+        assert node is not None
+        assert node_key == "n1"
+        assert topology_id == 1
+        assert node.default_topology_id == 1
 
 
 def test_snapshot_create_uses_workspace_execution_node_when_no_runtime(bind_engine: Engine) -> None:

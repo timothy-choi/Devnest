@@ -96,6 +96,7 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
     assert node.status == ExecutionNodeStatus.PROVISIONING.value
     assert node.schedulable is False
     assert node.provider_instance_id == iid
+    assert node.default_topology_id == 1
     get_settings.cache_clear()
 
 

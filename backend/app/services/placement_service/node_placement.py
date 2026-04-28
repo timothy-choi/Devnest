@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 
+from .bootstrap import ensure_execution_node_default_topology
 from .capacity import (
     active_workload_count_subquery,
     effective_free_cpu_expr,
@@ -186,6 +187,7 @@ def select_node_for_workspace(
         NoSchedulableNodeError: when no node qualifies.
     """
     _ = workspace_id  # reserved for affinity (V2+)
+    _assign_missing_default_topology_for_ready_nodes(session)
     req_cpu = float(requested_cpu)
     req_mem = int(requested_memory_mb)
     req_disk = int(requested_disk_mb)
@@ -265,6 +267,19 @@ def select_node_for_workspace(
             f"{pool_hint}{hb_hint}{single_hint}",
         )
     return row
+
+
+def _assign_missing_default_topology_for_ready_nodes(session: Session) -> None:
+    """Defensive repair so strict placement never receives a READY node with NULL topology."""
+    rows = session.exec(
+        select(ExecutionNode).where(
+            ExecutionNode.status == ExecutionNodeStatus.READY.value,
+            ExecutionNode.schedulable == True,  # noqa: E712
+            ExecutionNode.default_topology_id.is_(None),
+        ),
+    ).all()
+    for row in rows:
+        ensure_execution_node_default_topology(session, row)
 
 
 def reserve_node_for_workspace(

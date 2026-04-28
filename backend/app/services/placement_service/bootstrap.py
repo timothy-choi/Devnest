@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -22,6 +23,8 @@ from .models import (
     ExecutionNodeStatus,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def default_local_node_key() -> str:
     return (os.environ.get("DEVNEST_NODE_ID") or "node-1").strip() or "node-1"
@@ -33,6 +36,11 @@ def _dev_default_topology_id() -> int:
         return int(raw, 10)
     except ValueError:
         return 1
+
+
+def system_default_topology_id() -> int:
+    """System default topology id for execution nodes; independent of scheduling env fallback."""
+    return 1
 
 
 def _is_development_env() -> bool:
@@ -85,6 +93,26 @@ def ensure_topology_row_for_local_dev(session: Session, topology_id: int) -> Non
     _sync_topology_pk_sequence(session)
 
 
+def ensure_execution_node_default_topology(session: Session, node: ExecutionNode) -> bool:
+    """Assign the system default topology to a node if missing. Returns True when changed."""
+    if node.default_topology_id is not None:
+        return False
+    node.default_topology_id = system_default_topology_id()
+    session.add(node)
+    session.flush()
+    if _is_development_env():
+        ensure_topology_row_for_local_dev(session, int(node.default_topology_id))
+    logger.info(
+        "execution_node.topology.assigned",
+        extra={
+            "node_key": node.node_key,
+            "execution_node_id": node.id,
+            "default_topology_id": node.default_topology_id,
+        },
+    )
+    return True
+
+
 def ensure_default_local_execution_node(session: Session) -> ExecutionNode:
     """
     Idempotently ensure the configured local node row exists.
@@ -98,9 +126,8 @@ def ensure_default_local_execution_node(session: Session) -> ExecutionNode:
     existing = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
     if existing is not None:
         changed = False
-        if dev and existing.default_topology_id is None:
-            existing.default_topology_id = _dev_default_topology_id()
-            changed = True
+        if existing.default_topology_id is None:
+            changed = ensure_execution_node_default_topology(session, existing)
         if int(existing.max_workspaces or 0) <= 0:
             existing.max_workspaces = DEFAULT_EXECUTION_NODE_MAX_WORKSPACES
             changed = True
@@ -115,7 +142,7 @@ def ensure_default_local_execution_node(session: Session) -> ExecutionNode:
         return existing
 
     host_hint = (settings.database_url or "").split("@")[-1].split("/")[0] if settings.database_url else ""
-    topo_id = _dev_default_topology_id() if dev else None
+    topo_id = system_default_topology_id()
     node = ExecutionNode(
         node_key=key,
         name=f"local-{key}",
