@@ -616,7 +616,9 @@ def _route_target_port(value: str | None) -> int | None:
 def _remote_gateway_route_target_for_node(
     session: Session,
     *,
+    workspace_id: int | None = None,
     node_key: str | None,
+    execution_node_id: int | None = None,
     gateway_route_target: str | None,
     internal_endpoint: str | None,
 ) -> str | None:
@@ -628,11 +630,14 @@ def _remote_gateway_route_target_for_node(
     ``http://{execution_node.private_ip}:{published_port}`` for route-admin.
     """
     key = (node_key or "").strip()
-    if not key:
-        return (gateway_route_target or "").strip() or None
-    node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+    node: ExecutionNode | None = None
+    if key:
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+    if node is None and execution_node_id is not None:
+        node = session.get(ExecutionNode, int(execution_node_id))
     if node is None:
         return (gateway_route_target or "").strip() or None
+
     execution_mode = (node.execution_mode or "").strip()
     provider_type = (node.provider_type or "").strip()
     is_remote = provider_type == ExecutionNodeProviderType.EC2.value or execution_mode in _REMOTE_EXECUTION_MODES
@@ -645,7 +650,19 @@ def _remote_gateway_route_target_for_node(
     port = _route_target_port(gateway_route_target) or _route_target_port(internal_endpoint)
     if port is None:
         return (gateway_route_target or "").strip() or None
-    return f"http://{private_ip}:{port}"
+    selected = f"{private_ip}:{port}"
+    logger.info(
+        "workspace_remote_route_target_selected",
+        extra={
+            "workspace_id": workspace_id,
+            "node_key": (node.node_key or key or None),
+            "execution_mode": execution_mode,
+            "private_ip": private_ip,
+            "published_port": port,
+            "gateway_route_target": selected,
+        },
+    )
+    return selected
 
 
 def _gateway_default_public_host(workspace_id: int, base_domain: str) -> str:
@@ -868,7 +885,9 @@ def _finalize_runtime_running_success(
     assert wid is not None
     gateway_route_target = _remote_gateway_route_target_for_node(
         session,
+        workspace_id=wid,
         node_key=node_id,
+        execution_node_id=ws.execution_node_id,
         gateway_route_target=gateway_route_target,
         internal_endpoint=internal_endpoint,
     )

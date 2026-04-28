@@ -703,7 +703,9 @@ def _reconcile_running(
     before = _runtime_snapshot(session, wid)
     gateway_route_target = wmod._remote_gateway_route_target_for_node(
         session,
+        workspace_id=wid,
         node_key=health.node_id,
+        execution_node_id=ws.execution_node_id,
         gateway_route_target=health.gateway_route_target,
         internal_endpoint=health.internal_endpoint,
     )

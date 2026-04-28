@@ -551,9 +551,59 @@ class TestDispatchCreate:
             rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
             assert ws is not None
             assert rt is not None
-            assert ws.endpoint_ref == "http://10.0.1.20:32779"
-            assert rt.gateway_route_target == "http://10.0.1.20:32779"
+            assert ws.endpoint_ref == "10.0.1.20:32779"
+            assert rt.gateway_route_target == "10.0.1.20:32779"
             assert rt.internal_endpoint == "127.0.0.1:32779"
+
+    def test_ec2_create_rewrites_loopback_gateway_target_using_execution_node_id_fallback(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            node = ExecutionNode(
+                node_key="ec2-autoscale-daabec280d13",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                private_ip="10.0.7.81",
+            )
+            session.add(node)
+            session.flush()
+            ws = _seed_workspace(session, owner_user_id)
+            ws.execution_node_id = node.id
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.add(ws)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            out = _bringup_ok(str(wid))
+            out.node_id = "stale-or-missing-node-key"
+            out.internal_endpoint = "127.0.0.1:32781"
+            out.gateway_route_target = "127.0.0.1:32781"
+            orch.bring_up_workspace_runtime.return_value = out
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert ws is not None
+            assert rt is not None
+            assert ws.endpoint_ref == "10.0.7.81:32781"
+            assert rt.gateway_route_target == "10.0.7.81:32781"
+            assert rt.internal_endpoint == "127.0.0.1:32781"
 
     def test_create_dispatch_merges_encrypted_workspace_secrets_into_runtime_env(
         self,
