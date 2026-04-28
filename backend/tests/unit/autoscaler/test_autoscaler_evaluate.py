@@ -17,6 +17,7 @@ from app.services.autoscaler_service.service import (
     evaluate_scale_down,
     evaluate_scale_up,
     maybe_provision_on_no_schedulable_capacity,
+    record_placement_failed_scale_out_signal,
     run_scale_out_tick,
 )
 from app.services.auth_service.models import UserAuth
@@ -512,6 +513,122 @@ def test_evaluate_tick_free_slots_high_but_cpu_zero_triggers_scale_out(autoscale
     assert decision.scale_out_recommended is True
     assert decision.action == "scale_out_recommended"
     assert any("free_cpu 0.0 < required_cpu 1.0" in reason for reason in decision.reasons)
+
+
+def test_recent_placement_failure_signal_triggers_scale_out_even_without_pending_jobs(
+    autoscaler_unit_engine,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-fragmented",
+                name="ec2-fragmented",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                allocatable_disk_mb=102400,
+                max_workspaces=64,
+            ),
+        )
+        session.commit()
+        record_placement_failed_scale_out_signal(
+            session,
+            workspace_id=None,
+            workspace_job_id=None,
+            job_type=WorkspaceJobType.CREATE.value,
+            detail="No schedulable node qualified for placement",
+            requested_cpu=1.0,
+            requested_memory_mb=512,
+            requested_disk_mb=4096,
+            actor_user_id=None,
+            correlation_id="test-placement-failed",
+        )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.pending_workspace_jobs == 0
+    assert decision.capacity.recent_placement_failures == 1
+    assert decision.capacity.pending_placement_jobs == 1
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
+    assert any("recent placement failure demand signals=1" in reason for reason in decision.reasons)
+
+
+def test_scale_out_tick_provisions_after_recent_placement_failure_signal(
+    autoscaler_unit_engine,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-current",
+                name="ec2-current",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                allocatable_disk_mb=102400,
+                max_workspaces=64,
+            ),
+        )
+        session.commit()
+        record_placement_failed_scale_out_signal(
+            session,
+            job_type=WorkspaceJobType.CREATE.value,
+            detail="placement.no_schedulable_node",
+        )
+        session.commit()
+
+        with (
+            patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+            patch("app.services.autoscaler_service.service.provision_ec2_node") as mock_provision,
+        ):
+            settings = _scale_out_settings()
+            settings.devnest_ec2_bootstrap_prebaked = False
+            settings.devnest_ec2_heartbeat_internal_api_base_url = "http://api.internal:8000"
+            settings.internal_api_key_infrastructure = "infra-secret"
+            settings.internal_api_key = ""
+            settings.workspace_projects_base = "/var/lib/devnest/workspace-projects"
+            settings.devnest_ec2_workspace_projects_base = "/var/lib/devnest/workspace-projects"
+            settings.devnest_node_heartbeat_interval_seconds = 30
+            settings.devnest_ec2_extra_tags = ""
+            mock_settings.return_value = settings
+
+            def _fake_provision(sess, request=None, wait_until_running=True):
+                assert request is not None
+                node = ExecutionNode(
+                    node_key=request.node_key,
+                    name=request.node_key,
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    provider_instance_id="i-placementfailure",
+                    status=ExecutionNodeStatus.PROVISIONING.value,
+                    schedulable=False,
+                    total_cpu=2.0,
+                    total_memory_mb=4096,
+                    allocatable_cpu=2.0,
+                    allocatable_memory_mb=4096,
+                )
+                sess.add(node)
+                sess.flush()
+                return node
+
+            mock_provision.side_effect = _fake_provision
+            decision, node = run_scale_out_tick(session)
+
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
+    assert node is not None
+    assert node.provider_instance_id == "i-placementfailure"
+    assert mock_provision.call_count == 1
 
 
 def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(autoscaler_unit_engine) -> None:

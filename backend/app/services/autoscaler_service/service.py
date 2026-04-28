@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func
 from sqlmodel import Session, select
@@ -19,6 +19,9 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability.metrics import record_autoscaler_scale_down, record_autoscaler_scale_up
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.models import AuditLog
+from app.services.audit_service.service import record_audit
 from app.services.infrastructure_service.errors import Ec2ProvisionConfigurationError
 from app.services.infrastructure_service.lifecycle import (
     mark_node_draining,
@@ -214,6 +217,90 @@ def _count_queued_jobs(session: Session, *, job_types: frozenset[str] | None = N
     stmt = select(func.count()).select_from(WorkspaceJob).where(and_(*preds))
     raw = session.exec(stmt).one()
     return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _placement_failure_signal_window_seconds() -> int:
+    raw = getattr(get_settings(), "devnest_autoscaler_recent_activity_window_seconds", 300)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _count_recent_placement_failure_signals(session: Session) -> int:
+    window_seconds = _placement_failure_signal_window_seconds()
+    if session.bind and session.bind.dialect.name == "sqlite":
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=window_seconds)
+    else:
+        since = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+    stmt = (
+        select(func.count())
+        .select_from(AuditLog)
+        .where(
+            and_(
+                AuditLog.action == AuditAction.PLACEMENT_NO_SCHEDULABLE_NODE.value,
+                AuditLog.created_at >= since,
+            ),
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def record_placement_failed_scale_out_signal(
+    session: Session,
+    *,
+    workspace_id: int | None = None,
+    workspace_job_id: int | None = None,
+    job_type: str | None = None,
+    detail: str | None = None,
+    requested_cpu: float | None = None,
+    requested_memory_mb: int | None = None,
+    requested_disk_mb: int | None = None,
+    actor_user_id: int | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Record a recent placement-failure demand signal that autoscaler evaluation can consume."""
+    log_event(
+        logger,
+        LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
+        workspace_id=workspace_id,
+        workspace_job_id=workspace_job_id,
+        job_type=job_type,
+        detail=(detail or "")[:2000],
+        autoscaler_demand_signal=True,
+    )
+    logger.info(
+        "placement_failed_triggering_scale_out",
+        extra={
+            "workspace_id": workspace_id,
+            "workspace_job_id": workspace_job_id,
+            "job_type": job_type,
+            "requested_cpu": requested_cpu,
+            "requested_memory_mb": requested_memory_mb,
+            "requested_disk_mb": requested_disk_mb,
+        },
+    )
+    record_audit(
+        session,
+        action=AuditAction.PLACEMENT_NO_SCHEDULABLE_NODE.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        workspace_id=workspace_id if workspace_id and workspace_id > 0 else None,
+        job_id=workspace_job_id,
+        actor_user_id=actor_user_id,
+        actor_type=AuditActorType.USER.value if actor_user_id is not None else AuditActorType.INTERNAL_SERVICE.value,
+        outcome=AuditOutcome.FAILURE.value,
+        reason=(detail or "placement failed: no schedulable execution node")[:4096],
+        correlation_id=correlation_id,
+        metadata={
+            "job_type": job_type,
+            "requested_cpu": requested_cpu,
+            "requested_memory_mb": requested_memory_mb,
+            "requested_disk_mb": requested_disk_mb,
+            "autoscaler_demand_signal": True,
+        },
+    )
 
 
 def _seconds_since(ts: datetime | None) -> float | None:
@@ -436,6 +523,8 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         total_disk += alloc_disk
         free_disk += max(0, alloc_disk - used_disk)
 
+    recent_placement_failures = _count_recent_placement_failure_signals(session)
+    pending_placement_jobs = _count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES)
     return FleetCapacitySnapshot(
         total_nodes=total_nodes,
         ec2_nodes_active=ec2_nodes_active,
@@ -448,7 +537,8 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         active_slots=active_slots,
         free_slots=free_slots,
         pending_workspace_jobs=_count_queued_jobs(session),
-        pending_placement_jobs=_count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES),
+        pending_placement_jobs=pending_placement_jobs + recent_placement_failures,
+        recent_placement_failures=recent_placement_failures,
         total_allocatable_cpu=round(total_cpu, 4),
         free_cpu=round(free_cpu, 4),
         total_allocatable_memory_mb=total_mem,
@@ -489,6 +579,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     scale_out_recommended = (
         cap.ready_schedulable_nodes == 0
         or capacity_insufficient
+        or int(cap.recent_placement_failures) > 0
         or pending > int(cap.free_slots)
         or idle_after_pending < min_idle_slots
     )
@@ -504,6 +595,10 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
             reasons.append(
                 "scale-out recommended: capacity insufficient for one workspace: "
                 + "; ".join(capacity_insufficiency_reasons),
+            )
+        elif int(cap.recent_placement_failures) > 0:
+            reasons.append(
+                f"scale-out recommended: recent placement failure demand signals={cap.recent_placement_failures}",
             )
         elif cap.ready_schedulable_nodes == 0:
             reasons.append("scale-out recommended: no ready schedulable nodes")
@@ -614,6 +709,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         free_disk_mb=cap.free_disk_mb,
         pending_workspace_jobs=cap.pending_workspace_jobs,
         pending_placement_jobs=cap.pending_placement_jobs,
+        recent_placement_failures=cap.recent_placement_failures,
         idle_ec2_node_count=cap.idle_ec2_node_count,
         reasons=" | ".join(reasons)[:2000],
     )

@@ -49,7 +49,10 @@ from app.services.orchestrator_service.errors import (
     WorkspaceUpdateError,
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
-from app.services.autoscaler_service.service import maybe_provision_on_no_schedulable_capacity
+from app.services.autoscaler_service.service import (
+    maybe_provision_on_no_schedulable_capacity,
+    record_placement_failed_scale_out_signal,
+)
 from app.services.cleanup_service import (
     CLEANUP_SCOPE_BRINGUP_ROLLBACK,
     CLEANUP_SCOPE_STOP_INCOMPLETE,
@@ -2174,6 +2177,14 @@ def _process_next_queued_job_return_id(
                     job_type=job.job_type,
                     detail=str(e)[:500],
                 )
+                record_placement_failed_scale_out_signal(
+                    session,
+                    workspace_id=wid,
+                    workspace_job_id=jid,
+                    job_type=job.job_type,
+                    detail=str(e),
+                    correlation_id=job.correlation_id,
+                )
                 try:
                     maybe_provision_on_no_schedulable_capacity(session)
                 except Exception:
@@ -2442,6 +2453,14 @@ def run_queued_workspace_job_by_id(
                         workspace_job_id=jid,
                         job_type=job.job_type,
                         detail=str(e)[:500],
+                    )
+                    record_placement_failed_scale_out_signal(
+                        work,
+                        workspace_id=wid,
+                        workspace_job_id=jid,
+                        job_type=job.job_type,
+                        detail=str(e),
+                        correlation_id=job.correlation_id,
                     )
                     try:
                         maybe_provision_on_no_schedulable_capacity(work)

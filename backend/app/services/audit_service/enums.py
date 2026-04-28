@@ -70,6 +70,7 @@ class AuditAction(str, Enum):
     AUTOSCALER_SCALE_UP = "autoscaler.scale_up"
     AUTOSCALER_SCALE_UP_SUPPRESSED = "autoscaler.scale_up.suppressed"
     AUTOSCALER_SCALE_DOWN = "autoscaler.scale_down"
+    PLACEMENT_NO_SCHEDULABLE_NODE = "placement.no_schedulable_node"
 
     # ---- Auth ----
     USER_REGISTERED = "auth.user.registered"

@@ -88,6 +88,7 @@ def _decision(decision) -> FleetAutoscalerDecisionResponse:
             free_slots=cap.free_slots,
             pending_workspace_jobs=cap.pending_workspace_jobs,
             pending_placement_jobs=cap.pending_placement_jobs,
+            recent_placement_failures=cap.recent_placement_failures,
             total_allocatable_cpu=cap.total_allocatable_cpu,
             free_cpu=cap.free_cpu,
             total_allocatable_memory_mb=cap.total_allocatable_memory_mb,
