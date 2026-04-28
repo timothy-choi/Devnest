@@ -76,10 +76,14 @@ from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
     WorkspaceRestartResult,
+    WorkspaceSnapshotOperationResult,
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
 from app.services.storage.factory import get_snapshot_storage_provider
+from app.services.storage.s3_storage import S3SnapshotStorageProvider
+from app.services.node_execution_service.ssm_remote_command_runner import SsmRemoteCommandRunner
+from app.services.orchestrator_service.snapshot_filesystem import export_running_workspace_tar_to_s3_via_ssm
 from app.services.workspace_service.api.schemas.workspace_schemas import get_workspace_features
 from app.services.workspace_service.models import (
     Workspace,
@@ -198,6 +202,111 @@ def _fail_job_from_placement(
     _touch_workspace(session, ws)
     assert ws.workspace_id is not None
     _clear_runtime_capacity_reservation(session, ws.workspace_id)
+
+
+def _is_remote_ec2_ssm_snapshot_node(node: ExecutionNode | None) -> bool:
+    if node is None:
+        return False
+    provider = (node.provider_type or "").strip().lower()
+    mode = (node.execution_mode or "").strip().lower()
+    return provider == ExecutionNodeProviderType.EC2.value or mode == ExecutionNodeExecutionMode.SSM_DOCKER.value
+
+
+def _export_remote_ec2_snapshot_to_s3(
+    *,
+    workspace_id: int,
+    snapshot_id: int,
+    container_id: str,
+    node: ExecutionNode,
+    storage: S3SnapshotStorageProvider,
+    correlation_id: str | None,
+) -> WorkspaceSnapshotOperationResult:
+    iid = (node.provider_instance_id or "").strip()
+    region = (node.region or getattr(get_settings(), "aws_region", "") or "").strip()
+    if not iid:
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=str(workspace_id),
+            success=False,
+            issues=["snapshot:remote:ssm_missing_instance_id"],
+        )
+    if not region:
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=str(workspace_id),
+            success=False,
+            issues=["snapshot:remote:ssm_missing_region"],
+        )
+    s3_uri = storage.storage_uri(workspace_id=workspace_id, snapshot_id=snapshot_id)
+    log_event(
+        logger,
+        "snapshot.remote.started",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id,
+        workspace_snapshot_id=snapshot_id,
+        node_key=node.node_key,
+        instance_id=iid,
+        s3_uri=s3_uri,
+    )
+    try:
+        ok, size_bytes, issues = export_running_workspace_tar_to_s3_via_ssm(
+            ssm_runner=SsmRemoteCommandRunner(instance_id=iid, region=region),
+            workspace_id=workspace_id,
+            snapshot_id=snapshot_id,
+            container_id=container_id,
+            s3_uri=s3_uri,
+        )
+    except Exception as e:
+        logger.exception(
+            "snapshot.remote.failed",
+            extra={
+                "workspace_id": workspace_id,
+                "workspace_snapshot_id": snapshot_id,
+                "node_key": node.node_key,
+                "instance_id": iid,
+            },
+        )
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=str(workspace_id),
+            success=False,
+            issues=[f"snapshot:remote:exception:{e}"],
+        )
+    if not ok:
+        logger.error(
+            "snapshot.remote.failed",
+            extra={
+                "workspace_id": workspace_id,
+                "workspace_snapshot_id": snapshot_id,
+                "node_key": node.node_key,
+                "instance_id": iid,
+                "issues": issues,
+            },
+        )
+        return WorkspaceSnapshotOperationResult(workspace_id=str(workspace_id), success=False, issues=issues)
+    log_event(
+        logger,
+        "snapshot.remote.archive.created",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id,
+        workspace_snapshot_id=snapshot_id,
+        node_key=node.node_key,
+        instance_id=iid,
+        size_bytes=size_bytes,
+    )
+    log_event(
+        logger,
+        "snapshot.remote.upload.succeeded",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id,
+        workspace_snapshot_id=snapshot_id,
+        node_key=node.node_key,
+        instance_id=iid,
+        s3_uri=s3_uri,
+    )
+    return WorkspaceSnapshotOperationResult(
+        workspace_id=str(workspace_id),
+        success=True,
+        size_bytes=size_bytes,
+        issues=None,
+    )
 
 
 def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, exc: BaseException) -> None:
@@ -1266,11 +1375,13 @@ def _execute_snapshot_create_job(
     storage = get_snapshot_storage_provider()
     archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
     rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    execution_node = session.get(ExecutionNode, int(ws.execution_node_id)) if ws.execution_node_id is not None else None
     snapshot_cid: str | None = None
     if ws.status == WorkspaceStatus.RUNNING.value and rt is not None:
         st = (rt.container_state or "").strip().lower()
         if st == "running" and (rt.container_id or "").strip():
             snapshot_cid = str(rt.container_id).strip()
+    remote_s3_uploaded = False
 
     log_event(
         logger,
@@ -1286,17 +1397,33 @@ def _execute_snapshot_create_job(
         snapshot_container_id=snapshot_cid,
     )
 
-    res = orchestrator.export_workspace_filesystem_snapshot(
-        workspace_id=wid_str,
-        project_storage_key=ws.project_storage_key,
-        archive_path=archive_path,
-        container_id=snapshot_cid,
-    )
+    if (
+        snapshot_cid
+        and isinstance(storage, S3SnapshotStorageProvider)
+        and _is_remote_ec2_ssm_snapshot_node(execution_node)
+    ):
+        assert execution_node is not None
+        res = _export_remote_ec2_snapshot_to_s3(
+            workspace_id=wid,
+            snapshot_id=sid,
+            container_id=snapshot_cid,
+            node=execution_node,
+            storage=storage,
+            correlation_id=job.correlation_id,
+        )
+        remote_s3_uploaded = bool(res.success)
+    else:
+        res = orchestrator.export_workspace_filesystem_snapshot(
+            workspace_id=wid_str,
+            project_storage_key=ws.project_storage_key,
+            archive_path=archive_path,
+            container_id=snapshot_cid,
+        )
 
     if res.success:
         # For object-storage providers (e.g. S3), upload the local staging archive to remote
         # storage after the orchestrator writes it.  Local providers are a no-op here.
-        if hasattr(storage, "upload_archive"):
+        if hasattr(storage, "upload_archive") and not remote_s3_uploaded:
             try:
                 upload_kw: dict[str, object] = {}
                 src_nk: str | None = None

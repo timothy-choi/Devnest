@@ -18,6 +18,7 @@ import docker
 import docker.errors
 
 from app.libs.runtime.models import WORKSPACE_PROJECT_CONTAINER_PATH
+from app.services.node_execution_service.ssm_remote_command_runner import SsmRemoteCommandRunner
 from app.services.node_execution_service.ssh_command_runner import SshRemoteCommandRunner
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,69 @@ def export_host_tree_tar_via_ssh(
         tail = (stderr_b or b"").decode(errors="replace")[:2000]
         return False, [f"snapshot:export:remote_tar_exit:{rc}", tail]
     return True, []
+
+
+def build_ssm_docker_snapshot_export_to_s3_script(
+    *,
+    workspace_id: int,
+    snapshot_id: int,
+    container_id: str,
+    s3_uri: str,
+    project_container_path: str = WORKSPACE_PROJECT_CONTAINER_PATH,
+) -> str:
+    """Shell script run on an EC2 execution node to archive a running workspace and upload it to S3."""
+    wid = int(workspace_id)
+    sid = int(snapshot_id)
+    cid = (container_id or "").strip()
+    uri = (s3_uri or "").strip()
+    if not cid:
+        raise ValueError("container_id is required")
+    if not uri.startswith("s3://"):
+        raise ValueError("s3_uri must start with s3://")
+    tmp = f"/tmp/devnest-ws-{wid}.tar.gz"
+    return "\n".join(
+        [
+            "set -euo pipefail",
+            f"tmp={shlex.quote(tmp)}",
+            'trap \'rm -f "$tmp"\' EXIT',
+            f"docker exec {shlex.quote(cid)} tar czf - -C {shlex.quote(project_container_path)} . > \"$tmp\"",
+            'test -s "$tmp"',
+            'bytes="$(wc -c < "$tmp" | tr -d \'[:space:]\')"',
+            f"aws s3 cp \"$tmp\" {shlex.quote(uri)}",
+            'printf \'devnest_snapshot_bytes=%s\\n\' "$bytes"',
+        ],
+    )
+
+
+def export_running_workspace_tar_to_s3_via_ssm(
+    *,
+    ssm_runner: SsmRemoteCommandRunner,
+    workspace_id: int,
+    snapshot_id: int,
+    container_id: str,
+    s3_uri: str,
+) -> tuple[bool, int | None, list[str]]:
+    """Create a tar.gz on the remote SSM Docker host and upload it directly to S3."""
+    try:
+        script = build_ssm_docker_snapshot_export_to_s3_script(
+            workspace_id=workspace_id,
+            snapshot_id=snapshot_id,
+            container_id=container_id,
+            s3_uri=s3_uri,
+        )
+        stdout = ssm_runner.run(["sh", "-lc", script])
+    except Exception as e:
+        return False, None, [f"snapshot:export:ssm_s3_failed:{e}"]
+
+    size_bytes: int | None = None
+    for line in (stdout or "").splitlines():
+        if line.startswith("devnest_snapshot_bytes="):
+            raw = line.split("=", 1)[1].strip()
+            try:
+                size_bytes = int(raw)
+            except ValueError:
+                size_bytes = None
+    return True, size_bytes, []
 
 
 def import_archive_to_host_via_ssh(

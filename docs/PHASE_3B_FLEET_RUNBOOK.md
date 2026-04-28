@@ -119,6 +119,7 @@ Attach an **instance profile** to each execution EC2 with least privilege. Below
 
 - **Grant:** `s3:GetObject`, `s3:PutObject`, `s3:AbortMultipartUpload`, `s3:ListBucket` (prefix-scoped), **`kms:Decrypt` / `kms:GenerateDataKey`** if the bucket uses SSE-KMS.
 - **Scope:** Single bucket (and optional prefix) for workspace snapshot archives — **no** `s3:*` on `*`.
+- **Remote EC2 save path:** `ssm_docker` nodes create `/tmp/devnest-ws-<workspace_id>.tar.gz` on the execution node and run `aws s3 cp` to `DEVNEST_S3_SNAPSHOT_BUCKET` / `DEVNEST_S3_SNAPSHOT_PREFIX`; the instance profile must include `s3:PutObject` for that prefix.
 
 ### 4.3 ECR / image pull (if pulls run on the node)
 

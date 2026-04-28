@@ -102,7 +102,7 @@ set -Eeuo pipefail
 install -d -m 0755 /var/log/devnest
 exec > >(tee -a /var/log/devnest/bootstrap.log) 2>&1
 
-dnf install -y docker
+dnf install -y docker awscli-2
 systemctl enable --now docker
 
 install -d -m 0755 /opt/devnest
