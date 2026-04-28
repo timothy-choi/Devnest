@@ -21,6 +21,8 @@ def test_phase2_scale_out_autoscaler_defaults() -> None:
     assert s.devnest_autoscaler_min_nodes == 1
     assert s.devnest_autoscaler_max_nodes == 10
     assert s.devnest_autoscaler_min_idle_slots == 1
+    assert s.devnest_autoscaler_loop_enabled is True
+    assert s.devnest_autoscaler_loop_interval_seconds == 15
     assert s.devnest_autoscaler_scale_out_cooldown_seconds == 300
     assert s.devnest_autoscaler_scale_in_cooldown_seconds == 900
     assert s.devnest_ec2_workspace_projects_base == "/var/lib/devnest/workspace-projects"

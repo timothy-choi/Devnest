@@ -862,6 +862,9 @@ class Settings(BaseSettings):
     devnest_autoscaler_min_idle_slots: int = 1
     # When set with ``devnest_autoscaler_enabled``, worker triggers one EC2 provision on NoSchedulableNodeError.
     devnest_autoscaler_provision_on_no_capacity: bool = False
+    # Standalone workspace-worker background loop that evaluates autoscaler demand and provisions one EC2 node per tick.
+    devnest_autoscaler_loop_enabled: bool = True
+    devnest_autoscaler_loop_interval_seconds: int = 15
     devnest_autoscaler_max_concurrent_provisioning: int = 3
     devnest_autoscaler_scale_out_cooldown_seconds: int = 300
     devnest_autoscaler_scale_in_cooldown_seconds: int = 900
@@ -1078,6 +1081,24 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 1
         return max(0, min(n, 10_000))
+
+    @field_validator("devnest_autoscaler_loop_enabled", mode="before")
+    @classmethod
+    def _parse_autoscaler_loop_enabled(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @field_validator("devnest_autoscaler_loop_interval_seconds", mode="before")
+    @classmethod
+    def _autoscaler_loop_interval_seconds(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 15
+        return max(1, min(n, 3600))
 
     @field_validator(
         "devnest_autoscaler_scale_out_cooldown_seconds",
