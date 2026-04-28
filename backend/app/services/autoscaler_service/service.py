@@ -33,6 +33,11 @@ from app.services.placement_service.capacity import (
     total_reserved_disk_mb_on_node_key,
     total_reserved_on_node_key,
 )
+from app.services.placement_service.constants import (
+    DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+)
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeProviderType,
@@ -67,6 +72,22 @@ _ACTIVE_EC2_NODE_STATUSES = frozenset(
         ExecutionNodeStatus.ERROR.value,
     },
 )
+
+
+def _capacity_insufficient_for_one_workspace(cap: FleetCapacitySnapshot) -> list[str]:
+    """Return resource reasons that prevent placing one default workspace anywhere in the fleet."""
+    reasons: list[str] = []
+    if int(cap.free_slots) < 1:
+        reasons.append("free_slots < required_slots 1")
+    if float(cap.free_cpu) < float(DEFAULT_WORKSPACE_REQUEST_CPU):
+        reasons.append(f"free_cpu {cap.free_cpu} < required_cpu {DEFAULT_WORKSPACE_REQUEST_CPU}")
+    if int(cap.free_memory_mb) < int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB):
+        reasons.append(
+            f"free_memory_mb {cap.free_memory_mb} < required_memory_mb {DEFAULT_WORKSPACE_REQUEST_MEMORY_MB}",
+        )
+    if int(cap.free_disk_mb) < int(DEFAULT_WORKSPACE_REQUEST_DISK_MB):
+        reasons.append(f"free_disk_mb {cap.free_disk_mb} < required_disk_mb {DEFAULT_WORKSPACE_REQUEST_DISK_MB}")
+    return reasons
 
 
 def _provider_allows_ec2_autoscale() -> bool:
@@ -461,10 +482,13 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
 
     pending = int(cap.pending_placement_jobs)
     idle_after_pending = int(cap.free_slots) - pending
+    capacity_insufficiency_reasons = _capacity_insufficient_for_one_workspace(cap)
+    capacity_insufficient = bool(capacity_insufficiency_reasons)
     provider_mode = (getattr(settings, "devnest_node_provider", "all") or "all").strip().lower()
     ec2_allowed = provider_mode in ("all", "ec2")
     scale_out_recommended = (
         cap.ready_schedulable_nodes == 0
+        or capacity_insufficient
         or pending > int(cap.free_slots)
         or idle_after_pending < min_idle_slots
     )
@@ -476,9 +500,17 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     suppressed_by_cooldown = False
 
     if scale_out_recommended:
-        reasons.append(
-            "scale-out recommended: pending placement demand plus idle-slot buffer exceeds ready capacity",
-        )
+        if capacity_insufficient:
+            reasons.append(
+                "scale-out recommended: capacity insufficient for one workspace: "
+                + "; ".join(capacity_insufficiency_reasons),
+            )
+        elif cap.ready_schedulable_nodes == 0:
+            reasons.append("scale-out recommended: no ready schedulable nodes")
+        else:
+            reasons.append(
+                "scale-out recommended: pending placement demand plus idle-slot buffer exceeds ready capacity",
+            )
         if not enabled:
             suppressed_by_config = True
             reasons.append("suppressed by config: DEVNEST_AUTOSCALER_ENABLED=false")
@@ -577,6 +609,9 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         draining_nodes=cap.draining_nodes,
         active_slots=cap.active_slots,
         free_slots=cap.free_slots,
+        free_cpu=cap.free_cpu,
+        free_memory_mb=cap.free_memory_mb,
+        free_disk_mb=cap.free_disk_mb,
         pending_workspace_jobs=cap.pending_workspace_jobs,
         pending_placement_jobs=cap.pending_placement_jobs,
         idle_ec2_node_count=cap.idle_ec2_node_count,

@@ -25,6 +25,33 @@ from app.services.workspace_service.models import Workspace, WorkspaceJob, Works
 from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceJobType, WorkspaceStatus
 
 
+def _scale_out_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        devnest_autoscaler_enabled=True,
+        devnest_autoscaler_evaluate_only=False,
+        devnest_autoscaler_min_nodes=1,
+        devnest_autoscaler_max_nodes=5,
+        devnest_autoscaler_min_idle_slots=1,
+        devnest_autoscaler_max_concurrent_provisioning=3,
+        devnest_autoscaler_scale_out_cooldown_seconds=0,
+        devnest_autoscaler_scale_in_cooldown_seconds=0,
+        devnest_enable_multi_node_scheduling=True,
+        devnest_node_provider="all",
+        devnest_require_fresh_node_heartbeat=False,
+        aws_region="us-east-1",
+        devnest_ec2_ami_id="ami-12345678",
+        devnest_ec2_instance_type="t3.micro",
+        devnest_ec2_subnet_id="subnet-12345678",
+        devnest_ec2_security_group_ids="sg-12345678",
+        devnest_ec2_instance_profile="DevNestExecutionNodeProfile",
+        devnest_ec2_key_name="",
+        devnest_ec2_default_execution_mode="ssm_docker",
+        devnest_ec2_bootstrap_prebaked=True,
+        devnest_ec2_user_data="",
+        devnest_ec2_user_data_b64="",
+    )
+
+
 @pytest.fixture
 def autoscaler_unit_engine() -> Engine:
     engine = create_engine(
@@ -360,6 +387,131 @@ def test_evaluate_only_tick_reports_no_action_for_idle_capacity(autoscaler_unit_
     assert decision.no_action is True
     assert decision.capacity.ready_schedulable_ec2_nodes == 1
     assert decision.capacity.free_slots == 4
+
+
+@pytest.mark.parametrize(
+    ("reserved_cpu", "reserved_memory_mb", "reserved_disk_mb", "reason_fragment"),
+    [
+        (2.0, 0, 0, "free_cpu 0.0 < required_cpu 1.0"),
+        (0.0, 1024, 0, "free_memory_mb 0 < required_memory_mb 512"),
+        (0.0, 0, 4096, "free_disk_mb 0 < required_disk_mb 4096"),
+    ],
+)
+def test_evaluate_tick_recommends_scale_out_when_required_resource_is_exhausted(
+    autoscaler_unit_engine,
+    reserved_cpu: float,
+    reserved_memory_mb: int,
+    reserved_disk_mb: int,
+    reason_fragment: str,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(
+            username=f"auto-{reason_fragment[:4]}",
+            email=f"{reason_fragment[:4]}@example.com",
+            password_hash="x",
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        node = ExecutionNode(
+            node_key="ec2-resource-bound",
+            name="ec2-resource-bound",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            status=ExecutionNodeStatus.READY.value,
+            schedulable=True,
+            total_cpu=2.0,
+            total_memory_mb=1024,
+            allocatable_cpu=2.0,
+            allocatable_memory_mb=1024,
+            allocatable_disk_mb=4096,
+            max_workspaces=64,
+        )
+        session.add(node)
+        session.commit()
+        session.refresh(node)
+        ws = Workspace(
+            name="busy",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(node.id),
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=int(ws.workspace_id),
+                node_id="ec2-resource-bound",
+                reserved_cpu=reserved_cpu,
+                reserved_memory_mb=reserved_memory_mb,
+                reserved_disk_mb=reserved_disk_mb,
+            ),
+        )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
+    assert decision.capacity.free_slots == 63
+    assert any(reason_fragment in reason for reason in decision.reasons)
+
+
+def test_evaluate_tick_free_slots_high_but_cpu_zero_triggers_scale_out(autoscaler_unit_engine) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="cpu-zero", email="cpu-zero@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        node = ExecutionNode(
+            node_key="ec2-cpu-zero",
+            name="ec2-cpu-zero",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            status=ExecutionNodeStatus.READY.value,
+            schedulable=True,
+            total_cpu=6.0,
+            total_memory_mb=8192,
+            allocatable_cpu=6.0,
+            allocatable_memory_mb=8192,
+            allocatable_disk_mb=102400,
+            max_workspaces=64,
+        )
+        session.add(node)
+        session.commit()
+        session.refresh(node)
+        for idx in range(6):
+            ws = Workspace(
+                name=f"busy-{idx}",
+                owner_user_id=int(user.user_auth_id),
+                status=WorkspaceStatus.RUNNING.value,
+                execution_node_id=int(node.id),
+            )
+            session.add(ws)
+            session.commit()
+            session.refresh(ws)
+            session.add(
+                WorkspaceRuntime(
+                    workspace_id=int(ws.workspace_id),
+                    node_id="ec2-cpu-zero",
+                    reserved_cpu=1.0,
+                    reserved_memory_mb=512,
+                    reserved_disk_mb=4096,
+                ),
+            )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.free_cpu == 0.0
+    assert decision.capacity.active_slots == 6
+    assert decision.capacity.free_slots == 58
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
+    assert any("free_cpu 0.0 < required_cpu 1.0" in reason for reason in decision.reasons)
 
 
 def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(autoscaler_unit_engine) -> None:
