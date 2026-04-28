@@ -590,11 +590,12 @@ def ssh_remote_ensure_workspace_project_dir(
 remote_shell_ensure_workspace_project_dir = ssh_remote_ensure_workspace_project_dir
 
 
-def ensure_code_server_bind_auth_proxy_config(cfg_host: str) -> None:
+def ensure_code_server_bind_auth_proxy_config(cfg_host: str, *, auth_mode: str = "none") -> None:
     """Seed or patch bind-mounted ``config.yaml`` for gateway + Traefik access.
 
-    - ``auth: none``: DevNest ForwardAuth / sessions own access control; persisted ``password`` auth
-      prompts users and fights the intended model.
+    - ``auth: none`` by default: DevNest ForwardAuth / sessions own access control; persisted
+      ``password`` auth prompts users and fights the intended model.
+    - ``auth: password`` only when explicitly configured by operators.
     - ``trusted-origins``: avoids VS Code origin checks hanging when the browser ``Host`` is the
       public workspace hostname behind a reverse proxy.
     """
@@ -609,10 +610,13 @@ def ensure_code_server_bind_auth_proxy_config(cfg_host: str) -> None:
             extra={"cfg_host": host_dir, "error": str(e)},
         )
         return
+    mode = (auth_mode or "none").strip().lower()
+    if mode not in ("none", "password"):
+        mode = "none"
     path = os.path.join(host_dir, "config.yaml")
     minimal = (
-        "# DevNest: auth delegated to gateway; trusted origins for reverse-proxy access.\n"
-        "auth: none\n"
+        "# DevNest: code-server auth is managed by DEVNEST_WORKSPACE_AUTH_MODE; trusted origins for reverse-proxy access.\n"
+        f"auth: {mode}\n"
         "trusted-origins:\n"
         "  - '*'\n"
     )
@@ -626,12 +630,15 @@ def ensure_code_server_bind_auth_proxy_config(cfg_host: str) -> None:
             content = f.read()
         changed = False
         new_content, n_subs = re.subn(
-            r"(?mi)^(\s*)auth:\s*password\b.*$",
-            r"\1auth: none",
+            r"(?mi)^(\s*)auth:\s*(none|password)\b.*$",
+            rf"\1auth: {mode}",
             content,
         )
         if n_subs:
             content = new_content
+            changed = True
+        else:
+            content = f"auth: {mode}\n" + content
             changed = True
         if not re.search(r"(?mi)^\s*trusted-origins\s*:", content):
             content = content.rstrip() + "\n\ntrusted-origins:\n  - '*'\n"

@@ -206,6 +206,11 @@ class Settings(BaseSettings):
     # Workspace orchestrator (Docker): image for workspace containers; empty falls back to
     # DEVNEST_WORKSPACE_CONTAINER_IMAGE / DEVNEST_WORKSPACE_IMAGE then devnest/workspace:latest (see app_factory).
     workspace_container_image: str = ""
+    # code-server auth inside workspace containers. Default is none because DevNest gateway/session
+    # auth gates browser access. Set DEVNEST_WORKSPACE_AUTH_MODE=password with DEVNEST_WORKSPACE_PASSWORD
+    # for defense-in-depth or standalone workspace debugging.
+    devnest_workspace_auth_mode: str = "none"
+    devnest_workspace_password: str = ""
     # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
     # When the API/worker runs in Docker with only docker.sock mounted, that default is /tmp/... *inside*
     # the control plane container — mkdir/chown there do not fix host bind sources → set WORKSPACE_PROJECTS_BASE

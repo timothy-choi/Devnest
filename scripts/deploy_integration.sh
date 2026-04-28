@@ -25,6 +25,9 @@ set -a
 source "$ENV_FILE"
 set +a
 
+# Local/CI smoke may use an empty env file; production EC2 deploy is validated by scripts/setup-env.sh.
+export DEVNEST_WORKSPACE_CONTAINER_IMAGE="${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-devnest/workspace:latest}"
+
 EFFECTIVE_DB="${DEVNEST_COMPOSE_DATABASE_URL:-}"
 if [[ -z "${EFFECTIVE_DB}" ]]; then
   EFFECTIVE_DB="${DATABASE_URL:-}"

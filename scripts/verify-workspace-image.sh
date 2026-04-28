@@ -37,8 +37,12 @@ if echo "$CMD" | grep -q '"code-server"'; then
   echo 'FAIL: Cmd still contains "code-server" — image is NOT from the fixed CMD (stale build?).' >&2
   FAIL=1
 fi
+if ! echo "$CMD" | grep -q '"--auth","none","--bind-addr","0.0.0.0:8080"'; then
+  echo 'FAIL: Cmd must include --auth none --bind-addr 0.0.0.0:8080.' >&2
+  FAIL=1
+fi
 
 if [[ "$FAIL" -eq 0 ]]; then
-  echo "OK: Entrypoint/Cmd look like the post-fix Dockerfile.workspace."
+  echo "OK: Entrypoint/Cmd include auth=none and bind code-server on 0.0.0.0:8080."
 fi
 exit "$FAIL"

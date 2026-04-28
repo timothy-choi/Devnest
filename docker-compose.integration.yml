@@ -96,7 +96,7 @@ x-pid-host: &pid_host
 # Workspace image + snapshot storage: one merge anchor so backend and workspace-worker always get
 # identical values (matches Dockerfile.workspace + same S3/local snapshot env).
 x-workspace-snapshot-env: &workspace_snapshot_env
-  DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-devnest/workspace:latest}
+  DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE:?DEVNEST_WORKSPACE_CONTAINER_IMAGE must be set in .env.integration}
   DEVNEST_SNAPSHOT_STORAGE_PROVIDER: ${DEVNEST_SNAPSHOT_STORAGE_PROVIDER:-local}
   DEVNEST_S3_SNAPSHOT_BUCKET: ${DEVNEST_S3_SNAPSHOT_BUCKET:-}
   DEVNEST_S3_SNAPSHOT_PREFIX: ${DEVNEST_S3_SNAPSHOT_PREFIX:-devnest-snapshots}
@@ -114,7 +114,7 @@ services:
       dockerfile: Dockerfile.workspace
       args:
         # Bump or export a new value to invalidate build cache when debugging stale EC2 images.
-        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-7-resilient-extension-install}
+        DEVNEST_WORKSPACE_DOCKERFILE_REVISION: ${DEVNEST_WORKSPACE_DOCKERFILE_REVISION:-9-explicit-auth-none-cmd}
     entrypoint: ["/bin/true"]
 
   postgres:
@@ -164,6 +164,8 @@ services:
       # Pydantic Settings: field workspace_projects_base → env WORKSPACE_PROJECTS_BASE.
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
+      DEVNEST_WORKSPACE_AUTH_MODE: ${DEVNEST_WORKSPACE_AUTH_MODE:-none}
+      DEVNEST_WORKSPACE_PASSWORD: ${DEVNEST_WORKSPACE_PASSWORD:-}
       # After topology attach, poll workspace IDE TCP before failing bring-up (code-server cold start).
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
@@ -259,6 +261,8 @@ services:
       <<: *workspace_snapshot_env
       WORKSPACE_PROJECTS_BASE: /var/lib/devnest/workspace-projects
       DEVNEST_WORKSPACE_PROJECTS_PRUNE_ORPHANS_ON_STARTUP: "true"
+      DEVNEST_WORKSPACE_AUTH_MODE: ${DEVNEST_WORKSPACE_AUTH_MODE:-none}
+      DEVNEST_WORKSPACE_PASSWORD: ${DEVNEST_WORKSPACE_PASSWORD:-}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_WAIT_SECONDS:-90}
       DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS: ${DEVNEST_WORKSPACE_BRINGUP_IDE_TCP_POLL_INTERVAL_SECONDS:-1.5}
       DEVNEST_GATEWAY_ENABLED: "${DEVNEST_GATEWAY_ENABLED:-true}"

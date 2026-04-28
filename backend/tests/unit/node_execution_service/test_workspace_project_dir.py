@@ -11,6 +11,7 @@ import pytest
 
 from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
+    ensure_code_server_bind_auth_proxy_config,
     prune_orphaned_workspace_project_dirs,
     resolve_workspace_ide_bind_host_path,
     ssh_remote_ensure_workspace_project_dir,
@@ -76,6 +77,20 @@ def test_resolve_workspace_ide_bind_host_path_resume_legacy_stays_at_bundle(tmp_
 def test_workspace_project_dir_name_changes_when_storage_key_changes() -> None:
     assert workspace_project_dir_name("1", "key-a") != workspace_project_dir_name("1", "key-b")
     assert workspace_project_dir_name("1", "key-a") == workspace_project_dir_name("1", "key-a")
+
+
+def test_code_server_config_defaults_to_auth_none(tmp_path: Path) -> None:
+    cfg = tmp_path / "config"
+    ensure_code_server_bind_auth_proxy_config(str(cfg))
+    assert "auth: none" in (cfg / "config.yaml").read_text(encoding="utf-8")
+
+
+def test_code_server_config_supports_password_mode(tmp_path: Path) -> None:
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "config.yaml").write_text("auth: none\n", encoding="utf-8")
+    ensure_code_server_bind_auth_proxy_config(str(cfg), auth_mode="password")
+    assert "auth: password" in (cfg / "config.yaml").read_text(encoding="utf-8")
 
 
 def test_prune_orphaned_workspace_project_dirs_removes_unreferenced_dirs(tmp_path: Path) -> None:

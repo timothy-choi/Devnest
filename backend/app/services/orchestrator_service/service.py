@@ -307,21 +307,43 @@ class DefaultOrchestratorService(OrchestratorService):
         )
 
     @staticmethod
-    def _code_server_env(port: int = WORKSPACE_IDE_CONTAINER_PORT) -> dict[str, str]:
+    def _code_server_env(
+        port: int = WORKSPACE_IDE_CONTAINER_PORT,
+        *,
+        workspace_id: str | None = None,
+        node_key: str | None = None,
+    ) -> dict[str, str]:
         """Return canonical code-server environment variables for the workspace container.
 
         code-server reads these at startup:
         - ``CS_DISABLE_GETTING_STARTED_OVERRIDE``: suppress the welcome page.
-        - ``CODE_SERVER_AUTH``: "none" means no password (auth handled by DevNest gateway sessions).
+        - ``DEVNEST_WORKSPACE_AUTH_MODE`` / ``CODE_SERVER_AUTH``: "none" means no password
+          (auth handled by DevNest gateway sessions); "password" requires ``DEVNEST_WORKSPACE_PASSWORD``.
         - ``PORT``: in-container listen port (must match ``WORKSPACE_IDE_CONTAINER_PORT``).
 
         Bind-mounted ``config.yaml`` is seeded/patched by :func:`ensure_code_server_bind_auth_proxy_config`
         so persisted ``auth: password`` and missing ``trusted-origins`` cannot override this contract.
         """
+        from app.libs.common.config import get_settings
+
+        settings = get_settings()
+        auth_mode = (settings.devnest_workspace_auth_mode or "none").strip().lower()
+        if auth_mode not in ("none", "password"):
+            raise WorkspaceBringUpError(
+                "DEVNEST_WORKSPACE_AUTH_MODE must be either 'none' or 'password'",
+            )
         return {
             "CS_DISABLE_GETTING_STARTED_OVERRIDE": "1",
-            "CODE_SERVER_AUTH": "none",
+            "CODE_SERVER_AUTH": auth_mode,
+            "DEVNEST_WORKSPACE_AUTH_MODE": auth_mode,
+            "DEVNEST_WORKSPACE_ID": (workspace_id or "").strip(),
+            "DEVNEST_NODE_KEY": (node_key or "").strip(),
             "PORT": str(port),
+            **(
+                {"DEVNEST_WORKSPACE_PASSWORD": settings.devnest_workspace_password}
+                if auth_mode == "password" and settings.devnest_workspace_password
+                else {}
+            ),
         }
 
     def _code_server_extra_bind_mounts(
@@ -330,6 +352,7 @@ class DefaultOrchestratorService(OrchestratorService):
         workspace_host_path: str | None = None,
         launch_mode: str = "resume",
         project_storage_key: str | None = None,
+        auth_mode: str = "none",
     ) -> list[WorkspaceExtraBindMountSpec]:
         """Build code-server persistence bind mounts for config and data.
 
@@ -404,7 +427,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 launch_mode=launch_mode,
             )
             # Seed/patch ``config.yaml`` first; this may create or rewrite the file as root.
-            ensure_code_server_bind_auth_proxy_config(cfg_host)
+            ensure_code_server_bind_auth_proxy_config(cfg_host, auth_mode=auth_mode)
             # Chown the workspace bundle (``project/`` + ``code-server/``) so nothing under the tree
             # stays root-owned after mkdir/seed/rmtree steps.
             finalize_workspace_host_project_tree_ownership(bundle_root_for_cs, strict=_strict_chown)
@@ -535,7 +558,30 @@ class DefaultOrchestratorService(OrchestratorService):
             memory_limit_bytes = int(memory_limit_mib) * 1024 * 1024
 
         # Merge code-server defaults with caller-provided env (caller values win).
-        merged_env: dict[str, str] = {**self._code_server_env(), **(env or {})}
+        merged_env: dict[str, str] = {
+            **self._code_server_env(workspace_id=ctx.wid, node_key=self._node_id),
+            **(env or {}),
+        }
+        auth_mode = (
+            merged_env.get("DEVNEST_WORKSPACE_AUTH_MODE") or merged_env.get("CODE_SERVER_AUTH") or "none"
+        ).strip().lower()
+        if auth_mode not in ("none", "password"):
+            raise WorkspaceBringUpError(
+                "DEVNEST_WORKSPACE_AUTH_MODE must be either 'none' or 'password'",
+            )
+        merged_env["DEVNEST_WORKSPACE_AUTH_MODE"] = auth_mode
+        merged_env["CODE_SERVER_AUTH"] = auth_mode
+        if auth_mode == "none":
+            merged_env.pop("PASSWORD", None)
+            merged_env.pop("DEVNEST_WORKSPACE_PASSWORD", None)
+        elif not (merged_env.get("DEVNEST_WORKSPACE_PASSWORD") or "").strip():
+            raise WorkspaceBringUpError(
+                "DEVNEST_WORKSPACE_AUTH_MODE=password requires DEVNEST_WORKSPACE_PASSWORD",
+            )
+        logger.info(
+            "workspace_code_server_auth_selected",
+            extra={"workspace_id": ctx.wid, "node_key": self._node_id, "auth_mode": auth_mode},
+        )
 
         # Add code-server persistence bind mounts.
         cs_extra_mounts = self._code_server_extra_bind_mounts(
@@ -543,6 +589,7 @@ class DefaultOrchestratorService(OrchestratorService):
             ctx.workspace_host_path,
             ctx.launch_mode,
             ctx.project_storage_key,
+            auth_mode=auth_mode,
         )
 
         for spec in cs_extra_mounts or []:
