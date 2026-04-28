@@ -99,6 +99,74 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
     get_settings.cache_clear()
 
 
+def test_provision_ec2_node_persists_private_ip_from_run_instances(infrastructure_unit_engine, monkeypatch) -> None:
+    monkeypatch.setenv("DEVNEST_EC2_TAG_PREFIX", "devnest")
+    from app.libs.common.config import get_settings
+
+    get_settings.cache_clear()
+    iid = "i-0a1b2c3d4e5f6790"
+    region = "us-east-1"
+    client = boto3.client("ec2", region_name=region)
+    stubber = Stubber(client)
+    stubber.add_response(
+        "run_instances",
+        {
+            "Instances": [
+                {
+                    "InstanceId": iid,
+                    "PrivateIpAddress": "172.30.4.25",
+                    "PublicIpAddress": "54.1.2.3",
+                    "Placement": {"AvailabilityZone": "us-east-1a"},
+                }
+            ]
+        },
+        {
+            "ImageId": "ami-12345678",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "InstanceType": "t3.micro",
+            "SubnetId": "subnet-aaaabbbb",
+            "SecurityGroupIds": ["sg-test123"],
+            "TagSpecifications": ANY,
+        },
+    )
+    stubber.add_response("create_tags", {}, {"Resources": [iid], "Tags": ANY})
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    req = Ec2ProvisionRequest(
+        ami_id="ami-12345678",
+        instance_type="t3.micro",
+        subnet_id="subnet-aaaabbbb",
+        security_group_ids=["sg-test123"],
+        region=region,
+        node_key="private-ip-node",
+    )
+    try:
+        with Session(infrastructure_unit_engine) as session:
+            node = provision_ec2_node(session, req, ec2_client=client, wait_until_running=False)
+            session.commit()
+            session.refresh(node)
+    finally:
+        stubber.deactivate()
+        get_settings.cache_clear()
+
+    assert node.private_ip == "172.30.4.25"
+    assert node.public_ip == "54.1.2.3"
+    assert node.availability_zone == "us-east-1a"
+
+
 def test_provision_run_instances_throttle_retry_then_success(
     infrastructure_unit_engine,
     monkeypatch,

@@ -148,6 +148,9 @@ def provision_ec2_node(
     iid = (instances[0].get("InstanceId") or "").strip()
     if not iid:
         raise Ec2ProvisionConfigurationError("run_instances returned empty InstanceId")
+    initial_private_ip = (instances[0].get("PrivateIpAddress") or "").strip() or None
+    initial_public_ip = (instances[0].get("PublicIpAddress") or "").strip() or None
+    initial_az = ((instances[0].get("Placement") or {}).get("AvailabilityZone") or "").strip() or None
 
     if wait_until_running:
         try:
@@ -166,6 +169,26 @@ def provision_ec2_node(
                 },
             )
             raise Ec2ProvisionConfigurationError(f"wait instance_running failed for {iid}: {e}") from e
+        try:
+            desc = describe_ec2_instance(iid, ec2_client=client)
+            initial_private_ip = desc.private_ip or initial_private_ip
+            initial_public_ip = desc.public_ip or initial_public_ip
+            initial_az = desc.availability_zone or initial_az
+            logger.info(
+                "ec2_provision_instance_network_synced",
+                extra={
+                    "node_key": explicit_key or None,
+                    "instance_id": iid,
+                    "private_ip": initial_private_ip,
+                    "public_ip": initial_public_ip,
+                    "availability_zone": initial_az,
+                },
+            )
+        except Ec2ProviderError as e:
+            logger.warning(
+                "ec2_provision_instance_network_sync_failed",
+                extra={"node_key": explicit_key or None, "instance_id": iid, "error": str(e)},
+            )
         except ClientError as e:
             logger.error(
                 "ec2_provision_wait_running_failed_orphan_risk",
@@ -217,11 +240,11 @@ def provision_ec2_node(
         provider_type=ExecutionNodeProviderType.EC2.value,
         provider_instance_id=iid,
         region=region,
-        availability_zone=None,
+        availability_zone=initial_az,
         instance_type=req.instance_type,
         hostname=None,
-        private_ip=None,
-        public_ip=None,
+        private_ip=initial_private_ip,
+        public_ip=initial_public_ip,
         execution_mode=raw_em,
         ssh_host=None,
         ssh_port=22,
@@ -248,7 +271,12 @@ def provision_ec2_node(
     )
     logger.info(
         "ec2_node_provisioned",
-        extra={"node_key": node_key, "instance_id": iid, "provision_correlation_id": corr},
+        extra={
+            "node_key": node_key,
+            "instance_id": iid,
+            "private_ip": row.private_ip,
+            "provision_correlation_id": corr,
+        },
     )
     return row
 

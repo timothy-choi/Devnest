@@ -605,6 +605,59 @@ class TestDispatchCreate:
             assert rt.gateway_route_target == "10.0.7.81:32781"
             assert rt.internal_endpoint == "127.0.0.1:32781"
 
+    def test_ec2_create_missing_private_ip_fails_without_loopback_route(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            node = ExecutionNode(
+                node_key=NODE_ID,
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                private_ip=None,
+            )
+            session.add(node)
+            session.flush()
+            ws = _seed_workspace(session, owner_user_id)
+            ws.execution_node_id = node.id
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.add(ws)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            out = _bringup_ok(str(wid))
+            out.node_id = NODE_ID
+            out.internal_endpoint = "127.0.0.1:32783"
+            out.gateway_route_target = "127.0.0.1:32783"
+            orch.bring_up_workspace_runtime.return_value = out
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = session.get(Workspace, wid)
+            job = session.exec(select(WorkspaceJob).where(WorkspaceJob.workspace_id == wid)).first()
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert ws is not None
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.FAILED.value
+            assert "execution_node.private_ip" in (job.error_msg or "")
+            assert ws.status == WorkspaceStatus.ERROR.value
+            if rt is not None:
+                assert rt.gateway_route_target != "127.0.0.1:32783"
+
     def test_create_dispatch_merges_encrypted_workspace_secrets_into_runtime_env(
         self,
         workspace_job_worker_engine,

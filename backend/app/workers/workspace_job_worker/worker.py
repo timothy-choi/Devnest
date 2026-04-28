@@ -646,10 +646,17 @@ def _remote_gateway_route_target_for_node(
 
     private_ip = (node.private_ip or "").strip()
     if not private_ip:
-        return (gateway_route_target or "").strip() or None
+        raise WorkspaceBringUpError(
+            "remote EC2 route target requires execution_node.private_ip "
+            f"(node_key={node.node_key!r}, execution_node_id={node.id!r})",
+        )
     port = _route_target_port(gateway_route_target) or _route_target_port(internal_endpoint)
     if port is None:
-        return (gateway_route_target or "").strip() or None
+        raise WorkspaceBringUpError(
+            "remote EC2 route target requires a published IDE host port "
+            f"(node_key={node.node_key!r}, gateway_route_target={gateway_route_target!r}, "
+            f"internal_endpoint={internal_endpoint!r})",
+        )
     selected = f"{private_ip}:{port}"
     logger.info(
         "workspace_remote_route_target_selected",
