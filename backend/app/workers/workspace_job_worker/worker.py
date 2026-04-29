@@ -1232,7 +1232,7 @@ def _finalize_delete_runtime_missing_idempotent(session: Session, ws: Workspace,
     wid = ws.workspace_id
     assert wid is not None
     logger.info(
-        "workspace.delete.idempotent_runtime_missing",
+        "workspace.delete.runtime_missing_treated_as_success",
         extra={
             "workspace_id": wid,
             "workspace_job_id": job.workspace_job_id,

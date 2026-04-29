@@ -191,11 +191,17 @@ def _latest_config_version(session: Session, workspace_id: int) -> int | None:
     return cfg.version if cfg is not None else None
 
 
-def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int) -> Workspace:
+def _get_owned_workspace(
+    session: Session,
+    workspace_id: int,
+    owner_user_id: int,
+    *,
+    include_deleted: bool = False,
+) -> Workspace:
     ws = session.get(Workspace, workspace_id)
     if ws is None or ws.owner_user_id != owner_user_id:
         raise WorkspaceNotFoundError("Workspace not found")
-    if ws.status == WorkspaceStatus.DELETED.value:
+    if ws.status == WorkspaceStatus.DELETED.value and not include_deleted:
         raise WorkspaceNotFoundError("Workspace not found")
     # V1 attach/access are owner-only. ``is_private`` gates listing elsewhere; collaborators / shared
     # workspaces are deferred (TODO).
@@ -1036,15 +1042,16 @@ def request_delete_workspace(
     requested_by_user_id: int,
     correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
-    ws = _get_owned_workspace(session, workspace_id, owner_user_id)
+    ws = _get_owned_workspace(session, workspace_id, owner_user_id, include_deleted=True)
     _require_not_busy(ws)
     if ws.status not in (
         WorkspaceStatus.RUNNING.value,
         WorkspaceStatus.STOPPED.value,
         WorkspaceStatus.ERROR.value,
+        WorkspaceStatus.DELETED.value,
     ):
         raise WorkspaceInvalidStateError(
-            f"Delete is only allowed when running, stopped, or error (current={ws.status})"
+            f"Delete is only allowed when running, stopped, error, or deleted (current={ws.status})"
         )
     cfg_v = _intent_config_version(session, workspace_id)
     return _persist_intent(
