@@ -27,7 +27,7 @@ from pathlib import Path
 from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.probes.interfaces import ProbeRunner
-from app.libs.runtime.errors import RuntimeAdapterError
+from app.libs.runtime.errors import ContainerNotFoundError, RuntimeAdapterError
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import (
     CODE_SERVER_CONFIG_CONTAINER_PATH,
@@ -1569,6 +1569,12 @@ class DefaultOrchestratorService(OrchestratorService):
                     f"runtime:delete_failed:{del_res.message or 'delete_container returned success=False'}",
                 )
             return container_deleted, final_state
+        except ContainerNotFoundError as e:
+            logger.info(
+                "workspace.delete.container_missing_treated_as_success",
+                extra={"container_id": container_id, "error": str(e)},
+            )
+            return True, "missing"
         except RuntimeAdapterError as e:
             issues.append(f"runtime:delete_failed:{e}")
             return False, None

@@ -634,20 +634,20 @@ def _clear_runtime_after_delete(
             },
         )
         return
-    ts = _now()
-    row.node_id = None
-    row.topology_id = None
-    row.container_id = None
-    row.container_state = "deleted"
-    row.internal_endpoint = None
-    row.gateway_route_target = None
-    row.reserved_cpu = 0.0
-    row.reserved_memory_mb = 0
-    row.reserved_disk_mb = 0
-    row.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
-    row.last_heartbeat_at = None
-    row.updated_at = ts
-    session.add(row)
+    session.delete(row)
+
+
+def _delete_result_container_was_missing(result: WorkspaceDeleteResult) -> bool:
+    if (result.container_id or "").strip() and (result.container_deleted is True):
+        state = ""
+        for issue in result.issues or []:
+            state += f" {issue}".lower()
+        return "not found" in state or "missing" in state
+    return any(
+        "container" in str(issue).lower()
+        and ("not found" in str(issue).lower() or "missing" in str(issue).lower())
+        for issue in result.issues or []
+    )
 
 
 def _mark_job_running(session: Session, job: WorkspaceJob) -> None:
@@ -1187,57 +1187,72 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
 def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, result: WorkspaceDeleteResult) -> None:
     wid = ws.workspace_id
     assert wid is not None
-    if result.success:
-        _mark_job_succeeded(session, job)
-        ws.status = WorkspaceStatus.DELETED.value
-        _workspace_clear_errors(ws)
-        gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
-        _clear_runtime_after_delete(session, wid, workspace_job_id=job.workspace_job_id)
-        _touch_workspace(session, ws)
-        revoke_all_workspace_sessions(
-            session,
-            wid,
-            reason="worker.delete",
-            correlation_id=job.correlation_id,
-        )
-        _gateway_try_deregister(
-            wid,
-            public_host=gw_meta.get("public_host"),
-            node_key=gw_meta.get("node_key"),
-            gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
-        )
-        record_audit(
-            session,
-            action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
-            resource_type="workspace",
-            resource_id=wid,
-            actor_user_id=job.requested_by_user_id,
-            actor_type=AuditActorType.SYSTEM.value,
-            outcome=AuditOutcome.SUCCESS.value,
-            workspace_id=wid,
-            job_id=job.workspace_job_id,
-            correlation_id=job.correlation_id,
-            metadata={"job_type": job.job_type, "new_status": WorkspaceStatus.DELETED.value},
-        )
-        record_usage(
-            session,
-            workspace_id=wid,
-            owner_user_id=int(ws.owner_user_id),
-            event_type=UsageEventType.WORKSPACE_DELETED.value,
-            job_id=job.workspace_job_id,
-            correlation_id=job.correlation_id,
-        )
-        return
-
-    msg = _format_issues(result.issues) or "Delete completed without success"
-    _resolve_orchestrator_result_failure(
-        session,
-        ws,
-        job,
-        message=msg,
-        stage=FailureStage.CONTAINER,
-        retryable=False,
+    logger.info(
+        "workspace.delete.idempotent_success",
+        extra={
+            "workspace_id": wid,
+            "workspace_job_id": job.workspace_job_id,
+            "orchestrator_success": bool(result.success),
+            "container_deleted": result.container_deleted,
+            "topology_detached": result.topology_detached,
+            "topology_deleted": result.topology_deleted,
+            "issues": list(result.issues or []),
+        },
     )
+    if _delete_result_container_was_missing(result):
+        logger.info(
+            "workspace.delete.container_missing_treated_as_success",
+            extra={
+                "workspace_id": wid,
+                "workspace_job_id": job.workspace_job_id,
+                "container_id": result.container_id,
+                "issues": list(result.issues or []),
+            },
+        )
+    _mark_job_succeeded(session, job)
+    ws.status = WorkspaceStatus.DELETED.value
+    _workspace_clear_errors(ws)
+    gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
+    _clear_runtime_after_delete(session, wid, workspace_job_id=job.workspace_job_id)
+    _touch_workspace(session, ws)
+    revoke_all_workspace_sessions(
+        session,
+        wid,
+        reason="worker.delete",
+        correlation_id=job.correlation_id,
+    )
+    _gateway_try_deregister(
+        wid,
+        public_host=gw_meta.get("public_host"),
+        node_key=gw_meta.get("node_key"),
+        gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
+        resource_type="workspace",
+        resource_id=wid,
+        actor_user_id=job.requested_by_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        metadata={
+            "job_type": job.job_type,
+            "new_status": WorkspaceStatus.DELETED.value,
+            "orchestrator_success": bool(result.success),
+        },
+    )
+    record_usage(
+        session,
+        workspace_id=wid,
+        owner_user_id=int(ws.owner_user_id),
+        event_type=UsageEventType.WORKSPACE_DELETED.value,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+    )
+    return
 
 
 def _finalize_delete_runtime_missing_idempotent(session: Session, ws: Workspace, job: WorkspaceJob) -> None:

@@ -293,7 +293,7 @@ def test_delete_workspace_events_end_to_end(client: TestClient, db_session: Sess
     ws = _reload_workspace(db_session, wid)
     rt = _runtime_for(db_session, wid)
     assert ws.status == WorkspaceStatus.DELETED.value
-    assert rt is not None and rt.container_state == "deleted"
+    assert rt is None
 
     payloads = _observed_event_payloads(db_session, workspace_id=wid, owner_user_id=uid)
     _assert_job_event_arc(_events_for_job(payloads, del_jid), expect_succeeded=True)
@@ -336,4 +336,3 @@ def test_create_workspace_bringup_failure_emits_failed_job_event(
     arc = _events_for_job(payloads, jid)
     _assert_job_event_arc(arc, expect_succeeded=False)
     assert "system-events-injected-bringup-failure" in (arc[-1]["payload"].get("error_msg") or "")
-
