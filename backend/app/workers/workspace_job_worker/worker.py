@@ -1227,6 +1227,63 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
     )
 
 
+def _finalize_delete_runtime_missing_idempotent(session: Session, ws: Workspace, job: WorkspaceJob) -> None:
+    """Complete DELETE when the runtime row is already gone before worker orchestration starts."""
+    wid = ws.workspace_id
+    assert wid is not None
+    logger.info(
+        "workspace.delete.idempotent_runtime_missing",
+        extra={
+            "workspace_id": wid,
+            "workspace_job_id": job.workspace_job_id,
+            "job_type": job.job_type,
+            "previous_workspace_status": ws.status,
+        },
+    )
+    _mark_job_succeeded(session, job)
+    ws.status = WorkspaceStatus.DELETED.value
+    _workspace_clear_errors(ws)
+    gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
+    _touch_workspace(session, ws)
+    revoke_all_workspace_sessions(
+        session,
+        wid,
+        reason="worker.delete.runtime_missing",
+        correlation_id=job.correlation_id,
+    )
+    _gateway_try_deregister(
+        wid,
+        public_host=gw_meta.get("public_host"),
+        node_key=gw_meta.get("node_key"),
+        gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
+        resource_type="workspace",
+        resource_id=wid,
+        actor_user_id=job.requested_by_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        metadata={
+            "job_type": job.job_type,
+            "new_status": WorkspaceStatus.DELETED.value,
+            "idempotent_runtime_missing": True,
+        },
+    )
+    record_usage(
+        session,
+        workspace_id=wid,
+        owner_user_id=int(ws.owner_user_id),
+        event_type=UsageEventType.WORKSPACE_DELETED.value,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+    )
+
+
 def _finalize_restart_result(
     session: Session,
     ws: Workspace,
@@ -2283,6 +2340,12 @@ def _process_next_queued_job_return_id(
                 failure_code="missing_workspace",
             )
             return jid
+        if job.job_type == WorkspaceJobType.DELETE.value:
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            if rt is None:
+                _finalize_delete_runtime_missing_idempotent(session, ws, job)
+                _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
+                return jid
         try:
             if job.job_type == WorkspaceJobType.REPO_IMPORT.value:
                 from app.services.placement_service.orchestrator_binding import (

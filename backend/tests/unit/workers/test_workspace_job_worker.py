@@ -896,6 +896,52 @@ class TestDispatchDelete:
             assert rt.reserved_memory_mb == 0
             assert rt.reserved_disk_mb == 0
 
+    def test_delete_error_workspace_with_missing_runtime_is_idempotent(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.ERROR.value)
+            ws.last_error_code = "old_error"
+            ws.last_error_message = "runtime disappeared after delete"
+            session.add(ws)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        def _unexpected_orchestrator(*_args: object, **_kwargs: object) -> OrchestratorService:
+            raise AssertionError("missing-runtime delete should not build an orchestrator")
+
+        with Session(workspace_job_worker_engine) as session:
+            with caplog.at_level("INFO"):
+                run_pending_jobs(session, get_orchestrator=_unexpected_orchestrator, limit=1)
+            session.commit()
+
+        orch.delete_workspace_runtime.assert_not_called()
+        assert "workspace.delete.idempotent_runtime_missing" in caplog.text
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert job.error_msg is None
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert ws.last_error_code is None
+            assert ws.last_error_message is None
+            assert rt is None
+
 
 class TestDispatchUpdate:
     def test_update_dispatches_update_with_config_version(
