@@ -614,12 +614,25 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
     session.add(rt)
 
 
-def _clear_runtime_after_delete(session: Session, workspace_id: int) -> None:
+def _clear_runtime_after_delete(
+    session: Session,
+    workspace_id: int,
+    *,
+    workspace_job_id: int | None = None,
+) -> None:
     """Tombstone runtime row when workspace is deleted (container cleared, state ``deleted``)."""
     row = session.exec(
         select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
     ).first()
     if row is None:
+        logger.info(
+            "workspace.delete.runtime_missing_treated_as_success",
+            extra={
+                "workspace_id": workspace_id,
+                "workspace_job_id": workspace_job_id,
+                "phase": "post_orchestrator_delete_complete",
+            },
+        )
         return
     ts = _now()
     row.node_id = None
@@ -1179,7 +1192,7 @@ def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, 
         ws.status = WorkspaceStatus.DELETED.value
         _workspace_clear_errors(ws)
         gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
-        _clear_runtime_after_delete(session, wid)
+        _clear_runtime_after_delete(session, wid, workspace_job_id=job.workspace_job_id)
         _touch_workspace(session, ws)
         revoke_all_workspace_sessions(
             session,
