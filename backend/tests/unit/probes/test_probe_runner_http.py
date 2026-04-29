@@ -126,6 +126,22 @@ class TestCheckServiceHttp:
             runner.check_service_http(workspace_ip="10.0.0.1", port=8080, timeout_seconds=7.0)
         assert captured_kwargs["timeout"] == 7.0
 
+    def test_remote_runner_uses_curl_not_local_urlopen(self):
+        remote = MagicMock()
+        runner = DefaultProbeRunner(
+            runtime=MagicMock(),
+            topology=MagicMock(),
+            service_reachability_runner=remote,
+        )
+        with patch("app.libs.probes.probe_runner._probe_urlopen") as mock_urlopen:
+            result = runner.check_service_http(workspace_ip="127.0.0.1", port=32000, timeout_seconds=3.0)
+        assert result.healthy is True
+        mock_urlopen.assert_not_called()
+        remote.run.assert_called_once()
+        argv = remote.run.call_args.args[0]
+        assert "curl" in argv
+        assert "http://127.0.0.1:32000/healthz" in argv
+
 
 # ---------------------------------------------------------------------------
 # check_workspace_health: HTTP probe integration

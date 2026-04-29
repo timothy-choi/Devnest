@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -50,6 +51,7 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
             "SubnetId": "subnet-aaaabbbb",
             "SecurityGroupIds": ["sg-test123"],
             "TagSpecifications": ANY,
+            "UserData": "#!/bin/bash\necho devnest\n",
         },
     )
     stubber.add_response(
@@ -79,6 +81,7 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
         iam_instance_profile_name=None,
         region=region,
         node_key="stub-node-a",
+        user_data="#!/bin/bash\necho devnest\n",
     )
     try:
         with Session(infrastructure_unit_engine) as session:
@@ -93,7 +96,76 @@ def test_provision_ec2_node_creates_provisioning_row(infrastructure_unit_engine,
     assert node.status == ExecutionNodeStatus.PROVISIONING.value
     assert node.schedulable is False
     assert node.provider_instance_id == iid
+    assert node.default_topology_id == 1
     get_settings.cache_clear()
+
+
+def test_provision_ec2_node_persists_private_ip_from_run_instances(infrastructure_unit_engine, monkeypatch) -> None:
+    monkeypatch.setenv("DEVNEST_EC2_TAG_PREFIX", "devnest")
+    from app.libs.common.config import get_settings
+
+    get_settings.cache_clear()
+    iid = "i-0a1b2c3d4e5f6790"
+    region = "us-east-1"
+    client = boto3.client("ec2", region_name=region)
+    stubber = Stubber(client)
+    stubber.add_response(
+        "run_instances",
+        {
+            "Instances": [
+                {
+                    "InstanceId": iid,
+                    "PrivateIpAddress": "172.30.4.25",
+                    "PublicIpAddress": "54.1.2.3",
+                    "Placement": {"AvailabilityZone": "us-east-1a"},
+                }
+            ]
+        },
+        {
+            "ImageId": "ami-12345678",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "InstanceType": "t3.micro",
+            "SubnetId": "subnet-aaaabbbb",
+            "SecurityGroupIds": ["sg-test123"],
+            "TagSpecifications": ANY,
+        },
+    )
+    stubber.add_response("create_tags", {}, {"Resources": [iid], "Tags": ANY})
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    req = Ec2ProvisionRequest(
+        ami_id="ami-12345678",
+        instance_type="t3.micro",
+        subnet_id="subnet-aaaabbbb",
+        security_group_ids=["sg-test123"],
+        region=region,
+        node_key="private-ip-node",
+    )
+    try:
+        with Session(infrastructure_unit_engine) as session:
+            node = provision_ec2_node(session, req, ec2_client=client, wait_until_running=False)
+            session.commit()
+            session.refresh(node)
+    finally:
+        stubber.deactivate()
+        get_settings.cache_clear()
+
+    assert node.private_ip == "172.30.4.25"
+    assert node.public_ip == "54.1.2.3"
+    assert node.availability_zone == "us-east-1a"
 
 
 def test_provision_run_instances_throttle_retry_then_success(
@@ -151,6 +223,57 @@ def test_provision_run_instances_throttle_retry_then_success(
             node = provision_ec2_node(session, req, ec2_client=client, wait_until_running=False)
             session.commit()
             assert node.provider_instance_id == iid
+    finally:
+        stubber.deactivate()
+
+
+def test_provision_ec2_node_sends_user_data_to_run_instances(infrastructure_unit_engine) -> None:
+    iid = "i-0a1b2c3d4e5f6789"
+    region = "us-east-1"
+    user_data = "#!/bin/bash\necho bootstrap\n"
+    client = boto3.client("ec2", region_name=region)
+    stubber = Stubber(client)
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": iid}]},
+        {
+            "ImageId": "ami-12345678",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "InstanceType": "t3.micro",
+            "SubnetId": "subnet-aaaabbbb",
+            "SecurityGroupIds": ["sg-test123"],
+            "TagSpecifications": ANY,
+            "UserData": user_data,
+        },
+    )
+    stubber.add_response("create_tags", {}, {"Resources": [iid], "Tags": ANY})
+    stubber.add_response(
+        "describe_instance_types",
+        {
+            "InstanceTypes": [
+                {
+                    "InstanceType": "t3.micro",
+                    "VCpuInfo": {"DefaultVCpus": 2},
+                    "MemoryInfo": {"SizeInMiB": 1024},
+                },
+            ],
+        },
+        {"InstanceTypes": ["t3.micro"]},
+    )
+    stubber.activate()
+    req = Ec2ProvisionRequest(
+        ami_id="ami-12345678",
+        instance_type="t3.micro",
+        subnet_id="subnet-aaaabbbb",
+        security_group_ids=["sg-test123"],
+        region=region,
+        node_key="user-data-node",
+        user_data=user_data,
+    )
+    try:
+        with Session(infrastructure_unit_engine) as session:
+            provision_ec2_node(session, req, ec2_client=client, wait_until_running=False)
     finally:
         stubber.deactivate()
 
@@ -261,7 +384,7 @@ def test_undrain_terminated_raises(infrastructure_unit_engine) -> None:
             undrain_node(session, node_key="no-undrain-term")
 
 
-def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit_engine) -> None:
+def test_sync_promotes_provisioning_to_ready_when_heartbeat_ready(infrastructure_unit_engine) -> None:
     iid = "i-0123456789abcdef0"
     row = ExecutionNode(
         node_key="ssm-promote-test",
@@ -277,7 +400,8 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
         total_memory_mb=4096,
         allocatable_cpu=2.0,
         allocatable_memory_mb=4096,
-        metadata_json={},
+        last_heartbeat_at=datetime.now(timezone.utc),
+        metadata_json={"heartbeat": {"docker_ok": True, "disk_free_mb": 99_999}},
     )
     with Session(infrastructure_unit_engine) as session:
         session.add(row)
@@ -300,10 +424,6 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
                 "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
                 return_value=SimpleNamespace(state="running"),
             ),
-            patch(
-                "app.services.infrastructure_service.lifecycle.is_instance_ssm_online",
-                return_value=True,
-            ),
         ):
             out = sync_node_state(session, node_key="ssm-promote-test")
             session.commit()
@@ -312,6 +432,101 @@ def test_sync_promotes_provisioning_to_ready_when_ssm_online(infrastructure_unit
     assert out.status == ExecutionNodeStatus.READY.value
     assert out.schedulable is True
     assert out.private_ip == "10.0.0.10"
+
+
+def test_sync_promotes_not_ready_to_ready_when_heartbeat_ready(infrastructure_unit_engine) -> None:
+    iid = "i-0123456789abcdef1"
+    row = ExecutionNode(
+        node_key="not-ready-promote-test",
+        name="not-ready-promote-test",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.NOT_READY.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        last_heartbeat_at=datetime.now(timezone.utc),
+        metadata_json={"heartbeat": {"docker_ok": True, "disk_free_mb": 99_999}},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+
+        def _fake_register(sess, instance_id, *, ec2_client=None, node_key=None, ssh_user=None, execution_mode=None):
+            r = sess.exec(select(ExecutionNode).where(ExecutionNode.node_key == "not-ready-promote-test")).first()
+            assert r is not None
+            r.status = ExecutionNodeStatus.READY.value
+            r.schedulable = True
+            sess.add(r)
+            sess.flush()
+
+        with (
+            patch(
+                "app.services.infrastructure_service.lifecycle.register_ec2_instance",
+                side_effect=_fake_register,
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+                return_value=SimpleNamespace(state="running"),
+            ),
+        ):
+            out = sync_node_state(session, node_key="not-ready-promote-test")
+            session.commit()
+            session.refresh(out)
+
+    assert out.status == ExecutionNodeStatus.READY.value
+    assert out.schedulable is True
+
+
+def test_sync_does_not_promote_provisioning_without_healthy_heartbeat(infrastructure_unit_engine) -> None:
+    iid = "i-0123456789abcdeff"
+    row = ExecutionNode(
+        node_key="ssm-waits-heartbeat",
+        name="ssm-waits-heartbeat",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.PROVISIONING.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        metadata_json={},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+
+        def _fake_register(sess, instance_id, *, ec2_client=None, node_key=None, ssh_user=None, execution_mode=None):
+            r = sess.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ssm-waits-heartbeat")).first()
+            assert r is not None
+            sess.add(r)
+            sess.flush()
+
+        with (
+            patch(
+                "app.services.infrastructure_service.lifecycle.register_ec2_instance",
+                side_effect=_fake_register,
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+                return_value=SimpleNamespace(state="running"),
+            ),
+        ):
+            out = sync_node_state(session, node_key="ssm-waits-heartbeat")
+            session.commit()
+            session.refresh(out)
+
+    assert out.status == ExecutionNodeStatus.PROVISIONING.value
+    assert out.schedulable is False
 
 
 def test_mark_node_draining_skips_terminated(infrastructure_unit_engine) -> None:

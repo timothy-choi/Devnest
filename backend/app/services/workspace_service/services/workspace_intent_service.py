@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 from app.libs.observability.correlation import generate_correlation_id
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability.metrics import record_job_queued
+from app.services.autoscaler_service.service import record_placement_failed_scale_out_signal
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +191,17 @@ def _latest_config_version(session: Session, workspace_id: int) -> int | None:
     return cfg.version if cfg is not None else None
 
 
-def _get_owned_workspace(session: Session, workspace_id: int, owner_user_id: int) -> Workspace:
+def _get_owned_workspace(
+    session: Session,
+    workspace_id: int,
+    owner_user_id: int,
+    *,
+    include_deleted: bool = False,
+) -> Workspace:
     ws = session.get(Workspace, workspace_id)
     if ws is None or ws.owner_user_id != owner_user_id:
         raise WorkspaceNotFoundError("Workspace not found")
-    if ws.status == WorkspaceStatus.DELETED.value:
+    if ws.status == WorkspaceStatus.DELETED.value and not include_deleted:
         raise WorkspaceNotFoundError("Workspace not found")
     # V1 attach/access are owner-only. ``is_private`` gates listing elsewhere; collaborators / shared
     # workspaces are deferred (TODO).
@@ -1035,15 +1042,16 @@ def request_delete_workspace(
     requested_by_user_id: int,
     correlation_id: str | None = None,
 ) -> WorkspaceIntentResult:
-    ws = _get_owned_workspace(session, workspace_id, owner_user_id)
+    ws = _get_owned_workspace(session, workspace_id, owner_user_id, include_deleted=True)
     _require_not_busy(ws)
     if ws.status not in (
         WorkspaceStatus.RUNNING.value,
         WorkspaceStatus.STOPPED.value,
         WorkspaceStatus.ERROR.value,
+        WorkspaceStatus.DELETED.value,
     ):
         raise WorkspaceInvalidStateError(
-            f"Delete is only allowed when running, stopped, or error (current={ws.status})"
+            f"Delete is only allowed when running, stopped, error, or deleted (current={ws.status})"
         )
     cfg_v = _intent_config_version(session, workspace_id)
     return _persist_intent(
@@ -1376,6 +1384,20 @@ def create_workspace(
     if schedule_result.execution_node is None or schedule_result.insufficient_capacity:
         # Full placement diagnostics are already logged by ``schedule_workspace``; API clients get a
         # short, stable message (internal ``NoSchedulableNodeError`` strings are operator-oriented).
+        try:
+            record_placement_failed_scale_out_signal(
+                session,
+                detail=schedule_result.message,
+                requested_cpu=rt_cpu,
+                requested_memory_mb=rt_mem,
+                requested_disk_mb=int(DEFAULT_WORKSPACE_REQUEST_DISK_MB),
+                actor_user_id=owner_user_id,
+                correlation_id=cid_pre,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("placement_failed_scale_out_signal_record_failed")
         raise WorkspaceSchedulingCapacityError(
             "No execution capacity is available to create a workspace. The node may be at its limit "
             "for CPU, memory, disk, or concurrent workspaces. Stop or delete unused workspaces, or "

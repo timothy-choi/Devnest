@@ -148,6 +148,7 @@ def build_default_orchestrator_for_session(
         if isinstance(bundle.topology_command_runner, SshRemoteCommandRunner)
         else None
     )
+    remote_topology_attach_deferred = bool(getattr(bundle, "defer_topology_attach", False))
 
     return DefaultOrchestratorService(
         runtime,
@@ -160,6 +161,10 @@ def build_default_orchestrator_for_session(
         ensure_workspace_project_dir=bundle.ensure_workspace_project_dir,
         traefik_routing_host=bundle.traefik_routing_host,
         snapshot_ssh_runner=snapshot_ssh,
+        workspace_host_command_runner=(
+            bundle.topology_command_runner if remote_topology_attach_deferred else None
+        ),
+        remote_topology_attach_deferred=remote_topology_attach_deferred,
     )
 
 

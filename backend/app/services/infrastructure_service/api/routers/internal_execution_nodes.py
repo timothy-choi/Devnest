@@ -37,6 +37,7 @@ from ...errors import Ec2ProvisionConfigurationError, NodeLifecycleError
 from ...lifecycle import (
     deregister_node,
     mark_node_draining,
+    promote_ec2_node_if_heartbeat_ready,
     provision_ec2_node,
     register_catalog_ec2_stub,
     register_existing_ec2_node,
@@ -241,6 +242,7 @@ def post_execution_node_heartbeat(
     else:
         node.last_error_code = None
         node.last_error_message = None
+    promote_ec2_node_if_heartbeat_ready(session, node, readiness="heartbeat")
     session.add(node)
     session.commit()
     session.refresh(node)

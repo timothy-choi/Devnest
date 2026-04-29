@@ -247,6 +247,20 @@ def test_select_node_insufficient_capacity(placement_engine: Engine) -> None:
             )
 
 
+def test_select_node_repairs_missing_default_topology(placement_engine: Engine) -> None:
+    with Session(placement_engine) as session:
+        n = _add_node(session, key="missing-topology")
+        n.default_topology_id = None
+        session.add(n)
+        session.commit()
+
+        picked = select_node_for_workspace(session, workspace_id=1)
+        session.refresh(picked)
+
+        assert picked.node_key == "missing-topology"
+        assert picked.default_topology_id == 1
+
+
 def test_select_node_stale_heartbeat_still_schedulable_when_gating_off(placement_engine: Engine) -> None:
     from datetime import datetime, timedelta, timezone
 

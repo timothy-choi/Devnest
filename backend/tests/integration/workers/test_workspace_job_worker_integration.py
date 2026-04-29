@@ -374,10 +374,7 @@ def test_process_delete_job_happy_path_clears_runtime(
     assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
     assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
     assert ws.last_error_code is None
-    assert rt is not None
-    assert rt.container_id is None
-    assert rt.container_state == "deleted"
-    assert rt.internal_endpoint is None
+    assert rt is None
 
 
 def test_process_update_job_happy_path_respects_config_version(

@@ -27,7 +27,7 @@ from ...service import (
     evaluate_scale_down,
     evaluate_fleet_autoscaler_tick,
     evaluate_scale_up,
-    provision_capacity_if_needed,
+    run_scale_out_tick,
     reclaim_one_idle_ec2_node,
 )
 from ..schemas import (
@@ -88,6 +88,7 @@ def _decision(decision) -> FleetAutoscalerDecisionResponse:
             free_slots=cap.free_slots,
             pending_workspace_jobs=cap.pending_workspace_jobs,
             pending_placement_jobs=cap.pending_placement_jobs,
+            recent_placement_failures=cap.recent_placement_failures,
             total_allocatable_cpu=cap.total_allocatable_cpu,
             free_cpu=cap.free_cpu,
             total_allocatable_memory_mb=cap.total_allocatable_memory_mb,
@@ -127,9 +128,16 @@ def get_autoscaler_evaluate(session: Session = Depends(get_db)) -> AutoscalerEva
 def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> ProvisionOneResponse:
     log_event(_logger, LogEvent.AUDIT_INTERNAL_AUTOSCALER_PROVISION_ONE)
     evaluate_node_provisioning(session)
-    ev = evaluate_scale_up(session, insufficient_capacity=True)
-    if not ev.should_provision:
-        if ev.idle_ec2_node_count > 0:
+    try:
+        decision, node = run_scale_out_tick(session)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(e),
+        ) from e
+    ev = evaluate_scale_up(session, insufficient_capacity=decision.scale_out_recommended)
+    if node is None:
+        if decision.suppressed_by_config or decision.suppressed_by_cap or decision.suppressed_by_cooldown:
             record_audit(
                 session,
                 action=AuditAction.AUTOSCALER_SCALE_UP_SUPPRESSED.value,
@@ -137,9 +145,9 @@ def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> Provisi
                 actor_type=AuditActorType.INTERNAL_SERVICE.value,
                 outcome=AuditOutcome.SUCCESS.value,
                 metadata={
-                    "reason": ev.reason,
-                    "idle_ec2_node_count": ev.idle_ec2_node_count,
-                    "provisioning_in_flight": ev.provisioning_in_flight,
+                    "action": decision.action,
+                    "reasons": decision.reasons,
+                    "provisioning_in_flight": decision.capacity.provisioning_nodes,
                 },
             )
             record_usage(
@@ -150,16 +158,10 @@ def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> Provisi
         return ProvisionOneResponse(
             provisioned=False,
             evaluation=_up(ev),
+            decision=_decision(decision),
             node_key=None,
             instance_id=None,
         )
-    try:
-        node = provision_capacity_if_needed(session, ev)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(e),
-        ) from e
     record_audit(
         session,
         action=AuditAction.AUTOSCALER_SCALE_UP.value,
@@ -185,6 +187,7 @@ def post_autoscaler_provision_one(session: Session = Depends(get_db)) -> Provisi
     return ProvisionOneResponse(
         provisioned=True,
         evaluation=_up(ev),
+        decision=_decision(decision),
         node_key=node.node_key if node else None,
         instance_id=iid or None,
     )

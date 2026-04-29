@@ -206,6 +206,11 @@ class Settings(BaseSettings):
     # Workspace orchestrator (Docker): image for workspace containers; empty falls back to
     # DEVNEST_WORKSPACE_CONTAINER_IMAGE / DEVNEST_WORKSPACE_IMAGE then devnest/workspace:latest (see app_factory).
     workspace_container_image: str = ""
+    # code-server auth inside workspace containers. Default is none because DevNest gateway/session
+    # auth gates browser access. Set DEVNEST_WORKSPACE_AUTH_MODE=password with DEVNEST_WORKSPACE_PASSWORD
+    # for defense-in-depth or standalone workspace debugging.
+    devnest_workspace_auth_mode: str = "none"
+    devnest_workspace_password: str = ""
     # Host directory root for per-workspace project bind mounts; empty uses system temp / devnest-workspaces.
     # When the API/worker runs in Docker with only docker.sock mounted, that default is /tmp/... *inside*
     # the control plane container — mkdir/chown there do not fix host bind sources → set WORKSPACE_PROJECTS_BASE
@@ -721,6 +726,18 @@ class Settings(BaseSettings):
     devnest_ec2_key_name: str = ""
     # Prefix for ``{prefix}:managed`` and ``{prefix}:node_key`` tags on provisioned instances.
     devnest_ec2_tag_prefix: str = "devnest"
+    # Optional comma-separated tags for autoscaled EC2 nodes: ``key=value,owner=devnest``.
+    devnest_ec2_extra_tags: str = ""
+    # Optional EC2 user-data bootstrap. Prefer ``DEVNEST_EC2_USER_DATA_B64`` for multi-line cloud-init.
+    devnest_ec2_user_data: str = ""
+    devnest_ec2_user_data_b64: str = ""
+    # Host path on autoscaled EC2 execution nodes for workspace bind mounts.
+    devnest_ec2_workspace_projects_base: str = "/var/lib/devnest/workspace-projects"
+    # Base URL reachable from autoscaled EC2 nodes for posting execution-node heartbeats.
+    # Falls back to INTERNAL_API_BASE_URL when unset.
+    devnest_ec2_heartbeat_internal_api_base_url: str = ""
+    # Set true only when the AMI already installs Docker and starts the DevNest heartbeat agent.
+    devnest_ec2_bootstrap_prebaked: bool = False
 
     # ── Built-in background job worker ──────────────────────────────────────────
     # When true, the FastAPI process runs the job poll loop in an asyncio background
@@ -836,15 +853,18 @@ class Settings(BaseSettings):
     devnest_reconcile_lock_backend: str = "postgres_advisory"
     devnest_require_prod_reconcile_locking: bool = True
 
-    # Autoscaler (V1): fleet-level EC2 capacity; off by default for safe local/dev behavior.
-    devnest_autoscaler_enabled: bool = False
-    # Phase 1 controller mode: evaluate and log fleet decisions without provisioning, draining, or terminating.
-    devnest_autoscaler_evaluate_only: bool = True
+    # Autoscaler (V1/V2): fleet-level EC2 capacity. Phase 2 allows safe scale-out only by default.
+    devnest_autoscaler_enabled: bool = True
+    # When true, log fleet decisions without provisioning, draining, or terminating.
+    devnest_autoscaler_evaluate_only: bool = False
     devnest_autoscaler_min_nodes: int = 1
     devnest_autoscaler_max_nodes: int = 10
     devnest_autoscaler_min_idle_slots: int = 1
     # When set with ``devnest_autoscaler_enabled``, worker triggers one EC2 provision on NoSchedulableNodeError.
     devnest_autoscaler_provision_on_no_capacity: bool = False
+    # Standalone workspace-worker background loop that evaluates autoscaler demand and provisions one EC2 node per tick.
+    devnest_autoscaler_loop_enabled: bool = True
+    devnest_autoscaler_loop_interval_seconds: int = 15
     devnest_autoscaler_max_concurrent_provisioning: int = 3
     devnest_autoscaler_scale_out_cooldown_seconds: int = 300
     devnest_autoscaler_scale_in_cooldown_seconds: int = 900
@@ -973,10 +993,18 @@ class Settings(BaseSettings):
             return ""
         return str(v).strip().rstrip("/")
 
+    @field_validator("devnest_ec2_heartbeat_internal_api_base_url", mode="before")
+    @classmethod
+    def _strip_ec2_heartbeat_internal_api_base_url(cls, v):  # noqa: ANN001
+        if v is None:
+            return ""
+        return str(v).strip().rstrip("/")
+
     @field_validator(
         "devnest_autoscaler_enabled",
         "devnest_autoscaler_evaluate_only",
         "devnest_autoscaler_provision_on_no_capacity",
+        "devnest_ec2_bootstrap_prebaked",
         "devnest_require_distributed_rate_limiting",
         mode="before",
     )
@@ -1053,6 +1081,24 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 1
         return max(0, min(n, 10_000))
+
+    @field_validator("devnest_autoscaler_loop_enabled", mode="before")
+    @classmethod
+    def _parse_autoscaler_loop_enabled(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
+    @field_validator("devnest_autoscaler_loop_interval_seconds", mode="before")
+    @classmethod
+    def _autoscaler_loop_interval_seconds(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 15
+        return max(1, min(n, 3600))
 
     @field_validator(
         "devnest_autoscaler_scale_out_cooldown_seconds",

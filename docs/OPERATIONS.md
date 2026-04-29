@@ -342,3 +342,50 @@ Filter by `service=autoscaler`:
 ```bash
 journalctl -u devnest-api | jq 'select(.service=="autoscaler")'
 ```
+
+For Phase 2 EC2 scale-out, `/internal/autoscaler/evaluate` reports all missing launch settings in
+`decision.reasons`. A launch-capable environment needs:
+
+```bash
+AWS_REGION=us-east-1
+DEVNEST_AUTOSCALER_ENABLED=true
+DEVNEST_AUTOSCALER_EVALUATE_ONLY=false
+DEVNEST_AUTOSCALER_MAX_NODES=3
+DEVNEST_AUTOSCALER_MAX_CONCURRENT_PROVISIONING=1
+DEVNEST_EC2_AMI_ID=ami-...
+DEVNEST_EC2_INSTANCE_TYPE=t3.medium
+DEVNEST_EC2_SUBNET_ID=subnet-...
+DEVNEST_EC2_SECURITY_GROUP_IDS=sg-...
+DEVNEST_EC2_INSTANCE_PROFILE=DevNestExecutionNodeProfile
+DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker
+DEVNEST_EC2_TAG_PREFIX=devnest
+DEVNEST_EC2_EXTRA_TAGS=env=prod,service=execution-node
+DEVNEST_EC2_WORKSPACE_PROJECTS_BASE=/var/lib/devnest/workspace-projects
+DEVNEST_EC2_BOOTSTRAP_PREBAKED=false
+DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL=http://api.internal.example:8000
+INTERNAL_API_KEY_INFRASTRUCTURE=<strong-random-infra-key>
+# Optional custom override; leave empty for generated Amazon Linux 2023 bootstrap.
+# Custom user-data may include {{NODE_KEY}} or {{DEVNEST_NODE_KEY}} placeholders.
+DEVNEST_EC2_USER_DATA_B64=
+# Or, only for AMIs that already start Docker + heartbeat instead of generated bootstrap:
+# DEVNEST_EC2_BOOTSTRAP_PREBAKED=true
+```
+
+Trigger one scale-out tick:
+
+```bash
+curl -X POST -H "X-Internal-API-Key: $INTERNAL_API_KEY_AUTOSCALER" \
+  "$INTERNAL_API_BASE_URL/internal/autoscaler/provision-one"
+```
+
+Verify generated Amazon Linux 2023 bootstrap on the new EC2 node:
+
+```bash
+docker --version
+systemctl status docker --no-pager
+test -d /opt/devnest
+test -d /var/lib/devnest/workspace-projects
+systemctl status devnest-node-heartbeat --no-pager
+journalctl -u devnest-node-heartbeat -n 50 --no-pager
+tail -n 100 /var/log/devnest/bootstrap.log
+```

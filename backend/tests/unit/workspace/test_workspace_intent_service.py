@@ -165,6 +165,19 @@ def test_request_delete_happy_path_running_stopped_error(workspace_unit_engine, 
         assert out.job_type == WorkspaceJobType.DELETE.value
 
 
+def test_request_delete_already_deleted_queues_idempotent_delete(workspace_unit_engine, owner_user_id: int) -> None:
+    with Session(workspace_unit_engine) as session:
+        wid = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.DELETED.value, name="D-DELETED")
+        out = workspace_intent_service.request_delete_workspace(
+            session,
+            workspace_id=wid,
+            owner_user_id=owner_user_id,
+            requested_by_user_id=owner_user_id,
+        )
+    assert out.status == WorkspaceStatus.DELETING.value
+    assert out.job_type == WorkspaceJobType.DELETE.value
+
+
 def test_request_update_happy_path_creates_config_v2_and_job(workspace_unit_engine, owner_user_id: int) -> None:
     runtime = WorkspaceRuntimeSpecSchema(image="ghcr.io/new:2", cpu_limit_cores=2.0)
     with Session(workspace_unit_engine) as session:

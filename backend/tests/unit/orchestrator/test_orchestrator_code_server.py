@@ -125,17 +125,40 @@ def _make_svc(tmp_path: Path) -> DefaultOrchestratorService:
 
 
 class TestCodeServerEnv:
-    def test_code_server_env_keys_present(self) -> None:
+    def test_code_server_env_keys_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DEVNEST_WORKSPACE_AUTH_MODE", raising=False)
+        monkeypatch.delenv("DEVNEST_WORKSPACE_PASSWORD", raising=False)
+        from app.libs.common.config import get_settings
+
+        get_settings.cache_clear()
         env = DefaultOrchestratorService._code_server_env()
-        assert "CODE_SERVER_AUTH" in env
         assert env["CODE_SERVER_AUTH"] == "none"
+        assert env["DEVNEST_WORKSPACE_AUTH_MODE"] == "none"
+        assert "DEVNEST_WORKSPACE_PASSWORD" not in env
+        assert "PASSWORD" not in env
         assert "PORT" in env
         assert env["PORT"] == str(WORKSPACE_IDE_CONTAINER_PORT)
         assert "CS_DISABLE_GETTING_STARTED_OVERRIDE" in env
+        get_settings.cache_clear()
 
     def test_code_server_env_custom_port(self) -> None:
         env = DefaultOrchestratorService._code_server_env(port=9090)
         assert env["PORT"] == "9090"
+
+    def test_code_server_env_password_mode_requires_password_on_bringup(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("DEVNEST_WORKSPACE_AUTH_MODE", "password")
+        monkeypatch.delenv("DEVNEST_WORKSPACE_PASSWORD", raising=False)
+        from app.libs.common.config import get_settings
+
+        get_settings.cache_clear()
+        svc = _make_svc(tmp_path)
+        with pytest.raises(Exception, match="DEVNEST_WORKSPACE_PASSWORD"):
+            svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
+        get_settings.cache_clear()
 
 
 class TestCodeServerBindMounts:
@@ -230,8 +253,13 @@ class TestCodeServerBindMounts:
 
 
 class TestCodeServerBringUp:
-    def test_bring_up_passes_code_server_env(self, tmp_path: Path) -> None:
+    def test_bring_up_passes_code_server_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """bring_up_workspace_runtime injects code-server env defaults."""
+        monkeypatch.delenv("DEVNEST_WORKSPACE_AUTH_MODE", raising=False)
+        monkeypatch.delenv("DEVNEST_WORKSPACE_PASSWORD", raising=False)
+        from app.libs.common.config import get_settings
+
+        get_settings.cache_clear()
         rt = _make_runtime()
         svc = DefaultOrchestratorService(
             rt, _make_topology(), _make_probe(),
@@ -242,7 +270,13 @@ class TestCodeServerBringUp:
         ensure_kwargs = rt.ensure_container.call_args.kwargs
         env = ensure_kwargs.get("env") or {}
         assert env.get("CODE_SERVER_AUTH") == "none"
+        assert env.get("DEVNEST_WORKSPACE_AUTH_MODE") == "none"
+        assert env.get("DEVNEST_WORKSPACE_ID") == WORKSPACE_ID
+        assert env.get("DEVNEST_NODE_KEY") == NODE_ID
+        assert "PASSWORD" not in env
+        assert "DEVNEST_WORKSPACE_PASSWORD" not in env
         assert env.get("PORT") == str(WORKSPACE_IDE_CONTAINER_PORT)
+        get_settings.cache_clear()
 
     def test_bring_up_passes_code_server_bind_mounts(self, tmp_path: Path) -> None:
         """bring_up_workspace_runtime includes code-server persistence bind mounts."""
@@ -265,7 +299,7 @@ class TestCodeServerBringUp:
         assert any(str(p).replace("\\", "/").endswith(f"/{WORKSPACE_ID}/code-server/data") for p in host_paths)
 
     def test_bring_up_merges_caller_env_over_defaults(self, tmp_path: Path) -> None:
-        """Caller-supplied env overrides code-server defaults."""
+        """Caller-supplied env can enable password auth explicitly."""
         ws_root = tmp_path / "workspaces"
         ws_root.mkdir()
         rt = _make_runtime()
@@ -276,16 +310,54 @@ class TestCodeServerBringUp:
         )
         svc.bring_up_workspace_runtime(
             workspace_id=WORKSPACE_ID,
-            env={"CODE_SERVER_AUTH": "password", "MY_VAR": "hello"},
+            env={
+                "CODE_SERVER_AUTH": "password",
+                "DEVNEST_WORKSPACE_AUTH_MODE": "password",
+                "DEVNEST_WORKSPACE_PASSWORD": "pw-unit",
+                "MY_VAR": "hello",
+            },
         )
         ensure_kwargs = rt.ensure_container.call_args.kwargs
         env = ensure_kwargs.get("env") or {}
         # Caller value wins
         assert env["CODE_SERVER_AUTH"] == "password"
+        assert env["DEVNEST_WORKSPACE_AUTH_MODE"] == "password"
+        assert env["DEVNEST_WORKSPACE_PASSWORD"] == "pw-unit"
         # Caller extra key is preserved
         assert env["MY_VAR"] == "hello"
         # Default keys still present
         assert "CS_DISABLE_GETTING_STARTED_OVERRIDE" in env
+
+    def test_remote_ec2_bring_up_defaults_to_no_password(self, tmp_path: Path) -> None:
+        ws_root = tmp_path / "workspaces"
+        ws_root.mkdir()
+        rt = _make_runtime()
+        probe = _make_probe()
+        probe.check_container_running.return_value = MagicMock(healthy=True, issues=())
+        probe.check_service_http.return_value = ServiceProbeResult(
+            healthy=True,
+            workspace_ip="127.0.0.1",
+            port=32100,
+            latency_ms=1.0,
+            issues=(),
+        )
+        svc = DefaultOrchestratorService(
+            rt,
+            _make_topology(),
+            probe,
+            topology_id=TOPOLOGY_ID,
+            node_id="ec2-autoscale-test",
+            workspace_projects_base=str(ws_root),
+            remote_topology_attach_deferred=True,
+            traefik_routing_host="172.30.1.10",
+        )
+        svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID)
+        env = rt.ensure_container.call_args.kwargs.get("env") or {}
+        assert env["DEVNEST_WORKSPACE_AUTH_MODE"] == "none"
+        assert env["CODE_SERVER_AUTH"] == "none"
+        assert env["DEVNEST_NODE_KEY"] == "ec2-autoscale-test"
+        assert "PASSWORD" not in env
+        assert "DEVNEST_WORKSPACE_PASSWORD" not in env
 
     def test_bring_up_passes_cpu_memory_limits(self, tmp_path: Path) -> None:
         ws_root = tmp_path / "workspaces"

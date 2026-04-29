@@ -17,6 +17,7 @@ class FleetCapacitySnapshot:
     free_slots: int
     pending_workspace_jobs: int
     pending_placement_jobs: int
+    recent_placement_failures: int
     total_allocatable_cpu: float
     free_cpu: float
     total_allocatable_memory_mb: int

@@ -347,7 +347,9 @@ def _cmd_write_body() -> int:
     repo = Path(os.environ.get("DEVNEST_DEPLOY_DIR", os.path.expanduser("~/Devnest"))).resolve()
     out = repo / ".env.integration"
 
-    data: dict[str, str] = {
+    existing = parse_env_file(out) if out.exists() else {}
+    data: dict[str, str] = dict(existing)
+    data.update({
         "DATABASE_URL": db,
         "DEVNEST_COMPOSE_DATABASE_URL": db,
         "DEVNEST_DATABASE_URL": db,
@@ -367,7 +369,7 @@ def _cmd_write_body() -> int:
         "AWS_REGION": region,
         "OAUTH_GITHUB_CLIENT_ID": ogh_id,
         "OAUTH_GITHUB_CLIENT_SECRET": ogh_sec,
-    }
+    })
     if ogo_id and ogo_sec:
         data["OAUTH_GOOGLE_CLIENT_ID"] = ogo_id
         data["OAUTH_GOOGLE_CLIENT_SECRET"] = ogo_sec
@@ -377,6 +379,17 @@ def _cmd_write_body() -> int:
         data["AWS_ACCESS_KEY_ID"] = ak
     if sk:
         data["AWS_SECRET_ACCESS_KEY"] = sk
+    for env_name, target_name in (
+        ("DEVNEST_CI_WRITE_WORKSPACE_CONTAINER_IMAGE", "DEVNEST_WORKSPACE_CONTAINER_IMAGE"),
+        ("DEVNEST_CI_WRITE_EC2_AMI_ID", "DEVNEST_EC2_AMI_ID"),
+        ("DEVNEST_CI_WRITE_EC2_SUBNET_ID", "DEVNEST_EC2_SUBNET_ID"),
+        ("DEVNEST_CI_WRITE_EC2_SECURITY_GROUP_IDS", "DEVNEST_EC2_SECURITY_GROUP_IDS"),
+        ("DEVNEST_CI_WRITE_EC2_INSTANCE_TYPE", "DEVNEST_EC2_INSTANCE_TYPE"),
+        ("DEVNEST_CI_WRITE_EC2_INSTANCE_PROFILE", "DEVNEST_EC2_INSTANCE_PROFILE"),
+    ):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            data[target_name] = value
 
     write_dict(out, data)
     print(f"Wrote {out} (mode 0600).")

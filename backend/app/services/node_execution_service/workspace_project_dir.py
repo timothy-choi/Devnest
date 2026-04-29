@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -590,11 +591,158 @@ def ssh_remote_ensure_workspace_project_dir(
 remote_shell_ensure_workspace_project_dir = ssh_remote_ensure_workspace_project_dir
 
 
-def ensure_code_server_bind_auth_proxy_config(cfg_host: str) -> None:
+def remote_prepare_code_server_bind_mounts(
+    runner: CommandRunner,
+    bundle_host_path: str,
+    *,
+    workspace_id: str,
+    project_host_path: str | None = None,
+    auth_mode: str = "none",
+    launch_mode: str = "resume",
+) -> tuple[str, str]:
+    """Prepare code-server config/data bind sources on a remote Docker host.
+
+    ``bundle_host_path`` is an absolute POSIX path on the execution node. This mirrors the local
+    code-server bind prep, but runs through SSH/SSM so EC2 bind sources are created and chowned on
+    the same host where Docker will mount them.
+    """
+    wid = _validate_workspace_id_for_path(workspace_id)
+    bundle = (bundle_host_path or "").strip().rstrip("/")
+    if not bundle.startswith("/"):
+        raise ValueError("remote workspace bundle path must be an absolute POSIX path")
+    project = (project_host_path or bundle).strip().rstrip("/")
+    if not project.startswith("/"):
+        raise ValueError("remote workspace project path must be an absolute POSIX path")
+    mode = (auth_mode or "none").strip().lower()
+    if mode not in ("none", "password"):
+        mode = "none"
+    launch = (launch_mode or "resume").strip().lower() or "resume"
+    uid, gid = workspace_container_uid_gid()
+    cs_base = posixpath.join(bundle, "code-server")
+    cfg_host = posixpath.join(cs_base, "config")
+    data_host = posixpath.join(cs_base, "data")
+    cfg_yaml = posixpath.join(cfg_host, "config.yaml")
+    cfg_content = (
+        "# DevNest: code-server auth is managed by DEVNEST_WORKSPACE_AUTH_MODE; "
+        "trusted origins for reverse-proxy access.\n"
+        f"auth: {mode}\n"
+        "trusted-origins:\n"
+        "  - '*'\n"
+    )
+    script = "\n".join(
+        [
+            "set -e",
+            f"bundle={shlex.quote(bundle)}",
+            f"project={shlex.quote(project)}",
+            f"cfg={shlex.quote(cfg_host)}",
+            f"data={shlex.quote(data_host)}",
+            f"cfg_yaml={shlex.quote(cfg_yaml)}",
+            f"launch={shlex.quote(launch)}",
+            f"uid={int(uid)}",
+            f"gid={int(gid)}",
+            'mkdir -p "$project" "$cfg" "$data"',
+            'if [ "$launch" = "new" ] && [ -d "$data" ]; then',
+            '  find "$data" -mindepth 1 -maxdepth 1 ! -name extensions -exec rm -rf -- {} +',
+            "fi",
+            f"cat > \"$cfg_yaml\" <<'DEVNEST_CODE_SERVER_CONFIG'\n{cfg_content}DEVNEST_CODE_SERVER_CONFIG",
+            'chown -R "$uid:$gid" "$bundle"',
+            'chmod u+rwX,g+rwX "$bundle" "$cfg" "$data" "$cfg_yaml" || true',
+            'stat -c "bundle_uid=%u bundle_gid=%g bundle_mode=%a path=%n" "$bundle" || true',
+            'stat -c "project_uid=%u project_gid=%g project_mode=%a path=%n" "$project" || true',
+            'stat -c "cfg_uid=%u cfg_gid=%g cfg_mode=%a path=%n" "$cfg" || true',
+            'stat -c "data_uid=%u data_gid=%g data_mode=%a path=%n" "$data" || true',
+            'stat -c "config_yaml_uid=%u config_yaml_gid=%g config_yaml_mode=%a path=%n" "$cfg_yaml" || true',
+        ],
+    )
+    logger.info(
+        "workspace_remote_code_server_host_prepare_start",
+        extra={
+            "workspace_id": wid,
+            "workspace_bundle_host_path": bundle,
+            "workspace_project_host_path": project,
+            "cfg_host": cfg_host,
+            "data_host": data_host,
+            "auth_mode": mode,
+            "launch_mode": launch,
+            "target_uid": uid,
+            "target_gid": gid,
+        },
+    )
+    out = runner.run(["sh", "-lc", script])
+    logger.info(
+        "workspace_remote_code_server_host_prepare_ok",
+        extra={
+            "workspace_id": wid,
+            "workspace_bundle_host_path": bundle,
+            "workspace_project_host_path": project,
+            "cfg_host": cfg_host,
+            "data_host": data_host,
+            "auth_mode": mode,
+            "launch_mode": launch,
+            "target_uid": uid,
+            "target_gid": gid,
+            "ownership_diagnostics": (out or "").strip()[:1000],
+        },
+    )
+    return cfg_host, data_host
+
+
+def log_remote_workspace_config_bind_host_before_docker_start(
+    runner: CommandRunner,
+    workspace_id: str,
+    config_host_path: str,
+) -> None:
+    """Log remote ownership for the code-server config bind source before remote ``docker create``."""
+    wid = (workspace_id or "").strip() or "unknown"
+    cfg = (config_host_path or "").strip()
+    if not cfg:
+        return
+    want_uid, want_gid = workspace_container_uid_gid()
+    script = "\n".join(
+        [
+            "set -e",
+            f"cfg={shlex.quote(cfg)}",
+            'if [ ! -e "$cfg" ]; then echo "exists=false path=$cfg"; exit 0; fi',
+            'stat -c "cfg_uid=%u cfg_gid=%g cfg_mode=%a path=%n" "$cfg" || true',
+            'if [ -f "$cfg/config.yaml" ]; then',
+            '  stat -c "config_yaml_uid=%u config_yaml_gid=%g config_yaml_mode=%a path=%n" "$cfg/config.yaml" || true',
+            "fi",
+        ],
+    )
+    try:
+        out = runner.run(["sh", "-lc", script])
+    except RuntimeError as e:
+        logger.warning(
+            "workspace_config_bind_host_ownership_before_docker_start_failed",
+            extra={
+                "workspace_id": wid,
+                "host_path": cfg,
+                "target_uid": want_uid,
+                "target_gid": want_gid,
+                "execution_target": "remote",
+                "error": str(e),
+            },
+        )
+        return
+    logger.info(
+        "workspace_config_bind_host_ownership_before_docker_start",
+        extra={
+            "workspace_id": wid,
+            "host_path": cfg,
+            "target_uid": want_uid,
+            "target_gid": want_gid,
+            "execution_target": "remote",
+            "ownership_diagnostics": (out or "").strip()[:1000],
+        },
+    )
+
+
+def ensure_code_server_bind_auth_proxy_config(cfg_host: str, *, auth_mode: str = "none") -> None:
     """Seed or patch bind-mounted ``config.yaml`` for gateway + Traefik access.
 
-    - ``auth: none``: DevNest ForwardAuth / sessions own access control; persisted ``password`` auth
-      prompts users and fights the intended model.
+    - ``auth: none`` by default: DevNest ForwardAuth / sessions own access control; persisted
+      ``password`` auth prompts users and fights the intended model.
+    - ``auth: password`` only when explicitly configured by operators.
     - ``trusted-origins``: avoids VS Code origin checks hanging when the browser ``Host`` is the
       public workspace hostname behind a reverse proxy.
     """
@@ -609,10 +757,13 @@ def ensure_code_server_bind_auth_proxy_config(cfg_host: str) -> None:
             extra={"cfg_host": host_dir, "error": str(e)},
         )
         return
+    mode = (auth_mode or "none").strip().lower()
+    if mode not in ("none", "password"):
+        mode = "none"
     path = os.path.join(host_dir, "config.yaml")
     minimal = (
-        "# DevNest: auth delegated to gateway; trusted origins for reverse-proxy access.\n"
-        "auth: none\n"
+        "# DevNest: code-server auth is managed by DEVNEST_WORKSPACE_AUTH_MODE; trusted origins for reverse-proxy access.\n"
+        f"auth: {mode}\n"
         "trusted-origins:\n"
         "  - '*'\n"
     )
@@ -626,12 +777,15 @@ def ensure_code_server_bind_auth_proxy_config(cfg_host: str) -> None:
             content = f.read()
         changed = False
         new_content, n_subs = re.subn(
-            r"(?mi)^(\s*)auth:\s*password\b.*$",
-            r"\1auth: none",
+            r"(?mi)^(\s*)auth:\s*(none|password)\b.*$",
+            rf"\1auth: {mode}",
             content,
         )
         if n_subs:
             content = new_content
+            changed = True
+        else:
+            content = f"auth: {mode}\n" + content
             changed = True
         if not re.search(r"(?mi)^\s*trusted-origins\s*:", content):
             content = content.rstrip() + "\n\ntrusted-origins:\n  - '*'\n"

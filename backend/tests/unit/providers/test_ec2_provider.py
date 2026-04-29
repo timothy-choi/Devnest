@@ -421,6 +421,7 @@ def test_register_ec2_instance_inserts_row(sqlite_engine) -> None:
             assert node.last_synced_at is not None
             assert node.schedulable is True
             assert node.execution_mode == ExecutionNodeExecutionMode.SSM_DOCKER.value
+            assert node.default_topology_id == 1
     stubber.deactivate()
 
 

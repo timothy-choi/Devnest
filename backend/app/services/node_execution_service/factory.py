@@ -116,7 +116,9 @@ def _topology_ip_should_use_host_nsenter() -> bool:
 def _ec2_traefik_routing_host(node: ExecutionNode) -> str | None:
     if (node.provider_type or "").strip().lower() != ExecutionNodeProviderType.EC2.value:
         return None
-    h = _execution_connect_host(node)
+    # Traefik runs in the control-plane/gateway network, not on the remote Docker host.
+    # For EC2 nodes it must target the instance private IP plus the published Docker host port.
+    h = (node.private_ip or "").strip()
     return h or None
 
 
@@ -144,6 +146,7 @@ def _bundle_local_docker() -> NodeExecutionBundle:
         _ensure_project_dir=default_local_ensure_workspace_project_dir,
         runtime_adapter=None,
         traefik_routing_host=None,
+        defer_topology_attach=False,
     )
 
 
@@ -196,6 +199,7 @@ def _bundle_ssm_docker(node: ExecutionNode) -> NodeExecutionBundle:
         _ensure_project_dir=_ensure,
         runtime_adapter=runtime,
         traefik_routing_host=_ec2_traefik_routing_host(node),
+        defer_topology_attach=True,
     )
 
 
@@ -248,4 +252,5 @@ def _bundle_ssh_docker(node: ExecutionNode) -> NodeExecutionBundle:
         _ensure_project_dir=_ensure,
         runtime_adapter=None,
         traefik_routing_host=_ec2_traefik_routing_host(node),
+        defer_topology_attach=True,
     )

@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
@@ -48,7 +49,10 @@ from app.services.orchestrator_service.errors import (
     WorkspaceUpdateError,
 )
 from app.services.orchestrator_service.interfaces import OrchestratorService
-from app.services.autoscaler_service.service import maybe_provision_on_no_schedulable_capacity
+from app.services.autoscaler_service.service import (
+    maybe_provision_on_no_schedulable_capacity,
+    record_placement_failed_scale_out_signal,
+)
 from app.services.cleanup_service import (
     CLEANUP_SCOPE_BRINGUP_ROLLBACK,
     CLEANUP_SCOPE_STOP_INCOMPLETE,
@@ -60,7 +64,11 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
 from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
-from app.services.placement_service.models import ExecutionNode
+from app.services.placement_service.models import (
+    ExecutionNode,
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+)
 from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
 from app.services.gateway_client.workspace_route_upstream import traefik_upstream_for_workspace_gateway
@@ -68,10 +76,14 @@ from app.services.orchestrator_service.results import (
     WorkspaceBringUpResult,
     WorkspaceDeleteResult,
     WorkspaceRestartResult,
+    WorkspaceSnapshotOperationResult,
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
 from app.services.storage.factory import get_snapshot_storage_provider
+from app.services.storage.s3_storage import S3SnapshotStorageProvider
+from app.services.node_execution_service.ssm_remote_command_runner import SsmRemoteCommandRunner
+from app.services.orchestrator_service.snapshot_filesystem import export_running_workspace_tar_to_s3_via_ssm
 from app.services.workspace_service.api.schemas.workspace_schemas import get_workspace_features
 from app.services.workspace_service.models import (
     Workspace,
@@ -134,6 +146,12 @@ _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
 _ERROR_CODE_ORCH = "ORCHESTRATOR_EXCEPTION"
 _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
+_REMOTE_EXECUTION_MODES = frozenset(
+    {
+        ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ExecutionNodeExecutionMode.SSH_DOCKER.value,
+    }
+)
 
 
 def _clear_runtime_capacity_reservation(session: Session, workspace_id: int) -> None:
@@ -184,6 +202,111 @@ def _fail_job_from_placement(
     _touch_workspace(session, ws)
     assert ws.workspace_id is not None
     _clear_runtime_capacity_reservation(session, ws.workspace_id)
+
+
+def _is_remote_ec2_ssm_snapshot_node(node: ExecutionNode | None) -> bool:
+    if node is None:
+        return False
+    provider = (node.provider_type or "").strip().lower()
+    mode = (node.execution_mode or "").strip().lower()
+    return provider == ExecutionNodeProviderType.EC2.value or mode == ExecutionNodeExecutionMode.SSM_DOCKER.value
+
+
+def _export_remote_ec2_snapshot_to_s3(
+    *,
+    workspace_id: int,
+    snapshot_id: int,
+    container_id: str,
+    node: ExecutionNode,
+    storage: S3SnapshotStorageProvider,
+    correlation_id: str | None,
+) -> WorkspaceSnapshotOperationResult:
+    iid = (node.provider_instance_id or "").strip()
+    region = (node.region or getattr(get_settings(), "aws_region", "") or "").strip()
+    if not iid:
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=str(workspace_id),
+            success=False,
+            issues=["snapshot:remote:ssm_missing_instance_id"],
+        )
+    if not region:
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=str(workspace_id),
+            success=False,
+            issues=["snapshot:remote:ssm_missing_region"],
+        )
+    s3_uri = storage.storage_uri(workspace_id=workspace_id, snapshot_id=snapshot_id)
+    log_event(
+        logger,
+        "snapshot.remote.started",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id,
+        workspace_snapshot_id=snapshot_id,
+        node_key=node.node_key,
+        instance_id=iid,
+        s3_uri=s3_uri,
+    )
+    try:
+        ok, size_bytes, issues = export_running_workspace_tar_to_s3_via_ssm(
+            ssm_runner=SsmRemoteCommandRunner(instance_id=iid, region=region),
+            workspace_id=workspace_id,
+            snapshot_id=snapshot_id,
+            container_id=container_id,
+            s3_uri=s3_uri,
+        )
+    except Exception as e:
+        logger.exception(
+            "snapshot.remote.failed",
+            extra={
+                "workspace_id": workspace_id,
+                "workspace_snapshot_id": snapshot_id,
+                "node_key": node.node_key,
+                "instance_id": iid,
+            },
+        )
+        return WorkspaceSnapshotOperationResult(
+            workspace_id=str(workspace_id),
+            success=False,
+            issues=[f"snapshot:remote:exception:{e}"],
+        )
+    if not ok:
+        logger.error(
+            "snapshot.remote.failed",
+            extra={
+                "workspace_id": workspace_id,
+                "workspace_snapshot_id": snapshot_id,
+                "node_key": node.node_key,
+                "instance_id": iid,
+                "issues": issues,
+            },
+        )
+        return WorkspaceSnapshotOperationResult(workspace_id=str(workspace_id), success=False, issues=issues)
+    log_event(
+        logger,
+        "snapshot.remote.archive.created",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id,
+        workspace_snapshot_id=snapshot_id,
+        node_key=node.node_key,
+        instance_id=iid,
+        size_bytes=size_bytes,
+    )
+    log_event(
+        logger,
+        "snapshot.remote.upload.succeeded",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id,
+        workspace_snapshot_id=snapshot_id,
+        node_key=node.node_key,
+        instance_id=iid,
+        s3_uri=s3_uri,
+    )
+    return WorkspaceSnapshotOperationResult(
+        workspace_id=str(workspace_id),
+        success=True,
+        size_bytes=size_bytes,
+        issues=None,
+    )
 
 
 def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, exc: BaseException) -> None:
@@ -491,27 +614,40 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
     session.add(rt)
 
 
-def _clear_runtime_after_delete(session: Session, workspace_id: int) -> None:
+def _clear_runtime_after_delete(
+    session: Session,
+    workspace_id: int,
+    *,
+    workspace_job_id: int | None = None,
+) -> None:
     """Tombstone runtime row when workspace is deleted (container cleared, state ``deleted``)."""
     row = session.exec(
         select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id),
     ).first()
     if row is None:
+        logger.info(
+            "workspace.delete.runtime_missing_treated_as_success",
+            extra={
+                "workspace_id": workspace_id,
+                "workspace_job_id": workspace_job_id,
+                "phase": "post_orchestrator_delete_complete",
+            },
+        )
         return
-    ts = _now()
-    row.node_id = None
-    row.topology_id = None
-    row.container_id = None
-    row.container_state = "deleted"
-    row.internal_endpoint = None
-    row.gateway_route_target = None
-    row.reserved_cpu = 0.0
-    row.reserved_memory_mb = 0
-    row.reserved_disk_mb = 0
-    row.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
-    row.last_heartbeat_at = None
-    row.updated_at = ts
-    session.add(row)
+    session.delete(row)
+
+
+def _delete_result_container_was_missing(result: WorkspaceDeleteResult) -> bool:
+    if (result.container_id or "").strip() and (result.container_deleted is True):
+        state = ""
+        for issue in result.issues or []:
+            state += f" {issue}".lower()
+        return "not found" in state or "missing" in state
+    return any(
+        "container" in str(issue).lower()
+        and ("not found" in str(issue).lower() or "missing" in str(issue).lower())
+        for issue in result.issues or []
+    )
 
 
 def _mark_job_running(session: Session, job: WorkspaceJob) -> None:
@@ -586,6 +722,81 @@ def _touch_workspace(session: Session, ws: Workspace) -> None:
     session.add(ws)
 
 
+def _route_target_port(value: str | None) -> int | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
+    try:
+        if parsed.port is not None:
+            return int(parsed.port)
+    except ValueError:
+        return None
+    host_port = (parsed.netloc or parsed.path or "").rsplit(":", 1)
+    if len(host_port) == 2 and host_port[1].isdigit():
+        return int(host_port[1])
+    return None
+
+
+def _remote_gateway_route_target_for_node(
+    session: Session,
+    *,
+    workspace_id: int | None = None,
+    node_key: str | None,
+    execution_node_id: int | None = None,
+    gateway_route_target: str | None,
+    internal_endpoint: str | None,
+) -> str | None:
+    """
+    For EC2/remote Docker nodes, Traefik must reach the execution host's published port.
+
+    The orchestrator may still report ``internal_endpoint=127.0.0.1:<published_port>`` because
+    probes run on the execution host via SSM/SSH. Convert that to
+    ``http://{execution_node.private_ip}:{published_port}`` for route-admin.
+    """
+    key = (node_key or "").strip()
+    node: ExecutionNode | None = None
+    if key:
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+    if node is None and execution_node_id is not None:
+        node = session.get(ExecutionNode, int(execution_node_id))
+    if node is None:
+        return (gateway_route_target or "").strip() or None
+
+    execution_mode = (node.execution_mode or "").strip()
+    provider_type = (node.provider_type or "").strip()
+    is_remote = provider_type == ExecutionNodeProviderType.EC2.value or execution_mode in _REMOTE_EXECUTION_MODES
+    if not is_remote:
+        return (gateway_route_target or "").strip() or None
+
+    private_ip = (node.private_ip or "").strip()
+    if not private_ip:
+        raise WorkspaceBringUpError(
+            "remote EC2 route target requires execution_node.private_ip "
+            f"(node_key={node.node_key!r}, execution_node_id={node.id!r})",
+        )
+    port = _route_target_port(gateway_route_target) or _route_target_port(internal_endpoint)
+    if port is None:
+        raise WorkspaceBringUpError(
+            "remote EC2 route target requires a published IDE host port "
+            f"(node_key={node.node_key!r}, gateway_route_target={gateway_route_target!r}, "
+            f"internal_endpoint={internal_endpoint!r})",
+        )
+    selected = f"{private_ip}:{port}"
+    logger.info(
+        "workspace_remote_route_target_selected",
+        extra={
+            "workspace_id": workspace_id,
+            "node_key": (node.node_key or key or None),
+            "execution_mode": execution_mode,
+            "private_ip": private_ip,
+            "published_port": port,
+            "gateway_route_target": selected,
+        },
+    )
+    return selected
+
+
 def _gateway_default_public_host(workspace_id: int, base_domain: str) -> str:
     dom = (base_domain or "app.devnest.local").strip().strip(".")
     # Must match ``GET /internal/gateway/auth`` host parsing (``ws-{id}.<base_domain>``).
@@ -616,16 +827,38 @@ def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
             settings.devnest_base_domain,
         )
         nk = ((rt.node_id or "").strip() or None)
+        node = None
+        if nk:
+            node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+        execution_mode = (getattr(node, "execution_mode", None) or "").strip() if node is not None else None
+        provider_type = (getattr(node, "provider_type", None) or "").strip() if node is not None else None
+        topology_skipped_for_remote = bool(
+            provider_type == ExecutionNodeProviderType.EC2.value or execution_mode in _REMOTE_EXECUTION_MODES
+        )
         logger.info(
             "gateway_route_register_attempt",
             extra={
                 "workspace_id": wid,
                 "public_host": public,
                 "node_key": nk,
+                "execution_mode": execution_mode,
                 "execution_node_id": ws.execution_node_id,
+                "gateway_route_target": upstream,
                 "gateway_upstream_target": upstream,
+                "topology_skipped_for_remote": topology_skipped_for_remote,
             },
         )
+        if topology_skipped_for_remote:
+            logger.info(
+                "remote_topology_route_target_selected",
+                extra={
+                    "workspace_id": wid,
+                    "node_key": nk,
+                    "execution_mode": execution_mode,
+                    "gateway_route_target": upstream,
+                    "topology_skipped_for_remote": True,
+                },
+            )
         DevnestGatewayClient.from_settings(settings).register_route(
             str(wid),
             upstream,
@@ -782,6 +1015,14 @@ def _finalize_runtime_running_success(
     """
     wid = ws.workspace_id
     assert wid is not None
+    gateway_route_target = _remote_gateway_route_target_for_node(
+        session,
+        workspace_id=wid,
+        node_key=node_id,
+        execution_node_id=ws.execution_node_id,
+        gateway_route_target=gateway_route_target,
+        internal_endpoint=internal_endpoint,
+    )
     _apply_runtime_bringup_like(
         session,
         wid,
@@ -801,7 +1042,7 @@ def _finalize_runtime_running_success(
     _mark_job_succeeded(session, job)
     ws.status = WorkspaceStatus.RUNNING.value
     _workspace_clear_errors(ws)
-    ws.endpoint_ref = internal_endpoint or ws.endpoint_ref
+    ws.endpoint_ref = gateway_route_target or internal_endpoint or ws.endpoint_ref
     ws.last_started = _now()
     _touch_workspace(session, ws)
     revoke_all_workspace_sessions(
@@ -946,56 +1187,128 @@ def _finalize_stop_result(session: Session, ws: Workspace, job: WorkspaceJob, re
 def _finalize_delete_result(session: Session, ws: Workspace, job: WorkspaceJob, result: WorkspaceDeleteResult) -> None:
     wid = ws.workspace_id
     assert wid is not None
-    if result.success:
-        _mark_job_succeeded(session, job)
-        ws.status = WorkspaceStatus.DELETED.value
-        _workspace_clear_errors(ws)
-        gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
-        _clear_runtime_after_delete(session, wid)
-        _touch_workspace(session, ws)
-        revoke_all_workspace_sessions(
-            session,
-            wid,
-            reason="worker.delete",
-            correlation_id=job.correlation_id,
+    logger.info(
+        "workspace.delete.idempotent_success",
+        extra={
+            "workspace_id": wid,
+            "workspace_job_id": job.workspace_job_id,
+            "orchestrator_success": bool(result.success),
+            "container_deleted": result.container_deleted,
+            "topology_detached": result.topology_detached,
+            "topology_deleted": result.topology_deleted,
+            "issues": list(result.issues or []),
+        },
+    )
+    if _delete_result_container_was_missing(result):
+        logger.info(
+            "workspace.delete.container_missing_treated_as_success",
+            extra={
+                "workspace_id": wid,
+                "workspace_job_id": job.workspace_job_id,
+                "container_id": result.container_id,
+                "issues": list(result.issues or []),
+            },
         )
-        _gateway_try_deregister(
-            wid,
-            public_host=gw_meta.get("public_host"),
-            node_key=gw_meta.get("node_key"),
-            gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
-        )
-        record_audit(
-            session,
-            action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
-            resource_type="workspace",
-            resource_id=wid,
-            actor_user_id=job.requested_by_user_id,
-            actor_type=AuditActorType.SYSTEM.value,
-            outcome=AuditOutcome.SUCCESS.value,
-            workspace_id=wid,
-            job_id=job.workspace_job_id,
-            correlation_id=job.correlation_id,
-            metadata={"job_type": job.job_type, "new_status": WorkspaceStatus.DELETED.value},
-        )
-        record_usage(
-            session,
-            workspace_id=wid,
-            owner_user_id=int(ws.owner_user_id),
-            event_type=UsageEventType.WORKSPACE_DELETED.value,
-            job_id=job.workspace_job_id,
-            correlation_id=job.correlation_id,
-        )
-        return
-
-    msg = _format_issues(result.issues) or "Delete completed without success"
-    _resolve_orchestrator_result_failure(
+    _mark_job_succeeded(session, job)
+    ws.status = WorkspaceStatus.DELETED.value
+    _workspace_clear_errors(ws)
+    gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
+    _clear_runtime_after_delete(session, wid, workspace_job_id=job.workspace_job_id)
+    _touch_workspace(session, ws)
+    revoke_all_workspace_sessions(
         session,
-        ws,
-        job,
-        message=msg,
-        stage=FailureStage.CONTAINER,
-        retryable=False,
+        wid,
+        reason="worker.delete",
+        correlation_id=job.correlation_id,
+    )
+    _gateway_try_deregister(
+        wid,
+        public_host=gw_meta.get("public_host"),
+        node_key=gw_meta.get("node_key"),
+        gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
+        resource_type="workspace",
+        resource_id=wid,
+        actor_user_id=job.requested_by_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        metadata={
+            "job_type": job.job_type,
+            "new_status": WorkspaceStatus.DELETED.value,
+            "orchestrator_success": bool(result.success),
+        },
+    )
+    record_usage(
+        session,
+        workspace_id=wid,
+        owner_user_id=int(ws.owner_user_id),
+        event_type=UsageEventType.WORKSPACE_DELETED.value,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+    )
+    return
+
+
+def _finalize_delete_runtime_missing_idempotent(session: Session, ws: Workspace, job: WorkspaceJob) -> None:
+    """Complete DELETE when the runtime row is already gone before worker orchestration starts."""
+    wid = ws.workspace_id
+    assert wid is not None
+    logger.info(
+        "workspace.delete.runtime_missing_treated_as_success",
+        extra={
+            "workspace_id": wid,
+            "workspace_job_id": job.workspace_job_id,
+            "job_type": job.job_type,
+            "previous_workspace_status": ws.status,
+        },
+    )
+    _mark_job_succeeded(session, job)
+    ws.status = WorkspaceStatus.DELETED.value
+    _workspace_clear_errors(ws)
+    gw_meta = _gateway_route_telemetry_before_runtime_clear(session, ws, wid)
+    _touch_workspace(session, ws)
+    revoke_all_workspace_sessions(
+        session,
+        wid,
+        reason="worker.delete.runtime_missing",
+        correlation_id=job.correlation_id,
+    )
+    _gateway_try_deregister(
+        wid,
+        public_host=gw_meta.get("public_host"),
+        node_key=gw_meta.get("node_key"),
+        gateway_upstream_target=gw_meta.get("gateway_upstream_target"),
+    )
+    record_audit(
+        session,
+        action=AuditAction.WORKSPACE_JOB_SUCCEEDED.value,
+        resource_type="workspace",
+        resource_id=wid,
+        actor_user_id=job.requested_by_user_id,
+        actor_type=AuditActorType.SYSTEM.value,
+        outcome=AuditOutcome.SUCCESS.value,
+        workspace_id=wid,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
+        metadata={
+            "job_type": job.job_type,
+            "new_status": WorkspaceStatus.DELETED.value,
+            "idempotent_runtime_missing": True,
+        },
+    )
+    record_usage(
+        session,
+        workspace_id=wid,
+        owner_user_id=int(ws.owner_user_id),
+        event_type=UsageEventType.WORKSPACE_DELETED.value,
+        job_id=job.workspace_job_id,
+        correlation_id=job.correlation_id,
     )
 
 
@@ -1147,11 +1460,13 @@ def _execute_snapshot_create_job(
     storage = get_snapshot_storage_provider()
     archive_path = storage.archive_path(workspace_id=wid, snapshot_id=sid)
     rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+    execution_node = session.get(ExecutionNode, int(ws.execution_node_id)) if ws.execution_node_id is not None else None
     snapshot_cid: str | None = None
     if ws.status == WorkspaceStatus.RUNNING.value and rt is not None:
         st = (rt.container_state or "").strip().lower()
         if st == "running" and (rt.container_id or "").strip():
             snapshot_cid = str(rt.container_id).strip()
+    remote_s3_uploaded = False
 
     log_event(
         logger,
@@ -1167,17 +1482,33 @@ def _execute_snapshot_create_job(
         snapshot_container_id=snapshot_cid,
     )
 
-    res = orchestrator.export_workspace_filesystem_snapshot(
-        workspace_id=wid_str,
-        project_storage_key=ws.project_storage_key,
-        archive_path=archive_path,
-        container_id=snapshot_cid,
-    )
+    if (
+        snapshot_cid
+        and isinstance(storage, S3SnapshotStorageProvider)
+        and _is_remote_ec2_ssm_snapshot_node(execution_node)
+    ):
+        assert execution_node is not None
+        res = _export_remote_ec2_snapshot_to_s3(
+            workspace_id=wid,
+            snapshot_id=sid,
+            container_id=snapshot_cid,
+            node=execution_node,
+            storage=storage,
+            correlation_id=job.correlation_id,
+        )
+        remote_s3_uploaded = bool(res.success)
+    else:
+        res = orchestrator.export_workspace_filesystem_snapshot(
+            workspace_id=wid_str,
+            project_storage_key=ws.project_storage_key,
+            archive_path=archive_path,
+            container_id=snapshot_cid,
+        )
 
     if res.success:
         # For object-storage providers (e.g. S3), upload the local staging archive to remote
         # storage after the orchestrator writes it.  Local providers are a no-op here.
-        if hasattr(storage, "upload_archive"):
+        if hasattr(storage, "upload_archive") and not remote_s3_uploaded:
             try:
                 upload_kw: dict[str, object] = {}
                 src_nk: str | None = None
@@ -2037,6 +2368,12 @@ def _process_next_queued_job_return_id(
                 failure_code="missing_workspace",
             )
             return jid
+        if job.job_type == WorkspaceJobType.DELETE.value:
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            if rt is None:
+                _finalize_delete_runtime_missing_idempotent(session, ws, job)
+                _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
+                return jid
         try:
             if job.job_type == WorkspaceJobType.REPO_IMPORT.value:
                 from app.services.placement_service.orchestrator_binding import (
@@ -2057,6 +2394,14 @@ def _process_next_queued_job_return_id(
                     workspace_job_id=jid,
                     job_type=job.job_type,
                     detail=str(e)[:500],
+                )
+                record_placement_failed_scale_out_signal(
+                    session,
+                    workspace_id=wid,
+                    workspace_job_id=jid,
+                    job_type=job.job_type,
+                    detail=str(e),
+                    correlation_id=job.correlation_id,
                 )
                 try:
                     maybe_provision_on_no_schedulable_capacity(session)
@@ -2326,6 +2671,14 @@ def run_queued_workspace_job_by_id(
                         workspace_job_id=jid,
                         job_type=job.job_type,
                         detail=str(e)[:500],
+                    )
+                    record_placement_failed_scale_out_signal(
+                        work,
+                        workspace_id=wid,
+                        workspace_job_id=jid,
+                        job_type=job.job_type,
+                        detail=str(e),
+                        correlation_id=job.correlation_id,
                     )
                     try:
                         maybe_provision_on_no_schedulable_capacity(work)

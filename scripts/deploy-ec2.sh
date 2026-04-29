@@ -4,8 +4,8 @@
 #   NEXT_PUBLIC_API_BASE_URL — e.g. http://<public-ip>:8000 for the browser UI build
 #   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it (via DEVNEST_COMPOSE_DATABASE_URL)
 #     instead of local compose Postgres
-#   ${REPO_DIR}/.env.integration — optional; when present, sourced into this shell before validation and passed to
-#     ``docker compose --env-file`` so RDS, S3, and OAuth vars survive non-interactive SSH reliably.
+#   ${HOME}/.devnest-env-integration.backup — required source of truth restored to
+#     ${REPO_DIR}/.env.integration after every git reset (see scripts/setup-env.sh).
 #   DEVNEST_DEPLOY_DIR — repo path (default: ~/Devnest)
 #   DEVNEST_DEPLOY_REPO_URL — git remote (default: upstream Devnest URL)
 #   DEVNEST_DEPLOY_GIT_REF — when set (e.g. CI ``github.sha``), check out this commit/tag after fetch instead of
@@ -30,16 +30,12 @@ _devnest_load_integration_env_file() {
 }
 
 _devnest_compose() {
-  # Cwd is ${REPO_DIR}; use an absolute --env-file so compose never misses integration env after chdir/cron.
-  if [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
-    docker compose --env-file "${INTEGRATION_ENV_FILE}" -f "${COMPOSE}" "$@"
-    return
-  fi
-  if [[ -n "${DATABASE_URL:-}" ]]; then
-    echo "ERROR: ${INTEGRATION_ENV_FILE} is missing but DATABASE_URL is set (RDS deploy requires a generated integration env file)." >&2
+  # Cwd is ${REPO_DIR}; always use an absolute --env-file so compose never misses integration env after chdir/cron.
+  if [[ ! -f "${INTEGRATION_ENV_FILE}" ]]; then
+    echo "ERROR: ${INTEGRATION_ENV_FILE} is missing; run scripts/setup-env.sh before docker compose." >&2
     exit 1
   fi
-  docker compose -f "${COMPOSE}" "$@"
+  docker compose --env-file "${INTEGRATION_ENV_FILE}" -f "${COMPOSE}" "$@"
 }
 
 _devnest_deploy_env_presence() {
@@ -65,6 +61,9 @@ _devnest_deploy_env_presence() {
   if [[ -n "${DEVNEST_BASE_DOMAIN:-}" ]]; then echo "DEVNEST_BASE_DOMAIN: set"; else echo "DEVNEST_BASE_DOMAIN: missing"; fi
   if [[ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_API_BASE_URL: set"; else echo "NEXT_PUBLIC_API_BASE_URL: missing"; fi
   if [[ -n "${NEXT_PUBLIC_APP_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_APP_BASE_URL: set"; else echo "NEXT_PUBLIC_APP_BASE_URL: missing"; fi
+  if [[ -n "${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-}" ]]; then echo "DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE}"; else echo "DEVNEST_WORKSPACE_CONTAINER_IMAGE: missing"; fi
+  if [[ -n "${DEVNEST_EC2_AMI_ID:-}" ]]; then echo "DEVNEST_EC2_AMI_ID: set"; else echo "DEVNEST_EC2_AMI_ID: missing"; fi
+  if [[ -n "${DEVNEST_EC2_SUBNET_ID:-}" ]]; then echo "DEVNEST_EC2_SUBNET_ID: set"; else echo "DEVNEST_EC2_SUBNET_ID: missing"; fi
   echo "---"
 }
 
@@ -209,6 +208,12 @@ else
   git reset --hard "origin/${BRANCH}"
 fi
 
+bash "${REPO_DIR}/scripts/setup-env.sh"
+set -a
+# shellcheck disable=SC1091
+source "${INTEGRATION_ENV_FILE}"
+set +a
+
 _writer_py="${REPO_DIR}/scripts/write_integration_deploy_env.py"
 if [[ -n "${DATABASE_URL:-}" ]] && [[ -f "${INTEGRATION_ENV_FILE}" ]]; then
   if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "${_writer_py}" ]]; then
@@ -233,19 +238,7 @@ fi
 _devnest_deploy_env_presence
 
 _devnest_compose down || true
-# Build workspace-image explicitly so devnest/workspace:latest always reflects Dockerfile.workspace
-# on this host (Compose may otherwise reuse a stale :latest if cache is not invalidated).
-_devnest_compose build workspace-image
-# --force-recreate ensures services pick up compose changes (e.g. pid: host for Linux topology attach).
-if [[ -n "${DATABASE_URL:-}" ]]; then
-  echo "Skipping local postgres service because DATABASE_URL points to an external database."
-  _devnest_compose up -d route-admin traefik
-  _devnest_compose up -d --build --force-recreate --no-deps backend
-  _devnest_compose up -d --build --force-recreate --no-deps workspace-worker
-  _devnest_compose up -d --build --force-recreate --no-deps frontend
-else
-  _devnest_compose up -d --build --force-recreate
-fi
+_devnest_compose up -d --build
 _devnest_compose ps
 
 echo "--- workspace image (expected: Entrypoint = [\"/usr/bin/entrypoint.sh\"] only; Cmd without code-server) ---"

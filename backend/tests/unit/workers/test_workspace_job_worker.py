@@ -17,6 +17,12 @@ from app.services.orchestrator_service.results import (
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
+from app.services.placement_service.models import (
+    ExecutionNode,
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+    ExecutionNodeStatus,
+)
 from app.services.notification_service.models import Notification, NotificationDelivery, NotificationRecipient
 from app.services.workspace_service.models import (
     Workspace,
@@ -464,6 +470,194 @@ class TestDispatchCreate:
             )
             assert len(deliveries) == 3
 
+    def test_create_persists_gateway_route_target_as_workspace_endpoint(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+        gateway_target = "http://10.0.1.20:32771"
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            out = _bringup_ok(str(wid))
+            out.internal_endpoint = "127.0.0.1:32771"
+            out.gateway_route_target = gateway_target
+            orch.bring_up_workspace_runtime.return_value = out
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert ws is not None
+            assert rt is not None
+            assert ws.endpoint_ref == gateway_target
+            assert rt.internal_endpoint == "127.0.0.1:32771"
+            assert rt.gateway_route_target == gateway_target
+
+    def test_ec2_create_rewrites_loopback_gateway_target_to_private_ip(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            session.add(
+                ExecutionNode(
+                    node_key=NODE_ID,
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                    status=ExecutionNodeStatus.READY.value,
+                    schedulable=True,
+                    private_ip="10.0.1.20",
+                )
+            )
+            ws = _seed_workspace(session, owner_user_id)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            out = _bringup_ok(str(wid))
+            out.internal_endpoint = "127.0.0.1:32779"
+            out.gateway_route_target = "http://127.0.0.1:32779"
+            orch.bring_up_workspace_runtime.return_value = out
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert ws is not None
+            assert rt is not None
+            assert ws.endpoint_ref == "10.0.1.20:32779"
+            assert rt.gateway_route_target == "10.0.1.20:32779"
+            assert rt.internal_endpoint == "127.0.0.1:32779"
+
+    def test_ec2_create_rewrites_loopback_gateway_target_using_execution_node_id_fallback(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            node = ExecutionNode(
+                node_key="ec2-autoscale-daabec280d13",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                private_ip="10.0.7.81",
+            )
+            session.add(node)
+            session.flush()
+            ws = _seed_workspace(session, owner_user_id)
+            ws.execution_node_id = node.id
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.add(ws)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            out = _bringup_ok(str(wid))
+            out.node_id = "stale-or-missing-node-key"
+            out.internal_endpoint = "127.0.0.1:32781"
+            out.gateway_route_target = "127.0.0.1:32781"
+            orch.bring_up_workspace_runtime.return_value = out
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert ws is not None
+            assert rt is not None
+            assert ws.endpoint_ref == "10.0.7.81:32781"
+            assert rt.gateway_route_target == "10.0.7.81:32781"
+            assert rt.internal_endpoint == "127.0.0.1:32781"
+
+    def test_ec2_create_missing_private_ip_fails_without_loopback_route(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            node = ExecutionNode(
+                node_key=NODE_ID,
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                private_ip=None,
+            )
+            session.add(node)
+            session.flush()
+            ws = _seed_workspace(session, owner_user_id)
+            ws.execution_node_id = node.id
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+            )
+            session.add(ws)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            out = _bringup_ok(str(wid))
+            out.node_id = NODE_ID
+            out.internal_endpoint = "127.0.0.1:32783"
+            out.gateway_route_target = "127.0.0.1:32783"
+            orch.bring_up_workspace_runtime.return_value = out
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = session.get(Workspace, wid)
+            job = session.exec(select(WorkspaceJob).where(WorkspaceJob.workspace_id == wid)).first()
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert ws is not None
+            assert job is not None
+            assert job.status == WorkspaceJobStatus.FAILED.value
+            assert "execution_node.private_ip" in (job.error_msg or "")
+            assert ws.status == WorkspaceStatus.ERROR.value
+            if rt is not None:
+                assert rt.gateway_route_target != "127.0.0.1:32783"
+
     def test_create_dispatch_merges_encrypted_workspace_secrets_into_runtime_env(
         self,
         workspace_job_worker_engine,
@@ -692,15 +886,174 @@ class TestDispatchDelete:
             rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
             assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
             assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
-            assert rt is not None
-            assert rt.node_id is None
-            assert rt.topology_id is None
-            assert rt.container_id is None
-            assert rt.container_state == "deleted"
-            assert rt.internal_endpoint is None
-            assert rt.reserved_cpu == 0.0
-            assert rt.reserved_memory_mb == 0
-            assert rt.reserved_disk_mb == 0
+            assert rt is None
+
+    def test_delete_running_ec2_workspace_removes_runtime(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.RUNNING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            session.add(
+                ExecutionNode(
+                    node_key="ec2-node-1",
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                    status=ExecutionNodeStatus.READY.value,
+                    schedulable=True,
+                    default_topology_id=1,
+                ),
+            )
+            _seed_runtime(session, wid, node_id="ec2-node-1", container_id="ec2-ctr")
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.delete_workspace_runtime.return_value = _delete_ok(str(wid))
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert ws.last_error_message is None
+            assert rt is None
+
+    def test_delete_error_workspace_with_runtime_row_succeeds(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.ERROR.value)
+            ws.last_error_code = "old_error"
+            ws.last_error_message = "delete should clear this"
+            session.add(ws)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid)
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.delete_workspace_runtime.return_value = _delete_ok(str(wid))
+            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert ws.last_error_code is None
+            assert ws.last_error_message is None
+            assert rt is None
+
+    def test_delete_error_workspace_with_missing_runtime_is_idempotent(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.ERROR.value)
+            ws.last_error_code = "old_error"
+            ws.last_error_message = "runtime disappeared after delete"
+            session.add(ws)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        def _unexpected_orchestrator(*_args: object, **_kwargs: object) -> OrchestratorService:
+            raise AssertionError("missing-runtime delete should not build an orchestrator")
+
+        with Session(workspace_job_worker_engine) as session:
+            with caplog.at_level("INFO"):
+                run_pending_jobs(session, get_orchestrator=_unexpected_orchestrator, limit=1)
+            session.commit()
+
+        orch.delete_workspace_runtime.assert_not_called()
+        assert "workspace.delete.runtime_missing_treated_as_success" in caplog.text
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert job.error_msg is None
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert ws.last_error_code is None
+            assert ws.last_error_message is None
+            assert rt is None
+
+    def test_delete_already_deleted_workspace_is_idempotent(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+    ) -> None:
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.DELETED.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        def _unexpected_orchestrator(*_args: object, **_kwargs: object) -> OrchestratorService:
+            raise AssertionError("already-deleted workspace should not build an orchestrator")
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_unexpected_orchestrator, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert ws.last_error_message is None
+            assert rt is None
 
 
 class TestDispatchUpdate:
@@ -1004,11 +1357,12 @@ class TestUnsuccessfulOrchestratorResult:
             assert rt.reserved_memory_mb == 0
             assert rt.reserved_disk_mb == 0
 
-    def test_delete_false_success_keeps_workspace_non_deleted(
+    def test_delete_false_success_is_treated_as_idempotent_delete(
         self,
         workspace_job_worker_engine,
         owner_user_id: int,
         patch_worker_now: None,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         orch = _orch()
 
@@ -1028,19 +1382,65 @@ class TestUnsuccessfulOrchestratorResult:
 
         with Session(workspace_job_worker_engine) as session:
             orch.delete_workspace_runtime.return_value = _delete_fail(str(wid))
-            run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            with caplog.at_level("INFO"):
+                run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
             session.commit()
 
+        assert "workspace.delete.idempotent_success" in caplog.text
         with Session(workspace_job_worker_engine) as session:
             job = session.get(WorkspaceJob, job_id)
             ws = session.get(Workspace, wid)
             rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
-            assert job is not None and job.status == WorkspaceJobStatus.FAILED.value
-            assert ws is not None and ws.status == WorkspaceStatus.ERROR.value
-            assert rt is not None and rt.container_state == "running"
-            assert rt.reserved_cpu == 0.0
-            assert rt.reserved_memory_mb == 0
-            assert rt.reserved_disk_mb == 0
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert job.error_msg is None
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert ws.last_error_message is None
+            assert rt is None
+
+    def test_delete_container_missing_result_is_success(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        patch_worker_now: None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.DELETING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            _seed_runtime(session, wid)
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.DELETE.value,
+            )
+            session.commit()
+            job_id = job.workspace_job_id
+
+        with Session(workspace_job_worker_engine) as session:
+            orch.delete_workspace_runtime.return_value = WorkspaceDeleteResult(
+                workspace_id=str(wid),
+                success=False,
+                container_deleted=False,
+                topology_detached=True,
+                issues=["runtime:delete_failed:container not found"],
+                container_id="old-ctr",
+            )
+            with caplog.at_level("INFO"):
+                run_pending_jobs(session, get_orchestrator=lambda _s, _ws, _j: orch, limit=1)
+            session.commit()
+
+        assert "workspace.delete.container_missing_treated_as_success" in caplog.text
+        with Session(workspace_job_worker_engine) as session:
+            job = session.get(WorkspaceJob, job_id)
+            ws = session.get(Workspace, wid)
+            rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
+            assert job is not None and job.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
+            assert rt is None
 
 
 class TestRunQueuedJobById:

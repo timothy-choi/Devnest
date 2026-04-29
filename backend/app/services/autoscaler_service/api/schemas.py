@@ -29,6 +29,7 @@ class FleetCapacitySnapshotResponse(BaseModel):
     free_slots: int
     pending_workspace_jobs: int
     pending_placement_jobs: int
+    recent_placement_failures: int
     total_allocatable_cpu: float
     free_cpu: float
     total_allocatable_memory_mb: int
@@ -70,6 +71,7 @@ class AutoscalerEvaluateResponse(BaseModel):
 class ProvisionOneResponse(BaseModel):
     provisioned: bool
     evaluation: ScaleUpEvaluationResponse
+    decision: FleetAutoscalerDecisionResponse | None = None
     node_key: str | None = None
     instance_id: str | None = None
 

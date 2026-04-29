@@ -328,9 +328,7 @@ def test_delete_workspace_end_to_end(client, db_session: Session) -> None:
     rt = _runtime_for(db_session, wid)
     assert ws.status == WorkspaceStatus.DELETED.value
     assert job.status == WorkspaceJobStatus.SUCCEEDED.value
-    assert rt is not None
-    assert rt.container_id is None
-    assert rt.container_state == "deleted"
+    assert rt is None
 
 
 def test_injected_bringup_failure_marks_job_and_workspace_error(

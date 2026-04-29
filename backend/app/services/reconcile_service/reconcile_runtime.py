@@ -31,6 +31,11 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
+from app.services.placement_service.models import (
+    ExecutionNode,
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+)
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceStatus
 from app.services.workspace_service.services.workspace_event_service import (
@@ -47,6 +52,13 @@ from app.services.audit_service.service import record_audit
 from app.services.cleanup_service import process_durable_cleanup_tasks_for_workspace
 
 logger = logging.getLogger(__name__)
+
+_REMOTE_EXECUTION_MODES = frozenset(
+    {
+        ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ExecutionNodeExecutionMode.SSH_DOCKER.value,
+    }
+)
 
 _BUSY_RECONCILE = frozenset(
     {
@@ -86,6 +98,25 @@ def _strict_register_route(session: Session, ws: Workspace, upstream: str) -> No
     )
     rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
     nk = ((rt.node_id if rt else None) or "").strip() or None
+    node = None
+    if nk:
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+    execution_mode = (getattr(node, "execution_mode", None) or "").strip() if node is not None else None
+    provider_type = (getattr(node, "provider_type", None) or "").strip() if node is not None else None
+    topology_skipped_for_remote = bool(
+        provider_type == ExecutionNodeProviderType.EC2.value or execution_mode in _REMOTE_EXECUTION_MODES
+    )
+    logger.info(
+        "reconcile_gateway_route_register_attempt",
+        extra={
+            "workspace_id": wid,
+            "node_key": nk,
+            "execution_mode": execution_mode,
+            "execution_node_id": ws.execution_node_id,
+            "gateway_route_target": upstream,
+            "topology_skipped_for_remote": topology_skipped_for_remote,
+        },
+    )
     DevnestGatewayClient.from_settings(settings).register_route(
         str(wid),
         upstream,
@@ -670,6 +701,14 @@ def _reconcile_running(
         return
 
     before = _runtime_snapshot(session, wid)
+    gateway_route_target = wmod._remote_gateway_route_target_for_node(
+        session,
+        workspace_id=wid,
+        node_key=health.node_id,
+        execution_node_id=ws.execution_node_id,
+        gateway_route_target=health.gateway_route_target,
+        internal_endpoint=health.internal_endpoint,
+    )
     # ``requested_config_version`` is frozen at enqueue time (matches other job types).
     wmod._apply_runtime_bringup_like(
         session,
@@ -681,12 +720,13 @@ def _reconcile_running(
         internal_endpoint=health.internal_endpoint,
         config_version=config_version,
         probe_healthy=health.probe_healthy,
-        gateway_route_target=health.gateway_route_target,
+        gateway_route_target=gateway_route_target,
     )
     after = _runtime_snapshot(session, wid)
     runtime_changed = before != after
-    if health.internal_endpoint:
-        ws.endpoint_ref = health.internal_endpoint
+    route_endpoint = gateway_route_target or health.internal_endpoint
+    if route_endpoint:
+        ws.endpoint_ref = route_endpoint
     wmod._touch_workspace(session, ws)
 
     if runtime_changed:
@@ -720,7 +760,7 @@ def _reconcile_running(
     observed_upstream = (
         traefik_upstream_for_workspace_gateway(ws, rt_cur)
         if rt_cur is not None
-        else registration_upstream(health.gateway_route_target, health.internal_endpoint)
+        else registration_upstream(gateway_route_target, health.internal_endpoint)
     )
     if settings.devnest_gateway_enabled and observed_upstream:
         try:

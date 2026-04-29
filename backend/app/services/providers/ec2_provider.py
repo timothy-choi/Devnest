@@ -26,6 +26,7 @@ from app.services.placement_service.constants import (
     DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
     DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
 )
+from app.services.placement_service.bootstrap import ensure_execution_node_default_topology, system_default_topology_id
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeExecutionMode,
@@ -382,10 +383,20 @@ def register_ec2_instance(
             max_workspaces=DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
             allocatable_disk_mb=DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
             metadata_json=meta_patch,
+            default_topology_id=system_default_topology_id(),
             iam_instance_profile_name=desc.iam_instance_profile_name,
             last_synced_at=now,
         )
         session.add(row)
+        session.flush()
+        logger.info(
+            "execution_node.topology.assigned",
+            extra={
+                "node_key": row.node_key,
+                "execution_node_id": row.id,
+                "default_topology_id": row.default_topology_id,
+            },
+        )
     else:
         prior_status = (row.status or "").strip().upper()
         status, schedulable = compute_status_schedulable_after_ec2_sync(existing_row=row, desc=desc)
@@ -423,6 +434,7 @@ def register_ec2_instance(
             row.max_workspaces = DEFAULT_EXECUTION_NODE_MAX_WORKSPACES
         if int(row.allocatable_disk_mb or 0) <= 0:
             row.allocatable_disk_mb = DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB
+        ensure_execution_node_default_topology(session, row)
         row.iam_instance_profile_name = desc.iam_instance_profile_name
         row.last_synced_at = now
         merged = dict(row.metadata_json or {})

@@ -133,9 +133,44 @@ DEVNEST_PROBE_ASSUME_COLOCATED_ENGINE=true
 # SSE: max latency for cross-worker event delivery (DB poll fallback when not on same gunicorn worker)
 DEVNEST_SSE_POLL_INTERVAL_SECONDS=2
 
-# Autoscaler drain delay (safe scale-down)
-DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS=30         # wait before terminating a draining node
-DEVNEST_AUTOSCALER_RECENT_ACTIVITY_WINDOW_SECONDS=300  # skip nodes with recent heartbeats
+# Autoscaler Phase 2: safe EC2 scale-out only.
+# The autoscaler provisions at most one EC2 execution node per tick. Automatic scale-in remains disabled.
+DEVNEST_AUTOSCALER_ENABLED=true
+DEVNEST_AUTOSCALER_EVALUATE_ONLY=false
+DEVNEST_AUTOSCALER_MIN_NODES=1
+DEVNEST_AUTOSCALER_MAX_NODES=3
+DEVNEST_AUTOSCALER_MIN_IDLE_SLOTS=1
+DEVNEST_AUTOSCALER_MAX_CONCURRENT_PROVISIONING=1
+DEVNEST_AUTOSCALER_SCALE_OUT_COOLDOWN_SECONDS=300
+
+# Required EC2 provisioning settings for autoscaler scale-out.
+AWS_REGION=us-east-1
+DEVNEST_EC2_AMI_ID=ami-0123456789abcdef0
+DEVNEST_EC2_INSTANCE_TYPE=t3.medium
+DEVNEST_EC2_SUBNET_ID=subnet-0123456789abcdef0
+DEVNEST_EC2_SECURITY_GROUP_IDS=sg-0123456789abcdef0
+DEVNEST_EC2_INSTANCE_PROFILE=DevNestExecutionNodeProfile
+DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker
+DEVNEST_EC2_KEY_NAME=
+DEVNEST_EC2_TAG_PREFIX=devnest
+DEVNEST_EC2_EXTRA_TAGS=env=prod,service=execution-node
+DEVNEST_EC2_WORKSPACE_PROJECTS_BASE=/var/lib/devnest/workspace-projects
+
+# Bootstrap: stock Amazon Linux 2023 AMIs can use DevNest-generated user-data.
+# The heartbeat URL must be reachable from the autoscaled execution node.
+# New nodes stay PROVISIONING + schedulable=false until EC2 is running and a fresh
+# heartbeat reports docker_ok=true.
+DEVNEST_EC2_BOOTSTRAP_PREBAKED=false
+DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL=http://api.internal.example:8000
+INTERNAL_API_KEY_INFRASTRUCTURE=<strong-random-infra-key>
+# Optional custom override; leave empty for generated Amazon Linux 2023 bootstrap.
+# Custom user-data may include {{NODE_KEY}} or {{DEVNEST_NODE_KEY}} placeholders.
+DEVNEST_EC2_USER_DATA_B64=
+# DEVNEST_EC2_USER_DATA=
+
+# Autoscaler scale-in remains manual/disabled for Phase 2. These values only affect explicit reclaim endpoints.
+DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS=30
+DEVNEST_AUTOSCALER_RECENT_ACTIVITY_WINDOW_SECONDS=300
 
 # Terminal WebSocket settings
 DEVNEST_WORKSPACE_SHELL=/bin/bash   # shell to launch in terminal sessions

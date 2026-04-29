@@ -176,6 +176,55 @@ def test_post_heartbeat_node2_catalog_keeps_schedulable_false(
         assert hb.get("docker_ok") is True
 
 
+def test_autoscaled_ec2_heartbeat_promotes_ready(
+    internal_api_client: TestClient,
+    infrastructure_unit_engine: Engine,
+) -> None:
+    with Session(infrastructure_unit_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-autoscale-ready",
+                name="ec2-autoscale-ready",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                provider_instance_id="i-0123456789abcdef0",
+                region="us-east-1",
+                execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                status=ExecutionNodeStatus.PROVISIONING.value,
+                schedulable=False,
+                total_cpu=2.0,
+                total_memory_mb=4096,
+                allocatable_cpu=2.0,
+                allocatable_memory_mb=4096,
+                metadata_json={"ec2": {"managed": True, "state": "running"}},
+            ),
+        )
+        session.commit()
+
+    r = internal_api_client.post(
+        "/internal/execution-nodes/heartbeat",
+        json={
+            "node_key": "ec2-autoscale-ready",
+            "docker_ok": True,
+            "disk_free_mb": 99_999,
+            "slots_in_use": 0,
+            "version": "ec2-user-data-v1",
+        },
+        headers=INTERNAL_HEADERS,
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == ExecutionNodeStatus.READY.value
+    assert data["schedulable"] is True
+
+    with Session(infrastructure_unit_engine) as session:
+        row = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ec2-autoscale-ready")).first()
+        assert row is not None
+        assert row.status == ExecutionNodeStatus.READY.value
+        assert row.schedulable is True
+        lifecycle = (row.metadata_json or {}).get("lifecycle") or {}
+        assert lifecycle.get("readiness") == "heartbeat"
+
+
 def test_list_execution_nodes_with_capacity(internal_api_client: TestClient) -> None:
     r = internal_api_client.get("/internal/execution-nodes/", headers=INTERNAL_HEADERS)
     assert r.status_code == 200, r.text

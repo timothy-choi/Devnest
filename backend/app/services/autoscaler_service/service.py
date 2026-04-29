@@ -10,7 +10,8 @@ TODO: provisioning jobs / SQS, cooldown windows, predictive signals, per-tenant 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func
 from sqlmodel import Session, select
@@ -18,18 +19,27 @@ from sqlmodel import Session, select
 from app.libs.common.config import get_settings
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability.metrics import record_autoscaler_scale_down, record_autoscaler_scale_up
+from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
+from app.services.audit_service.models import AuditLog
+from app.services.audit_service.service import record_audit
 from app.services.infrastructure_service.errors import Ec2ProvisionConfigurationError
 from app.services.infrastructure_service.lifecycle import (
     mark_node_draining,
     provision_ec2_node,
+    sync_node_state,
     terminate_ec2_node,
 )
-from app.services.infrastructure_service.models import Ec2ProvisionRequest
+from app.services.infrastructure_service.models import Ec2ProvisionRequest, build_default_amazon_linux_2023_user_data
 from app.services.placement_service.capacity import max_effective_free_resources_across_schedulable
 from app.services.placement_service.capacity import (
     count_active_workloads_on_node_key,
     total_reserved_disk_mb_on_node_key,
     total_reserved_on_node_key,
+)
+from app.services.placement_service.constants import (
+    DEFAULT_WORKSPACE_REQUEST_CPU,
+    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
 from app.services.placement_service.models import (
     ExecutionNode,
@@ -65,6 +75,22 @@ _ACTIVE_EC2_NODE_STATUSES = frozenset(
         ExecutionNodeStatus.ERROR.value,
     },
 )
+
+
+def _capacity_insufficient_for_one_workspace(cap: FleetCapacitySnapshot) -> list[str]:
+    """Return resource reasons that prevent placing one default workspace anywhere in the fleet."""
+    reasons: list[str] = []
+    if int(cap.free_slots) < 1:
+        reasons.append("free_slots < required_slots 1")
+    if float(cap.free_cpu) < float(DEFAULT_WORKSPACE_REQUEST_CPU):
+        reasons.append(f"free_cpu {cap.free_cpu} < required_cpu {DEFAULT_WORKSPACE_REQUEST_CPU}")
+    if int(cap.free_memory_mb) < int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB):
+        reasons.append(
+            f"free_memory_mb {cap.free_memory_mb} < required_memory_mb {DEFAULT_WORKSPACE_REQUEST_MEMORY_MB}",
+        )
+    if int(cap.free_disk_mb) < int(DEFAULT_WORKSPACE_REQUEST_DISK_MB):
+        reasons.append(f"free_disk_mb {cap.free_disk_mb} < required_disk_mb {DEFAULT_WORKSPACE_REQUEST_DISK_MB}")
+    return reasons
 
 
 def _provider_allows_ec2_autoscale() -> bool:
@@ -193,6 +219,90 @@ def _count_queued_jobs(session: Session, *, job_types: frozenset[str] | None = N
     return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
+def _placement_failure_signal_window_seconds() -> int:
+    raw = getattr(get_settings(), "devnest_autoscaler_recent_activity_window_seconds", 300)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _count_recent_placement_failure_signals(session: Session) -> int:
+    window_seconds = _placement_failure_signal_window_seconds()
+    if session.bind and session.bind.dialect.name == "sqlite":
+        since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=window_seconds)
+    else:
+        since = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+    stmt = (
+        select(func.count())
+        .select_from(AuditLog)
+        .where(
+            and_(
+                AuditLog.action == AuditAction.PLACEMENT_NO_SCHEDULABLE_NODE.value,
+                AuditLog.created_at >= since,
+            ),
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def record_placement_failed_scale_out_signal(
+    session: Session,
+    *,
+    workspace_id: int | None = None,
+    workspace_job_id: int | None = None,
+    job_type: str | None = None,
+    detail: str | None = None,
+    requested_cpu: float | None = None,
+    requested_memory_mb: int | None = None,
+    requested_disk_mb: int | None = None,
+    actor_user_id: int | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Record a recent placement-failure demand signal that autoscaler evaluation can consume."""
+    log_event(
+        logger,
+        LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
+        workspace_id=workspace_id,
+        workspace_job_id=workspace_job_id,
+        job_type=job_type,
+        detail=(detail or "")[:2000],
+        autoscaler_demand_signal=True,
+    )
+    logger.info(
+        "placement_failed_triggering_scale_out",
+        extra={
+            "workspace_id": workspace_id,
+            "workspace_job_id": workspace_job_id,
+            "job_type": job_type,
+            "requested_cpu": requested_cpu,
+            "requested_memory_mb": requested_memory_mb,
+            "requested_disk_mb": requested_disk_mb,
+        },
+    )
+    record_audit(
+        session,
+        action=AuditAction.PLACEMENT_NO_SCHEDULABLE_NODE.value,
+        resource_type="workspace",
+        resource_id=workspace_id,
+        workspace_id=workspace_id if workspace_id and workspace_id > 0 else None,
+        job_id=workspace_job_id,
+        actor_user_id=actor_user_id,
+        actor_type=AuditActorType.USER.value if actor_user_id is not None else AuditActorType.INTERNAL_SERVICE.value,
+        outcome=AuditOutcome.FAILURE.value,
+        reason=(detail or "placement failed: no schedulable execution node")[:4096],
+        correlation_id=correlation_id,
+        metadata={
+            "job_type": job_type,
+            "requested_cpu": requested_cpu,
+            "requested_memory_mb": requested_memory_mb,
+            "requested_disk_mb": requested_disk_mb,
+            "autoscaler_demand_signal": True,
+        },
+    )
+
+
 def _seconds_since(ts: datetime | None) -> float | None:
     if ts is None:
         return None
@@ -240,6 +350,125 @@ def _config_bool(settings: object, name: str, default: bool) -> bool:
     if isinstance(raw, str):
         return raw.strip().lower() in ("1", "true", "yes", "on")
     return bool(raw)
+
+
+def ec2_autoscaler_provisioning_config_errors(settings: object | None = None) -> list[str]:
+    """Return all missing/invalid EC2 settings that would block autoscaler scale-out."""
+    s = settings or get_settings()
+    errors: list[str] = []
+    if not (getattr(s, "aws_region", "") or "").strip():
+        errors.append("AWS_REGION is required for EC2 autoscaler provisioning")
+    if not (getattr(s, "devnest_ec2_ami_id", "") or "").strip():
+        errors.append("DEVNEST_EC2_AMI_ID is required")
+    if not (getattr(s, "devnest_ec2_instance_type", "") or "").strip():
+        errors.append("DEVNEST_EC2_INSTANCE_TYPE is required")
+    if not (getattr(s, "devnest_ec2_subnet_id", "") or "").strip():
+        errors.append("DEVNEST_EC2_SUBNET_ID is required")
+    raw_sg = (getattr(s, "devnest_ec2_security_group_ids", "") or "").strip()
+    if not [x.strip() for x in raw_sg.split(",") if x.strip()]:
+        errors.append("DEVNEST_EC2_SECURITY_GROUP_IDS must contain at least one security group id")
+
+    mode = (getattr(s, "devnest_ec2_default_execution_mode", "ssm_docker") or "ssm_docker").strip().lower()
+    if mode == "ssm_docker" and not (getattr(s, "devnest_ec2_instance_profile", "") or "").strip():
+        errors.append("DEVNEST_EC2_INSTANCE_PROFILE is required when DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssm_docker")
+    if mode == "ssh_docker" and not (getattr(s, "devnest_ec2_key_name", "") or "").strip():
+        errors.append("DEVNEST_EC2_KEY_NAME is required when DEVNEST_EC2_DEFAULT_EXECUTION_MODE=ssh_docker")
+
+    has_custom_user_data = bool(
+        (getattr(s, "devnest_ec2_user_data", "") or "").strip()
+        or (getattr(s, "devnest_ec2_user_data_b64", "") or "").strip()
+    )
+    internal_base = (
+        (getattr(s, "devnest_ec2_heartbeat_internal_api_base_url", "") or "").strip()
+        or (getattr(s, "internal_api_base_url", "") or "").strip()
+    )
+    internal_key = (
+        (getattr(s, "internal_api_key_infrastructure", "") or "").strip()
+        or (getattr(s, "internal_api_key", "") or "").strip()
+    )
+    has_generated_bootstrap_config = bool(internal_base and internal_key)
+    if (
+        not has_custom_user_data
+        and not has_generated_bootstrap_config
+        and not _config_bool(s, "devnest_ec2_bootstrap_prebaked", False)
+    ):
+        errors.append(
+            "bootstrap config is required: set DEVNEST_EC2_USER_DATA_B64/DEVNEST_EC2_USER_DATA, "
+            "or set DEVNEST_EC2_HEARTBEAT_INTERNAL_API_BASE_URL (or INTERNAL_API_BASE_URL) plus "
+            "INTERNAL_API_KEY_INFRASTRUCTURE (or INTERNAL_API_KEY) so DevNest can generate Amazon Linux 2023 "
+            "user-data, or set DEVNEST_EC2_BOOTSTRAP_PREBAKED=true for an AMI that starts Docker and heartbeat",
+        )
+
+    try:
+        Ec2ProvisionRequest.from_settings(s).validate()
+    except Exception as e:
+        msg = str(e)
+        if msg and all(msg not in existing for existing in errors):
+            errors.append(msg)
+    return errors
+
+
+def _autoscaler_node_key() -> str:
+    return f"ec2-autoscale-{uuid.uuid4().hex[:12]}"
+
+
+def _workspace_projects_base_for_ec2(settings: object) -> str:
+    return (
+        (getattr(settings, "devnest_ec2_workspace_projects_base", "") or "").strip()
+        or (getattr(settings, "workspace_projects_base", "") or "").strip()
+        or "/var/lib/devnest/workspace-projects"
+    )
+
+
+def _ec2_heartbeat_internal_api_base_url(settings: object) -> str:
+    return (
+        (getattr(settings, "devnest_ec2_heartbeat_internal_api_base_url", "") or "").strip()
+        or (getattr(settings, "internal_api_base_url", "") or "").strip()
+    )
+
+
+def _ec2_heartbeat_internal_api_key(settings: object) -> str:
+    return (
+        (getattr(settings, "internal_api_key_infrastructure", "") or "").strip()
+        or (getattr(settings, "internal_api_key", "") or "").strip()
+    )
+
+
+def _build_autoscaler_ec2_provision_request(settings: object) -> Ec2ProvisionRequest:
+    """Build one EC2 request with a preassigned node key and default AL2023 bootstrap when needed."""
+    req = Ec2ProvisionRequest.from_settings(settings)
+    req.node_key = _autoscaler_node_key()
+    req.name_tag = req.node_key
+    has_custom_user_data = bool((req.user_data or "").strip())
+    user_data_source = "none"
+    if has_custom_user_data:
+        req.user_data = (
+            (req.user_data or "")
+            .replace("{{NODE_KEY}}", req.node_key)
+            .replace("{{DEVNEST_NODE_KEY}}", req.node_key)
+        )
+        user_data_source = "custom"
+    elif not _config_bool(settings, "devnest_ec2_bootstrap_prebaked", False):
+        req.user_data = build_default_amazon_linux_2023_user_data(
+            node_key=req.node_key,
+            internal_api_base_url=_ec2_heartbeat_internal_api_base_url(settings),
+            internal_api_key=_ec2_heartbeat_internal_api_key(settings),
+            workspace_projects_base=_workspace_projects_base_for_ec2(settings),
+            heartbeat_interval_seconds=_config_int(settings, "devnest_node_heartbeat_interval_seconds", 30),
+        )
+        user_data_source = "generated_amazon_linux_2023"
+    else:
+        user_data_source = "prebaked_ami"
+    logger.info(
+        "autoscaler_ec2_user_data_prepared",
+        extra={
+            "node_key": req.node_key,
+            "user_data_source": user_data_source,
+            "user_data_present": bool((req.user_data or "").strip()),
+            "user_data_bytes": len((req.user_data or "").encode("utf-8")),
+        },
+    )
+    return req
 
 
 def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
@@ -294,6 +523,8 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         total_disk += alloc_disk
         free_disk += max(0, alloc_disk - used_disk)
 
+    recent_placement_failures = _count_recent_placement_failure_signals(session)
+    pending_placement_jobs = _count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES)
     return FleetCapacitySnapshot(
         total_nodes=total_nodes,
         ec2_nodes_active=ec2_nodes_active,
@@ -306,7 +537,8 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         active_slots=active_slots,
         free_slots=free_slots,
         pending_workspace_jobs=_count_queued_jobs(session),
-        pending_placement_jobs=_count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES),
+        pending_placement_jobs=pending_placement_jobs + recent_placement_failures,
+        recent_placement_failures=recent_placement_failures,
         total_allocatable_cpu=round(total_cpu, 4),
         free_cpu=round(free_cpu, 4),
         total_allocatable_memory_mb=total_mem,
@@ -319,10 +551,11 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
 
 def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     """
-    Phase 1 autoscaler controller tick.
+    Autoscaler controller evaluation.
 
     This function is intentionally read-only: it does not call EC2, drain, terminate,
-    register, or update ``execution_node`` rows. It returns/logs what the controller would do.
+    register, or update ``execution_node`` rows. Phase 2 scale-out uses the returned decision
+    in :func:`run_scale_out_tick`.
     """
     settings = get_settings()
     enabled = _config_bool(settings, "devnest_autoscaler_enabled", False)
@@ -339,18 +572,18 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
 
     pending = int(cap.pending_placement_jobs)
     idle_after_pending = int(cap.free_slots) - pending
+    capacity_insufficiency_reasons = _capacity_insufficient_for_one_workspace(cap)
+    capacity_insufficient = bool(capacity_insufficiency_reasons)
+    provider_mode = (getattr(settings, "devnest_node_provider", "all") or "all").strip().lower()
+    ec2_allowed = provider_mode in ("all", "ec2")
     scale_out_recommended = (
-        pending > int(cap.free_slots)
+        cap.ready_schedulable_nodes == 0
+        or capacity_insufficient
+        or int(cap.recent_placement_failures) > 0
+        or pending > int(cap.free_slots)
         or idle_after_pending < min_idle_slots
-        or (pending > 0 and cap.ready_schedulable_nodes == 0)
     )
-    scale_in_recommended = (
-        pending == 0
-        and cap.idle_ec2_node_count > 0
-        and cap.ec2_nodes_active > min_nodes
-        and cap.free_slots > min_idle_slots
-        and cap.draining_nodes == 0
-    )
+    scale_in_recommended = False
 
     reasons: list[str] = []
     suppressed_by_config = False
@@ -358,15 +591,35 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     suppressed_by_cooldown = False
 
     if scale_out_recommended:
-        reasons.append(
-            "scale-out recommended: pending placement demand plus idle-slot buffer exceeds ready capacity",
-        )
+        if capacity_insufficient:
+            reasons.append(
+                "scale-out recommended: capacity insufficient for one workspace: "
+                + "; ".join(capacity_insufficiency_reasons),
+            )
+        elif int(cap.recent_placement_failures) > 0:
+            reasons.append(
+                f"scale-out recommended: recent placement failure demand signals={cap.recent_placement_failures}",
+            )
+        elif cap.ready_schedulable_nodes == 0:
+            reasons.append("scale-out recommended: no ready schedulable nodes")
+        else:
+            reasons.append(
+                "scale-out recommended: pending placement demand plus idle-slot buffer exceeds ready capacity",
+            )
         if not enabled:
             suppressed_by_config = True
             reasons.append("suppressed by config: DEVNEST_AUTOSCALER_ENABLED=false")
         if evaluate_only:
             suppressed_by_config = True
             reasons.append("suppressed by config: DEVNEST_AUTOSCALER_EVALUATE_ONLY=true")
+        if not ec2_allowed:
+            suppressed_by_config = True
+            reasons.append(f"suppressed by config: devnest_node_provider={provider_mode!r} does not allow EC2")
+        if enabled and not evaluate_only and ec2_allowed:
+            config_errors = ec2_autoscaler_provisioning_config_errors(settings)
+            if config_errors:
+                suppressed_by_config = True
+                reasons.append("suppressed by config: EC2 provision request invalid: " + "; ".join(config_errors))
         if cap.ec2_nodes_active >= max_nodes:
             suppressed_by_cap = True
             reasons.append(f"suppressed by cap: active EC2 nodes {cap.ec2_nodes_active} >= max_nodes {max_nodes}")
@@ -451,12 +704,92 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         draining_nodes=cap.draining_nodes,
         active_slots=cap.active_slots,
         free_slots=cap.free_slots,
+        free_cpu=cap.free_cpu,
+        free_memory_mb=cap.free_memory_mb,
+        free_disk_mb=cap.free_disk_mb,
         pending_workspace_jobs=cap.pending_workspace_jobs,
         pending_placement_jobs=cap.pending_placement_jobs,
+        recent_placement_failures=cap.recent_placement_failures,
         idle_ec2_node_count=cap.idle_ec2_node_count,
         reasons=" | ".join(reasons)[:2000],
     )
     return decision
+
+
+def _sync_provisioning_ec2_nodes(session: Session) -> None:
+    """Best-effort readiness reconciliation for nodes already launched by autoscaling/lifecycle."""
+    rows = list(
+        session.exec(
+            select(ExecutionNode)
+            .where(
+                and_(
+                    ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+                    ExecutionNode.status.in_(
+                        [
+                            ExecutionNodeStatus.PROVISIONING.value,
+                            ExecutionNodeStatus.NOT_READY.value,
+                        ],
+                    ),
+                ),
+            )
+            .order_by(ExecutionNode.node_key.asc()),
+        ).all(),
+    )
+    for row in rows:
+        try:
+            sync_node_state(session, node_key=row.node_key)
+            session.flush()
+        except Exception as e:
+            logger.warning(
+                "autoscaler_provisioning_node_sync_failed",
+                extra={"node_key": row.node_key, "error": str(e)[:1000]},
+            )
+
+
+def provision_one_from_fleet_decision(session: Session, decision: FleetAutoscalerDecision) -> ExecutionNode | None:
+    """Provision at most one EC2 node when the Phase 2 scale-out decision permits it."""
+    if decision.action != "scale_out_recommended":
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_UP_SUPPRESSED,
+            detail="scale-out tick did not provision because decision was not scale_out_recommended",
+            autoscaler_action=decision.action,
+            reasons=" | ".join(decision.reasons)[:2000],
+        )
+        return None
+    req = _build_autoscaler_ec2_provision_request(get_settings())
+    node = provision_ec2_node(session, request=req, wait_until_running=True)
+    session.flush()
+    record_autoscaler_scale_up()
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_SCALE_UP_TRIGGERED,
+        node_key=node.node_key,
+        instance_id=(node.provider_instance_id or "").strip() or None,
+        provisioning_in_flight_before=decision.capacity.provisioning_nodes,
+        autoscaler_action=decision.action,
+    )
+    logger.info(
+        "autoscaler_scale_out_provisioned_one_ec2_node",
+        extra={
+            "node_key": node.node_key,
+            "instance_id": (node.provider_instance_id or "").strip() or None,
+            "provisioning_in_flight_before": decision.capacity.provisioning_nodes,
+        },
+    )
+    return node
+
+
+def run_scale_out_tick(session: Session) -> tuple[FleetAutoscalerDecision, ExecutionNode | None]:
+    """
+    Phase 2 autoscaler tick: reconcile provisioning readiness, then provision at most one EC2 node.
+
+    No scale-in is performed here.
+    """
+    _sync_provisioning_ec2_nodes(session)
+    decision = evaluate_fleet_autoscaler_tick(session)
+    node = provision_one_from_fleet_decision(session, decision)
+    return decision, node
 
 
 def evaluate_scale_up(
@@ -591,29 +924,33 @@ def maybe_provision_on_no_schedulable_capacity(session: Session) -> ExecutionNod
     settings = get_settings()
     if not settings.devnest_autoscaler_enabled or not settings.devnest_autoscaler_provision_on_no_capacity:
         return None
-    ev = evaluate_scale_up(session, insufficient_capacity=True)
-    if not ev.should_provision:
+    decision = evaluate_fleet_autoscaler_tick(session)
+    if decision.action != "scale_out_recommended":
         logger.info(
             "autoscaler_skip_provision",
-            extra={"reason": ev.reason, "provisioning_in_flight": ev.provisioning_in_flight},
+            extra={
+                "reason": " | ".join(decision.reasons)[:1000],
+                "autoscaler_action": decision.action,
+                "provisioning_in_flight": decision.capacity.provisioning_nodes,
+            },
         )
         return None
     try:
-        node = provision_capacity_if_needed(session, ev)
+        node = provision_one_from_fleet_decision(session, decision)
         if node is not None:
             logger.info(
                 "autoscaler_provisioned_after_no_schedulable_capacity",
                 extra={
                     "node_key": node.node_key,
                     "instance_id": (node.provider_instance_id or "").strip() or None,
-                    "provisioning_in_flight_before": ev.provisioning_in_flight,
+                    "provisioning_in_flight_before": decision.capacity.provisioning_nodes,
                 },
             )
         return node
     except Exception as e:
         logger.warning(
             "autoscaler_provision_failed",
-            extra={"error": str(e), "provisioning_in_flight_before": ev.provisioning_in_flight},
+            extra={"error": str(e), "provisioning_in_flight_before": decision.capacity.provisioning_nodes},
         )
         return None
 

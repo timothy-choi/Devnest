@@ -119,6 +119,7 @@ class LogEvent:
     AUTOSCALER_EVALUATE_ONLY_DECISION = "autoscaler.evaluate_only.decision"
 
     EC2_NODE_PROVISIONED = "ec2.node.provisioned"
+    EC2_NODE_READY = "ec2.node.ready"
     EC2_NODE_TERMINATED = "ec2.node.terminated"
     # Phase 3b Step 12: structured heartbeat after DB commit (``heartbeat_age_seconds`` for ops / Loki).
     EXECUTION_NODE_HEARTBEAT_RECORDED = "execution.node.heartbeat_recorded"

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import posixpath
 import re
 import shutil
 import sys
@@ -26,7 +27,7 @@ from pathlib import Path
 from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.probes.interfaces import ProbeRunner
-from app.libs.runtime.errors import RuntimeAdapterError
+from app.libs.runtime.errors import ContainerNotFoundError, RuntimeAdapterError
 from app.libs.runtime.interfaces import RuntimeAdapter
 from app.libs.runtime.models import (
     CODE_SERVER_CONFIG_CONTAINER_PATH,
@@ -40,6 +41,7 @@ from app.libs.runtime.models import (
 from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
 from app.libs.topology.system.attachment_ops import assert_netns_attach_target_visible
+from app.libs.topology.system.command_runner import CommandRunner
 from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
@@ -48,7 +50,9 @@ from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
     ensure_code_server_bind_auth_proxy_config,
     finalize_workspace_host_project_tree_ownership,
+    log_remote_workspace_config_bind_host_before_docker_start,
     log_workspace_config_bind_host_before_docker_start,
+    remote_prepare_code_server_bind_mounts,
     resolve_workspace_ide_bind_host_path,
     stat_mode_octal,
     stat_uid_gid,
@@ -214,6 +218,8 @@ class DefaultOrchestratorService(OrchestratorService):
         ensure_workspace_project_dir: _EnsureWorkspaceProjectDir | None = None,
         traefik_routing_host: str | None = None,
         snapshot_ssh_runner: SshRemoteCommandRunner | None = None,
+        workspace_host_command_runner: CommandRunner | None = None,
+        remote_topology_attach_deferred: bool = False,
     ) -> None:
         self._runtime_adapter = runtime_adapter
         self._topology_service = topology_service
@@ -222,6 +228,8 @@ class DefaultOrchestratorService(OrchestratorService):
         self._node_id = node_id.strip() or "node-1"
         self._traefik_routing_host = (traefik_routing_host or "").strip() or None
         self._snapshot_ssh_runner = snapshot_ssh_runner
+        self._workspace_host_command_runner = workspace_host_command_runner
+        self._remote_topology_attach_deferred = bool(remote_topology_attach_deferred)
         self._workspace_projects_base = workspace_projects_base or os.path.join(
             tempfile.gettempdir(),
             "devnest-workspaces",
@@ -305,21 +313,43 @@ class DefaultOrchestratorService(OrchestratorService):
         )
 
     @staticmethod
-    def _code_server_env(port: int = WORKSPACE_IDE_CONTAINER_PORT) -> dict[str, str]:
+    def _code_server_env(
+        port: int = WORKSPACE_IDE_CONTAINER_PORT,
+        *,
+        workspace_id: str | None = None,
+        node_key: str | None = None,
+    ) -> dict[str, str]:
         """Return canonical code-server environment variables for the workspace container.
 
         code-server reads these at startup:
         - ``CS_DISABLE_GETTING_STARTED_OVERRIDE``: suppress the welcome page.
-        - ``CODE_SERVER_AUTH``: "none" means no password (auth handled by DevNest gateway sessions).
+        - ``DEVNEST_WORKSPACE_AUTH_MODE`` / ``CODE_SERVER_AUTH``: "none" means no password
+          (auth handled by DevNest gateway sessions); "password" requires ``DEVNEST_WORKSPACE_PASSWORD``.
         - ``PORT``: in-container listen port (must match ``WORKSPACE_IDE_CONTAINER_PORT``).
 
         Bind-mounted ``config.yaml`` is seeded/patched by :func:`ensure_code_server_bind_auth_proxy_config`
         so persisted ``auth: password`` and missing ``trusted-origins`` cannot override this contract.
         """
+        from app.libs.common.config import get_settings
+
+        settings = get_settings()
+        auth_mode = (settings.devnest_workspace_auth_mode or "none").strip().lower()
+        if auth_mode not in ("none", "password"):
+            raise WorkspaceBringUpError(
+                "DEVNEST_WORKSPACE_AUTH_MODE must be either 'none' or 'password'",
+            )
         return {
             "CS_DISABLE_GETTING_STARTED_OVERRIDE": "1",
-            "CODE_SERVER_AUTH": "none",
+            "CODE_SERVER_AUTH": auth_mode,
+            "DEVNEST_WORKSPACE_AUTH_MODE": auth_mode,
+            "DEVNEST_WORKSPACE_ID": (workspace_id or "").strip(),
+            "DEVNEST_NODE_KEY": (node_key or "").strip(),
             "PORT": str(port),
+            **(
+                {"DEVNEST_WORKSPACE_PASSWORD": settings.devnest_workspace_password}
+                if auth_mode == "password" and settings.devnest_workspace_password
+                else {}
+            ),
         }
 
     def _code_server_extra_bind_mounts(
@@ -328,6 +358,7 @@ class DefaultOrchestratorService(OrchestratorService):
         workspace_host_path: str | None = None,
         launch_mode: str = "resume",
         project_storage_key: str | None = None,
+        auth_mode: str = "none",
     ) -> list[WorkspaceExtraBindMountSpec]:
         """Build code-server persistence bind mounts for config and data.
 
@@ -360,6 +391,37 @@ class DefaultOrchestratorService(OrchestratorService):
                 return []
         if not ide_bind_host:
             return []
+        if self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None:
+            remote_ide = str(ide_bind_host).rstrip("/")
+            if posixpath.basename(remote_ide) == WORKSPACE_USER_PROJECT_SUBDIR:
+                bundle_root_for_cs = posixpath.dirname(remote_ide)
+            else:
+                bundle_root_for_cs = remote_ide
+            try:
+                cfg_host, data_host = remote_prepare_code_server_bind_mounts(
+                    self._workspace_host_command_runner,
+                    bundle_root_for_cs,
+                    workspace_id=wid_clean,
+                    project_host_path=remote_ide,
+                    auth_mode=auth_mode,
+                    launch_mode=launch_mode,
+                )
+            except (RuntimeError, ValueError) as e:
+                raise WorkspaceBringUpError(
+                    "remote workspace host bind-mount path not writable by runtime user "
+                    f"(prepare failed for code-server dirs under {bundle_root_for_cs!r}): {e}",
+                ) from e
+            return [
+                WorkspaceExtraBindMountSpec(
+                    host_path=cfg_host,
+                    container_path=CODE_SERVER_CONFIG_CONTAINER_PATH,
+                ),
+                WorkspaceExtraBindMountSpec(
+                    host_path=data_host,
+                    container_path=CODE_SERVER_DATA_CONTAINER_PATH,
+                ),
+            ]
+
         ide_path = Path(ide_bind_host)
         if ide_path.name == WORKSPACE_USER_PROJECT_SUBDIR:
             bundle_root_for_cs = str(ide_path.parent.resolve())
@@ -402,7 +464,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 launch_mode=launch_mode,
             )
             # Seed/patch ``config.yaml`` first; this may create or rewrite the file as root.
-            ensure_code_server_bind_auth_proxy_config(cfg_host)
+            ensure_code_server_bind_auth_proxy_config(cfg_host, auth_mode=auth_mode)
             # Chown the workspace bundle (``project/`` + ``code-server/``) so nothing under the tree
             # stays root-owned after mkdir/seed/rmtree steps.
             finalize_workspace_host_project_tree_ownership(bundle_root_for_cs, strict=_strict_chown)
@@ -533,7 +595,30 @@ class DefaultOrchestratorService(OrchestratorService):
             memory_limit_bytes = int(memory_limit_mib) * 1024 * 1024
 
         # Merge code-server defaults with caller-provided env (caller values win).
-        merged_env: dict[str, str] = {**self._code_server_env(), **(env or {})}
+        merged_env: dict[str, str] = {
+            **self._code_server_env(workspace_id=ctx.wid, node_key=self._node_id),
+            **(env or {}),
+        }
+        auth_mode = (
+            merged_env.get("DEVNEST_WORKSPACE_AUTH_MODE") or merged_env.get("CODE_SERVER_AUTH") or "none"
+        ).strip().lower()
+        if auth_mode not in ("none", "password"):
+            raise WorkspaceBringUpError(
+                "DEVNEST_WORKSPACE_AUTH_MODE must be either 'none' or 'password'",
+            )
+        merged_env["DEVNEST_WORKSPACE_AUTH_MODE"] = auth_mode
+        merged_env["CODE_SERVER_AUTH"] = auth_mode
+        if auth_mode == "none":
+            merged_env.pop("PASSWORD", None)
+            merged_env.pop("DEVNEST_WORKSPACE_PASSWORD", None)
+        elif not (merged_env.get("DEVNEST_WORKSPACE_PASSWORD") or "").strip():
+            raise WorkspaceBringUpError(
+                "DEVNEST_WORKSPACE_AUTH_MODE=password requires DEVNEST_WORKSPACE_PASSWORD",
+            )
+        logger.info(
+            "workspace_code_server_auth_selected",
+            extra={"workspace_id": ctx.wid, "node_key": self._node_id, "auth_mode": auth_mode},
+        )
 
         # Add code-server persistence bind mounts.
         cs_extra_mounts = self._code_server_extra_bind_mounts(
@@ -541,23 +626,25 @@ class DefaultOrchestratorService(OrchestratorService):
             ctx.workspace_host_path,
             ctx.launch_mode,
             ctx.project_storage_key,
+            auth_mode=auth_mode,
         )
 
-        for spec in cs_extra_mounts or []:
-            hp = (spec.host_path or "").strip()
-            if not hp:
-                continue
-            try:
-                verify_workspace_runtime_owns_path(hp)
-                verify_workspace_runtime_can_write_dir(hp)
-            except OSError as e:
-                raise WorkspaceBringUpError(
-                    "workspace host path not writable by runtime user "
-                    f"(pre-container final check failed for bind source {hp!r} → {spec.container_path!r}): {e}",
-                ) from e
+        if not (self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None):
+            for spec in cs_extra_mounts or []:
+                hp = (spec.host_path or "").strip()
+                if not hp:
+                    continue
+                try:
+                    verify_workspace_runtime_owns_path(hp)
+                    verify_workspace_runtime_can_write_dir(hp)
+                except OSError as e:
+                    raise WorkspaceBringUpError(
+                        "workspace host path not writable by runtime user "
+                        f"(pre-container final check failed for bind source {hp!r} → {spec.container_path!r}): {e}",
+                    ) from e
 
         proj = (ctx.workspace_host_path or "").strip()
-        if proj:
+        if proj and not (self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None):
             try:
                 verify_workspace_runtime_owns_path(proj)
                 verify_workspace_runtime_can_write_dir(proj)
@@ -584,7 +671,9 @@ class DefaultOrchestratorService(OrchestratorService):
                 euid_last = -1
             _strict_last_chown = euid_last == 0
             proj_last = (ctx.workspace_host_path or "").strip()
-            if proj_last:
+            if proj_last and not (
+                self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None
+            ):
                 finalize_workspace_host_project_tree_ownership(proj_last, strict=_strict_last_chown)
             cfg_dest = CODE_SERVER_CONFIG_CONTAINER_PATH.rstrip("/")
             cfg_host_bind = ""
@@ -594,7 +683,14 @@ class DefaultOrchestratorService(OrchestratorService):
                     cfg_host_bind = str(spec.host_path or "").strip()
                     break
             if cfg_host_bind:
-                log_workspace_config_bind_host_before_docker_start(ctx.wid, cfg_host_bind)
+                if self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None:
+                    log_remote_workspace_config_bind_host_before_docker_start(
+                        self._workspace_host_command_runner,
+                        ctx.wid,
+                        cfg_host_bind,
+                    )
+                else:
+                    log_workspace_config_bind_host_before_docker_start(ctx.wid, cfg_host_bind)
 
             return ensure_running_runtime_only(
                 self._runtime_adapter,
@@ -603,7 +699,9 @@ class DefaultOrchestratorService(OrchestratorService):
                 ports=((0, WORKSPACE_IDE_CONTAINER_PORT),),
                 labels=ctx.labels,
                 workspace_host_path=ctx.workspace_host_path,
-                skip_netns_resolution=_env_skip_linux_topology_attachment(),
+                skip_netns_resolution=(
+                    _env_skip_linux_topology_attachment() or self._remote_topology_attach_deferred
+                ),
                 cpu_limit=cpu_limit_cores,
                 memory_limit_bytes=memory_limit_bytes,
                 env=merged_env,
@@ -722,6 +820,31 @@ class DefaultOrchestratorService(OrchestratorService):
         running: EnsureRunningRuntimeResult,
     ) -> tuple[NetnsRefResult, AttachWorkspaceResult]:
         """Ensure node topology, allocate IP, attach workspace veth to bridge."""
+        if self._remote_topology_attach_deferred:
+            logger.info(
+                "remote_topology_attach_deferred",
+                extra={
+                    "workspace_id": ctx.wid,
+                    "node_id": self._node_id,
+                    "topology_id": self._topology_id,
+                    "container_id": running.container_id,
+                    "detail": "skipping local nsenter/netns attach for remote execution node",
+                },
+            )
+            netns = NetnsRefResult(
+                container_id=running.container_id,
+                pid=running.pid,
+                netns_ref=running.netns_ref or "remote-topology-deferred",
+            )
+            attach_res = AttachWorkspaceResult(
+                attachment_id=0,
+                workspace_ip="",
+                bridge_name=None,
+                gateway_ip=None,
+                internal_endpoint="",
+            )
+            return netns, attach_res
+
         try:
             self._bring_up_wait_workspace_alive_for_topology(
                 ctx,
@@ -844,6 +967,15 @@ class DefaultOrchestratorService(OrchestratorService):
         wait_total = max(1.0, min(600.0, wait_total))
         poll_interval = max(0.05, min(30.0, poll_interval))
 
+        if self._remote_topology_attach_deferred:
+            return self._bring_up_run_remote_host_port_probe(
+                ctx,
+                running,
+                netns,
+                wait_total=wait_total,
+                poll_interval=poll_interval,
+            )
+
         ws_ip = (attach_res.workspace_ip or "").strip()
         tcp_reached = False
         try:
@@ -904,6 +1036,71 @@ class DefaultOrchestratorService(OrchestratorService):
             internal_endpoint=internal_ep,
             gateway_route_target=gw,
             probe_healthy=health.healthy,
+            issues=_issues_or_none(issue_msgs),
+        )
+
+    def _bring_up_run_remote_host_port_probe(
+        self,
+        ctx: _BringUpContext,
+        running: EnsureRunningRuntimeResult,
+        netns: NetnsRefResult,
+        *,
+        wait_total: float,
+        poll_interval: float,
+    ) -> WorkspaceBringUpResult:
+        host_port = next(
+            (int(host) for host, container in running.resolved_ports if int(container) == WORKSPACE_IDE_CONTAINER_PORT),
+            None,
+        )
+        ctr = self._probe_runner.check_container_running(container_id=running.container_id)
+        service_healthy = False
+        service_issues = ()
+        if host_port is None:
+            service_issues = (
+                "service:published_port_missing:"
+                f"no published host port for IDE container port {WORKSPACE_IDE_CONTAINER_PORT}",
+            )
+        else:
+            deadline = time.monotonic() + wait_total
+            last_http = None
+            while time.monotonic() < deadline:
+                remaining = max(0.5, deadline - time.monotonic())
+                per_try = min(5.0, remaining)
+                last_http = self._probe_runner.check_service_http(
+                    workspace_ip="127.0.0.1",
+                    port=host_port,
+                    timeout_seconds=per_try,
+                )
+                if last_http.healthy:
+                    service_healthy = True
+                    break
+                time.sleep(poll_interval)
+            if not service_healthy and last_http is not None:
+                service_issues = tuple(
+                    f"{i.component}:{i.code}:{i.message}" for i in last_http.issues
+                )
+
+        issue_msgs = [f"{i.component}:{i.code}:{i.message}" for i in ctr.issues]
+        issue_msgs.extend(str(i) for i in service_issues)
+        internal_ep = f"127.0.0.1:{host_port}" if host_port is not None else None
+        gw = compose_traefik_upstream_target(
+            traefik_routing_host=self._traefik_routing_host,
+            resolved_ports=running.resolved_ports,
+            topology_internal_endpoint=internal_ep,
+            ide_container_port=WORKSPACE_IDE_CONTAINER_PORT,
+        )
+        return WorkspaceBringUpResult(
+            workspace_id=ctx.wid,
+            success=bool(ctr.healthy and service_healthy),
+            node_id=self._node_id,
+            topology_id=str(self._topology_id),
+            container_id=running.container_id,
+            container_state=running.container_state,
+            netns_ref=netns.netns_ref,
+            workspace_ip=None,
+            internal_endpoint=internal_ep,
+            gateway_route_target=gw,
+            probe_healthy=bool(ctr.healthy and service_healthy),
             issues=_issues_or_none(issue_msgs),
         )
 
@@ -1372,6 +1569,12 @@ class DefaultOrchestratorService(OrchestratorService):
                     f"runtime:delete_failed:{del_res.message or 'delete_container returned success=False'}",
                 )
             return container_deleted, final_state
+        except ContainerNotFoundError as e:
+            logger.info(
+                "workspace.delete.container_missing_treated_as_success",
+                extra={"container_id": container_id, "error": str(e)},
+            )
+            return True, "missing"
         except RuntimeAdapterError as e:
             issues.append(f"runtime:delete_failed:{e}")
             return False, None
@@ -1810,6 +2013,40 @@ class DefaultOrchestratorService(OrchestratorService):
                 container_state=ins.container_state,
                 probe_healthy=False,
                 issues=_issues_or_none([f"health:container:not_running:{state or 'unknown'}"]),
+            )
+
+        if self._remote_topology_attach_deferred:
+            netns_ref = None
+            try:
+                netns_ref = self._runtime_adapter.get_container_netns_ref(container_id=cid).netns_ref
+            except Exception:
+                netns_ref = None
+            running = EnsureRunningRuntimeResult(
+                container_id=cid,
+                container_state=ins.container_state,
+                pid=ins.pid or 0,
+                netns_ref=netns_ref or "remote-topology-deferred",
+                resolved_ports=ins.ports,
+                node_id=nid,
+            )
+            return self._bring_up_run_remote_host_port_probe(
+                _BringUpContext(
+                    wid=wid,
+                    ws_int=_parse_topology_workspace_id(wid),
+                    container_name=_sanitize_container_name(wid),
+                    workspace_host_path="",
+                    project_storage_key=None,
+                    launch_mode="health",
+                    labels={},
+                ),
+                running,
+                NetnsRefResult(
+                    container_id=cid,
+                    pid=ins.pid or 0,
+                    netns_ref=netns_ref or "remote-topology-deferred",
+                ),
+                wait_total=5.0,
+                poll_interval=1.0,
             )
 
         try:

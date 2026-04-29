@@ -29,11 +29,12 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 from app.libs.observability.log_events import LogEvent, log_event
-from app.services.node_execution_service.ssm_send_command import build_ssm_client
 from app.services.placement_service import get_node
+from app.services.placement_service.bootstrap import system_default_topology_id
 from app.services.placement_service.constants import (
     DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
     DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
+    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
 )
 from app.services.placement_service.models import (
     ExecutionNode,
@@ -53,7 +54,6 @@ from app.services.providers.errors import Ec2InstanceNotFoundError, Ec2ProviderE
 
 from .errors import Ec2ProvisionConfigurationError, NodeLifecycleError
 from .models import Ec2ProvisionRequest
-from .ssm_readiness import is_instance_ssm_online
 
 logger = logging.getLogger(__name__)
 
@@ -109,11 +109,23 @@ def provision_ec2_node(
 
     client = ec2_client or build_ec2_client(region=req.region)
     region = client.meta.region_name or (req.region or settings.aws_region or "").strip() or "unknown"
+    run_instances_params = _run_instances_params(req, settings)
+    user_data_bytes = len((run_instances_params.get("UserData") or "").encode("utf-8"))
+    logger.info(
+        "ec2_run_instances_request_prepared",
+        extra={
+            "node_key": explicit_key or None,
+            "instance_type": req.instance_type,
+            "region": region,
+            "user_data_present": "UserData" in run_instances_params,
+            "user_data_bytes": user_data_bytes,
+        },
+    )
 
     try:
         resp = client_call_with_throttle_retry(
             "ec2.RunInstances",
-            lambda: client.run_instances(**_run_instances_params(req, settings)),
+            lambda: client.run_instances(**run_instances_params),
         )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
@@ -137,6 +149,9 @@ def provision_ec2_node(
     iid = (instances[0].get("InstanceId") or "").strip()
     if not iid:
         raise Ec2ProvisionConfigurationError("run_instances returned empty InstanceId")
+    initial_private_ip = (instances[0].get("PrivateIpAddress") or "").strip() or None
+    initial_public_ip = (instances[0].get("PublicIpAddress") or "").strip() or None
+    initial_az = ((instances[0].get("Placement") or {}).get("AvailabilityZone") or "").strip() or None
 
     if wait_until_running:
         try:
@@ -155,6 +170,26 @@ def provision_ec2_node(
                 },
             )
             raise Ec2ProvisionConfigurationError(f"wait instance_running failed for {iid}: {e}") from e
+        try:
+            desc = describe_ec2_instance(iid, ec2_client=client)
+            initial_private_ip = desc.private_ip or initial_private_ip
+            initial_public_ip = desc.public_ip or initial_public_ip
+            initial_az = desc.availability_zone or initial_az
+            logger.info(
+                "ec2_provision_instance_network_synced",
+                extra={
+                    "node_key": explicit_key or None,
+                    "instance_id": iid,
+                    "private_ip": initial_private_ip,
+                    "public_ip": initial_public_ip,
+                    "availability_zone": initial_az,
+                },
+            )
+        except Ec2ProviderError as e:
+            logger.warning(
+                "ec2_provision_instance_network_sync_failed",
+                extra={"node_key": explicit_key or None, "instance_id": iid, "error": str(e)},
+            )
         except ClientError as e:
             logger.error(
                 "ec2_provision_wait_running_failed_orphan_risk",
@@ -206,11 +241,11 @@ def provision_ec2_node(
         provider_type=ExecutionNodeProviderType.EC2.value,
         provider_instance_id=iid,
         region=region,
-        availability_zone=None,
+        availability_zone=initial_az,
         instance_type=req.instance_type,
         hostname=None,
-        private_ip=None,
-        public_ip=None,
+        private_ip=initial_private_ip,
+        public_ip=initial_public_ip,
         execution_mode=raw_em,
         ssh_host=None,
         ssh_port=22,
@@ -221,6 +256,7 @@ def provision_ec2_node(
         total_memory_mb=mem_mb,
         allocatable_cpu=vcpu,
         allocatable_memory_mb=mem_mb,
+        default_topology_id=system_default_topology_id(),
         metadata_json=meta,
         iam_instance_profile_name=(req.iam_instance_profile_name or "").strip() or None,
         last_synced_at=None,
@@ -237,7 +273,21 @@ def provision_ec2_node(
     )
     logger.info(
         "ec2_node_provisioned",
-        extra={"node_key": node_key, "instance_id": iid, "provision_correlation_id": corr},
+        extra={
+            "node_key": node_key,
+            "instance_id": iid,
+            "private_ip": row.private_ip,
+            "default_topology_id": row.default_topology_id,
+            "provision_correlation_id": corr,
+        },
+    )
+    logger.info(
+        "execution_node.topology.assigned",
+        extra={
+            "node_key": row.node_key,
+            "execution_node_id": row.id,
+            "default_topology_id": row.default_topology_id,
+        },
     )
     return row
 
@@ -274,6 +324,9 @@ def _run_instances_params(req: Ec2ProvisionRequest, settings: Any) -> dict[str, 
     key = (req.key_name or "").strip()
     if key:
         params["KeyName"] = key
+    user_data = req.user_data or ""
+    if user_data.strip():
+        params["UserData"] = user_data
     return params
 
 
@@ -701,6 +754,119 @@ def terminate_ec2_node(
     return row
 
 
+_EC2_HEARTBEAT_READY_PROMOTION_STATUSES = frozenset(
+    {
+        ExecutionNodeStatus.PROVISIONING.value,
+        ExecutionNodeStatus.NOT_READY.value,
+    },
+)
+
+
+def _ec2_heartbeat_readiness(row: ExecutionNode, *, ec2_state: str | None = None) -> tuple[bool, str, int | None]:
+    """Return whether an EC2 node heartbeat is sufficient to admit scheduler capacity."""
+    hb = row.last_heartbeat_at
+    if hb is None:
+        return False, "missing_heartbeat", None
+    if hb.tzinfo is None:
+        hb = hb.replace(tzinfo=timezone.utc)
+    max_age = int(get_settings().devnest_node_heartbeat_max_age_seconds or 300)
+    age = (_now() - hb).total_seconds()
+    if age < 0 or age > max_age:
+        return False, "stale_heartbeat", None
+
+    meta = dict(row.metadata_json or {})
+    state = (ec2_state or str((meta.get("ec2") or {}).get("state") or "")).strip().lower()
+    if state and state != "running":
+        return False, f"ec2_state_{state}", None
+
+    heartbeat = dict((row.metadata_json or {}).get("heartbeat") or {})
+    if heartbeat.get("docker_ok") is not True:
+        return False, "docker_not_ready", None
+
+    try:
+        disk_free_mb = int(heartbeat.get("disk_free_mb"))
+    except (TypeError, ValueError):
+        return False, "missing_disk_free_mb", None
+    min_disk_mb = int(DEFAULT_WORKSPACE_REQUEST_DISK_MB)
+    if disk_free_mb < min_disk_mb:
+        return False, "insufficient_disk_free_mb", disk_free_mb
+    return True, "ready", disk_free_mb
+
+
+def promote_ec2_node_if_heartbeat_ready(
+    session: Session,
+    row: ExecutionNode,
+    *,
+    ec2_state: str | None = None,
+    readiness: str = "heartbeat",
+) -> bool:
+    """
+    Promote autoscaled EC2 nodes to READY when heartbeat proves Docker and disk readiness.
+
+    The function is intentionally idempotent and refuses terminal/draining/error nodes. Catalog-only
+    EC2 stubs stay unschedulable until an operator explicitly enables them.
+    """
+    status = (row.status or "").strip().upper()
+    if row.provider_type != ExecutionNodeProviderType.EC2.value:
+        return False
+    if status not in _EC2_HEARTBEAT_READY_PROMOTION_STATUSES:
+        return False
+    if "catalog_ec2_stub" in dict(row.metadata_json or {}):
+        return False
+
+    ok, reason, disk_free_mb = _ec2_heartbeat_readiness(row, ec2_state=ec2_state)
+    if not ok:
+        logger.info(
+            "ec2_node_ready_promotion_waiting",
+            extra={
+                "node_key": row.node_key,
+                "instance_id": (row.provider_instance_id or "").strip() or None,
+                "status": row.status,
+                "reason": reason,
+                "disk_free_mb": disk_free_mb,
+            },
+        )
+        return False
+
+    now = _now()
+    row.status = ExecutionNodeStatus.READY.value
+    row.schedulable = True
+    row.last_error_code = None
+    row.last_error_message = None
+    row.updated_at = now
+    row.metadata_json = _merge_metadata(
+        row,
+        {
+            "lifecycle": {
+                "ready_at": now.isoformat(),
+                "readiness": readiness,
+                "disk_free_mb": disk_free_mb,
+            },
+        },
+    )
+    session.add(row)
+    session.flush()
+    log_event(
+        logger,
+        LogEvent.EC2_NODE_READY,
+        node_key=row.node_key,
+        instance_id=(row.provider_instance_id or "").strip() or None,
+        readiness=readiness,
+        disk_free_mb=disk_free_mb,
+    )
+    logger.info(
+        "ec2_node_ready",
+        extra={
+            "node_key": row.node_key,
+            "instance_id": (row.provider_instance_id or "").strip() or None,
+            "execution_mode": row.execution_mode,
+            "readiness": readiness,
+            "disk_free_mb": disk_free_mb,
+        },
+    )
+    return True
+
+
 def sync_node_state(
     session: Session,
     *,
@@ -711,11 +877,13 @@ def sync_node_state(
     promote_provisioning_when_ready: bool = True,
 ) -> ExecutionNode:
     """
-    Refresh EC2 fields via :func:`register_ec2_instance`, then optionally promote ``PROVISIONING`` →
-    ``READY`` when the instance is running and (for ``ssm_docker``) SSM reports the agent online.
+    Refresh EC2 fields via :func:`register_ec2_instance`, then optionally promote ``PROVISIONING`` /
+    ``NOT_READY`` → ``READY`` when the instance is running and a fresh heartbeat has reported
+    ``docker_ok=true`` with enough free disk.
     """
     row = get_node(session, node_id=node_id, node_key=node_key)
     _assert_ec2_node(row, op="sync_node_state")
+    original_status = (row.status or "").strip().upper()
     iid = (row.provider_instance_id or "").strip()
     if not iid:
         raise NodeLifecycleError(f"node {row.node_key!r} has no provider_instance_id")
@@ -744,7 +912,7 @@ def sync_node_state(
     if not promote_provisioning_when_ready:
         return row
 
-    if row.status != ExecutionNodeStatus.PROVISIONING.value:
+    if original_status not in _EC2_HEARTBEAT_READY_PROMOTION_STATUSES:
         return row
 
     try:
@@ -755,33 +923,12 @@ def sync_node_state(
     if desc.state != "running":
         return row
 
-    mode = (row.execution_mode or "").strip().lower()
-    if mode == ExecutionNodeExecutionMode.SSM_DOCKER.value:
-        ssm = ssm_client or build_ssm_client(region=(row.region or "").strip() or None)
-        if not is_instance_ssm_online(ssm, iid):
-            logger.info(
-                "ec2_node_provisioning_waiting_ssm",
-                extra={"node_key": row.node_key, "instance_id": iid},
-            )
-            return row
-    elif mode == ExecutionNodeExecutionMode.SSH_DOCKER.value:
-        pass
-    else:
-        return row
+    if row.status == ExecutionNodeStatus.READY.value and original_status in _EC2_HEARTBEAT_READY_PROMOTION_STATUSES:
+        row.status = original_status
+        row.schedulable = False
 
-    row.status = ExecutionNodeStatus.READY.value
-    row.schedulable = True
-    row.last_error_code = None
-    row.last_error_message = None
-    row.updated_at = _now()
-    row.metadata_json = _merge_metadata(
-        row,
-        {"lifecycle": {"ready_at": _now().isoformat(), "readiness": "ssm" if mode == ExecutionNodeExecutionMode.SSM_DOCKER.value else "ssh_docker_running"}},
-    )
+    if promote_ec2_node_if_heartbeat_ready(session, row, ec2_state=desc.state, readiness="ec2_running_heartbeat"):
+        return row
     session.add(row)
     session.flush()
-    logger.info(
-        "ec2_node_ready",
-        extra={"node_key": row.node_key, "instance_id": iid, "execution_mode": row.execution_mode},
-    )
     return row
