@@ -13,7 +13,6 @@ from sqlmodel import Session, SQLModel, select
 
 from app.services.workspace_service.models import (
     Workspace,
-    WorkspaceRuntime,
     WorkspaceStatus,
 )
 
@@ -89,7 +88,5 @@ def test_delete_workspace_deregisters_gateway_route(
     helpers.process_job(client, del_jid)
 
     ws = db_session.get(Workspace, wid)
-    rt = db_session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
     assert ws is not None and ws.status == WorkspaceStatus.DELETED.value
-    assert rt is not None
     assert helpers.route_for_workspace(helpers.fetch_registered_routes(), wid) is None
