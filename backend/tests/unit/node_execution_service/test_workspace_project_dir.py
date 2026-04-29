@@ -13,6 +13,7 @@ from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
     ensure_code_server_bind_auth_proxy_config,
     prune_orphaned_workspace_project_dirs,
+    remote_prepare_code_server_bind_mounts,
     resolve_workspace_ide_bind_host_path,
     ssh_remote_ensure_workspace_project_dir,
     verify_workspace_runtime_owns_path,
@@ -150,6 +151,39 @@ def test_ssh_remote_mkdir(monkeypatch: pytest.MonkeyPatch) -> None:
     assert runner.run.call_count == 3
     assert runner.run.call_args_list[-2].args[0] == ["mkdir", "-p", "/var/devnest/ws7-k1"]
     assert runner.run.call_args_list[-1].args[0] == ["chown", "-R", "1000:1000", "/var/devnest/ws7-k1"]
+
+
+def test_remote_code_server_prepare_chowns_root_owned_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_UID", "1000")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_CONTAINER_GID", "1000")
+    runner = MagicMock()
+    runner.run.return_value = (
+        "cfg_uid=1000 cfg_gid=1000 cfg_mode=775 path=/var/devnest/ws7-k1/code-server/config\n"
+        "config_yaml_uid=1000 config_yaml_gid=1000 config_yaml_mode=664 "
+        "path=/var/devnest/ws7-k1/code-server/config/config.yaml\n"
+    )
+
+    cfg_host, data_host = remote_prepare_code_server_bind_mounts(
+        runner,
+        "/var/devnest/ws7-k1",
+        workspace_id="ws7",
+        project_host_path="/var/devnest/ws7-k1/project",
+        auth_mode="none",
+        launch_mode="new",
+    )
+
+    assert cfg_host == "/var/devnest/ws7-k1/code-server/config"
+    assert data_host == "/var/devnest/ws7-k1/code-server/data"
+    cmd = runner.run.call_args.args[0]
+    assert cmd[:2] == ["sh", "-lc"]
+    script = cmd[2]
+    assert 'mkdir -p "$project" "$cfg" "$data"' in script
+    assert 'chown -R "$uid:$gid" "$bundle"' in script
+    assert "project=/var/devnest/ws7-k1/project" in script
+    assert "uid=1000" in script
+    assert "gid=1000" in script
+    assert "auth: none" in script
+    assert "stat -c" in script
 
 
 def test_verify_workspace_runtime_owns_path_rejects_wrong_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -161,6 +161,9 @@ def build_default_orchestrator_for_session(
         ensure_workspace_project_dir=bundle.ensure_workspace_project_dir,
         traefik_routing_host=bundle.traefik_routing_host,
         snapshot_ssh_runner=snapshot_ssh,
+        workspace_host_command_runner=(
+            bundle.topology_command_runner if remote_topology_attach_deferred else None
+        ),
         remote_topology_attach_deferred=remote_topology_attach_deferred,
     )
 

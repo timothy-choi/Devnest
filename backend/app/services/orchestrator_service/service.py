@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import posixpath
 import re
 import shutil
 import sys
@@ -40,6 +41,7 @@ from app.libs.runtime.models import (
 from app.libs.runtime.runtime_orchestrator import ensure_running_runtime_only
 from app.libs.topology.errors import TopologyDeleteError, TopologyError
 from app.libs.topology.system.attachment_ops import assert_netns_attach_target_visible
+from app.libs.topology.system.command_runner import CommandRunner
 from app.libs.topology.interfaces import TopologyAdapter
 from app.libs.topology.results import AttachWorkspaceResult, TopologyJanitorResult
 
@@ -48,7 +50,9 @@ from app.services.node_execution_service.workspace_project_dir import (
     default_local_ensure_workspace_project_dir,
     ensure_code_server_bind_auth_proxy_config,
     finalize_workspace_host_project_tree_ownership,
+    log_remote_workspace_config_bind_host_before_docker_start,
     log_workspace_config_bind_host_before_docker_start,
+    remote_prepare_code_server_bind_mounts,
     resolve_workspace_ide_bind_host_path,
     stat_mode_octal,
     stat_uid_gid,
@@ -214,6 +218,7 @@ class DefaultOrchestratorService(OrchestratorService):
         ensure_workspace_project_dir: _EnsureWorkspaceProjectDir | None = None,
         traefik_routing_host: str | None = None,
         snapshot_ssh_runner: SshRemoteCommandRunner | None = None,
+        workspace_host_command_runner: CommandRunner | None = None,
         remote_topology_attach_deferred: bool = False,
     ) -> None:
         self._runtime_adapter = runtime_adapter
@@ -223,6 +228,7 @@ class DefaultOrchestratorService(OrchestratorService):
         self._node_id = node_id.strip() or "node-1"
         self._traefik_routing_host = (traefik_routing_host or "").strip() or None
         self._snapshot_ssh_runner = snapshot_ssh_runner
+        self._workspace_host_command_runner = workspace_host_command_runner
         self._remote_topology_attach_deferred = bool(remote_topology_attach_deferred)
         self._workspace_projects_base = workspace_projects_base or os.path.join(
             tempfile.gettempdir(),
@@ -385,6 +391,37 @@ class DefaultOrchestratorService(OrchestratorService):
                 return []
         if not ide_bind_host:
             return []
+        if self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None:
+            remote_ide = str(ide_bind_host).rstrip("/")
+            if posixpath.basename(remote_ide) == WORKSPACE_USER_PROJECT_SUBDIR:
+                bundle_root_for_cs = posixpath.dirname(remote_ide)
+            else:
+                bundle_root_for_cs = remote_ide
+            try:
+                cfg_host, data_host = remote_prepare_code_server_bind_mounts(
+                    self._workspace_host_command_runner,
+                    bundle_root_for_cs,
+                    workspace_id=wid_clean,
+                    project_host_path=remote_ide,
+                    auth_mode=auth_mode,
+                    launch_mode=launch_mode,
+                )
+            except (RuntimeError, ValueError) as e:
+                raise WorkspaceBringUpError(
+                    "remote workspace host bind-mount path not writable by runtime user "
+                    f"(prepare failed for code-server dirs under {bundle_root_for_cs!r}): {e}",
+                ) from e
+            return [
+                WorkspaceExtraBindMountSpec(
+                    host_path=cfg_host,
+                    container_path=CODE_SERVER_CONFIG_CONTAINER_PATH,
+                ),
+                WorkspaceExtraBindMountSpec(
+                    host_path=data_host,
+                    container_path=CODE_SERVER_DATA_CONTAINER_PATH,
+                ),
+            ]
+
         ide_path = Path(ide_bind_host)
         if ide_path.name == WORKSPACE_USER_PROJECT_SUBDIR:
             bundle_root_for_cs = str(ide_path.parent.resolve())
@@ -592,21 +629,22 @@ class DefaultOrchestratorService(OrchestratorService):
             auth_mode=auth_mode,
         )
 
-        for spec in cs_extra_mounts or []:
-            hp = (spec.host_path or "").strip()
-            if not hp:
-                continue
-            try:
-                verify_workspace_runtime_owns_path(hp)
-                verify_workspace_runtime_can_write_dir(hp)
-            except OSError as e:
-                raise WorkspaceBringUpError(
-                    "workspace host path not writable by runtime user "
-                    f"(pre-container final check failed for bind source {hp!r} → {spec.container_path!r}): {e}",
-                ) from e
+        if not (self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None):
+            for spec in cs_extra_mounts or []:
+                hp = (spec.host_path or "").strip()
+                if not hp:
+                    continue
+                try:
+                    verify_workspace_runtime_owns_path(hp)
+                    verify_workspace_runtime_can_write_dir(hp)
+                except OSError as e:
+                    raise WorkspaceBringUpError(
+                        "workspace host path not writable by runtime user "
+                        f"(pre-container final check failed for bind source {hp!r} → {spec.container_path!r}): {e}",
+                    ) from e
 
         proj = (ctx.workspace_host_path or "").strip()
-        if proj:
+        if proj and not (self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None):
             try:
                 verify_workspace_runtime_owns_path(proj)
                 verify_workspace_runtime_can_write_dir(proj)
@@ -633,7 +671,9 @@ class DefaultOrchestratorService(OrchestratorService):
                 euid_last = -1
             _strict_last_chown = euid_last == 0
             proj_last = (ctx.workspace_host_path or "").strip()
-            if proj_last:
+            if proj_last and not (
+                self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None
+            ):
                 finalize_workspace_host_project_tree_ownership(proj_last, strict=_strict_last_chown)
             cfg_dest = CODE_SERVER_CONFIG_CONTAINER_PATH.rstrip("/")
             cfg_host_bind = ""
@@ -643,7 +683,14 @@ class DefaultOrchestratorService(OrchestratorService):
                     cfg_host_bind = str(spec.host_path or "").strip()
                     break
             if cfg_host_bind:
-                log_workspace_config_bind_host_before_docker_start(ctx.wid, cfg_host_bind)
+                if self._remote_topology_attach_deferred and self._workspace_host_command_runner is not None:
+                    log_remote_workspace_config_bind_host_before_docker_start(
+                        self._workspace_host_command_runner,
+                        ctx.wid,
+                        cfg_host_bind,
+                    )
+                else:
+                    log_workspace_config_bind_host_before_docker_start(ctx.wid, cfg_host_bind)
 
             return ensure_running_runtime_only(
                 self._runtime_adapter,
