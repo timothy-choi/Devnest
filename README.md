@@ -75,6 +75,12 @@ For diagrams and component detail, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 
 4. **API health:** [http://localhost:8000/ready](http://localhost:8000/ready).
 
+5. **Observability:** Prometheus is available at [http://localhost:9090](http://localhost:9090).
+   Grafana is available at [http://localhost:3001](http://localhost:3001) with login
+   `admin` / `admin` by default. Override with `DEVNEST_GRAFANA_ADMIN_USER`,
+   `DEVNEST_GRAFANA_ADMIN_PASSWORD`, `DEVNEST_GRAFANA_PORT`, or `DEVNEST_PROMETHEUS_PORT`.
+   Grafana auto-provisions the Prometheus datasource and the **DevNest Overview** dashboard.
+
 Backend-only or frontend-only development may use `backend/` and `frontend/` READMEs; the integration compose file is the **recommended** path for an end-to-end demo on one machine.
 
 ---
