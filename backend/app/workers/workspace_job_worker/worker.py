@@ -28,6 +28,7 @@ hook (``devnest_autoscaler_*`` settings) may start one provision before the job 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -692,6 +693,22 @@ def _mark_job_failed(
         job_type=job.job_type or "unknown",
         status=WorkspaceJobStatus.FAILED.value,
     )
+    _op_by_job_type = {
+        WorkspaceJobType.CREATE.value: "create",
+        WorkspaceJobType.DELETE.value: "delete",
+        WorkspaceJobType.SNAPSHOT_CREATE.value: "snapshot_create",
+        WorkspaceJobType.SNAPSHOT_RESTORE.value: "snapshot_restore",
+    }
+    _op = _op_by_job_type.get(job.job_type or "")
+    if _op:
+        devnest_metrics.record_workspace_lifecycle_failure(
+            operation=_op,
+            failure_code=failure_code or failure_stage or "unknown",
+        )
+    if job.job_type == WorkspaceJobType.SNAPSHOT_CREATE.value:
+        devnest_metrics.record_workspace_snapshot_operation(operation="create", result="failed")
+    elif job.job_type == WorkspaceJobType.SNAPSHOT_RESTORE.value:
+        devnest_metrics.record_workspace_snapshot_operation(operation="restore", result="failed")
     if job.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value:
         devnest_metrics.record_reconcile_terminal(succeeded=False)
 
@@ -1565,6 +1582,7 @@ def _execute_snapshot_create_job(
         snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
         session.add(snap)
         _mark_job_succeeded(session, job)
+        devnest_metrics.record_workspace_snapshot_operation(operation="create", result="succeeded")
         _touch_workspace(session, ws)
         record_workspace_event(
             session,
@@ -1869,6 +1887,7 @@ def _execute_snapshot_restore_job(
         snap.status = WorkspaceSnapshotStatus.AVAILABLE.value
         session.add(snap)
         _mark_job_succeeded(session, job)
+        devnest_metrics.record_workspace_snapshot_operation(operation="restore", result="succeeded")
         _touch_workspace(session, ws)
         record_workspace_event(
             session,
@@ -1979,15 +1998,29 @@ def _execute_job_body(
         _env.update(_secret_env)
         _features = get_workspace_features(_config_json).model_dump()
 
-        result = orchestrator.bring_up_workspace_runtime(
-            workspace_id=wid_str,
-            project_storage_key=ws.project_storage_key,
-            requested_config_version=cfg_v,
-            cpu_limit_cores=float(_cpu_limit) if _cpu_limit else None,
-            memory_limit_mib=int(_mem_limit) if _mem_limit else None,
-            env=_env,
-            features=_features,
-            launch_mode="new" if jt == WorkspaceJobType.CREATE.value else "resume",
+        _started = time.monotonic()
+        try:
+            result = orchestrator.bring_up_workspace_runtime(
+                workspace_id=wid_str,
+                project_storage_key=ws.project_storage_key,
+                requested_config_version=cfg_v,
+                cpu_limit_cores=float(_cpu_limit) if _cpu_limit else None,
+                memory_limit_mib=int(_mem_limit) if _mem_limit else None,
+                env=_env,
+                features=_features,
+                launch_mode="new" if jt == WorkspaceJobType.CREATE.value else "resume",
+            )
+        except Exception:
+            devnest_metrics.observe_workspace_provisioning_duration(
+                job_type=jt or "unknown",
+                result="exception",
+                duration_seconds=time.monotonic() - _started,
+            )
+            raise
+        devnest_metrics.observe_workspace_provisioning_duration(
+            job_type=jt or "unknown",
+            result="succeeded" if result.success else "failed",
+            duration_seconds=time.monotonic() - _started,
         )
         _finalize_bringup_result(session, ws, job, result, config_version=cfg_v)
         return
