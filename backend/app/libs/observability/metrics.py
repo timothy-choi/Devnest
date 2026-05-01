@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType
 from app.services.placement_service.models.enums import ExecutionNodeStatus
@@ -41,9 +41,40 @@ AUTOSCALER_SCALE_UP_TOTAL = Counter(
     "EC2 scale-up provisions started by autoscaler",
 )
 
+AUTOSCALER_DECISIONS_TOTAL = Counter(
+    "devnest_autoscaler_decisions",
+    "Autoscaler evaluation decisions",
+    ["action", "scale_out_recommended"],
+)
+
+AUTOSCALER_PROVISIONS_TOTAL = Counter(
+    "devnest_autoscaler_provisions",
+    "Autoscaler provision attempts",
+    ["result"],
+)
+
 AUTOSCALER_SCALE_DOWN_TOTAL = Counter(
     "devnest_autoscaler_scale_down",
     "EC2 scale-down operations that invoked terminate",
+)
+
+WORKSPACE_LIFECYCLE_FAILURES_TOTAL = Counter(
+    "devnest_workspace_lifecycle_failures",
+    "Workspace lifecycle failures by operation and failure code",
+    ["operation", "failure_code"],
+)
+
+WORKSPACE_SNAPSHOT_OPERATIONS_TOTAL = Counter(
+    "devnest_workspace_snapshot_operations",
+    "Workspace snapshot operations by operation and result",
+    ["operation", "result"],
+)
+
+WORKSPACE_PROVISIONING_DURATION_SECONDS = Histogram(
+    "devnest_workspace_provisioning_duration_seconds",
+    "Workspace runtime provisioning duration in seconds",
+    ["job_type", "result"],
+    buckets=(0.5, 1, 2.5, 5, 10, 20, 40, 60, 120, 300, 600),
 )
 
 GATEWAY_ROUTE_OPS_TOTAL = Counter(
@@ -126,6 +157,12 @@ NODE_STATES = Gauge(
     ["status"],
 )
 
+EXECUTION_NODE_COUNTS = Gauge(
+    "devnest_execution_nodes",
+    "Execution nodes by status and provider type",
+    ["status", "provider_type"],
+)
+
 EC2_NODE_STATES = Gauge(
     "devnest_ec2_nodes",
     "EC2 execution_node rows by status",
@@ -151,6 +188,18 @@ def record_placement_failure(*, reason: str) -> None:
 
 def record_autoscaler_scale_up() -> None:
     AUTOSCALER_SCALE_UP_TOTAL.inc()
+    record_autoscaler_provision(result="success")
+
+
+def record_autoscaler_decision(*, action: str, scale_out_recommended: bool) -> None:
+    AUTOSCALER_DECISIONS_TOTAL.labels(
+        action=(action or "unknown"),
+        scale_out_recommended="true" if scale_out_recommended else "false",
+    ).inc()
+
+
+def record_autoscaler_provision(*, result: str) -> None:
+    AUTOSCALER_PROVISIONS_TOTAL.labels(result=(result or "unknown")).inc()
 
 
 def record_autoscaler_scale_down() -> None:
@@ -205,6 +254,27 @@ def record_internal_auth_failure(*, scope: str) -> None:
     INTERNAL_AUTH_FAILURES_TOTAL.labels(scope=scope or "unknown").inc()
 
 
+def record_workspace_lifecycle_failure(*, operation: str, failure_code: str | None = None) -> None:
+    WORKSPACE_LIFECYCLE_FAILURES_TOTAL.labels(
+        operation=operation or "unknown",
+        failure_code=failure_code or "unknown",
+    ).inc()
+
+
+def record_workspace_snapshot_operation(*, operation: str, result: str) -> None:
+    WORKSPACE_SNAPSHOT_OPERATIONS_TOTAL.labels(
+        operation=operation or "unknown",
+        result=result or "unknown",
+    ).inc()
+
+
+def observe_workspace_provisioning_duration(*, job_type: str, result: str, duration_seconds: float) -> None:
+    WORKSPACE_PROVISIONING_DURATION_SECONDS.labels(
+        job_type=job_type or "unknown",
+        result=result or "unknown",
+    ).observe(max(0.0, float(duration_seconds)))
+
+
 def refresh_gauges_from_db(session: Session) -> None:
     from sqlalchemy import func
     from sqlmodel import select
@@ -233,6 +303,19 @@ def refresh_gauges_from_db(session: Session) -> None:
         st, cnt = row[0], row[1]
         if st:
             NODE_STATES.labels(status=str(st)).set(int(cnt))
+
+    provider_values = [e.value for e in ExecutionNodeProviderType]
+    for es in ExecutionNodeStatus:
+        for provider in provider_values:
+            EXECUTION_NODE_COUNTS.labels(status=es.value, provider_type=provider).set(0)
+    provider_stmt = (
+        select(ExecutionNode.status, ExecutionNode.provider_type, func.count())
+        .group_by(ExecutionNode.status, ExecutionNode.provider_type)
+    )
+    for row in session.exec(provider_stmt).all():
+        st, provider, cnt = row[0], row[1], row[2]
+        if st and provider:
+            EXECUTION_NODE_COUNTS.labels(status=str(st), provider_type=str(provider)).set(int(cnt))
 
     for es in ExecutionNodeStatus:
         EC2_NODE_STATES.labels(status=es.value).set(0)

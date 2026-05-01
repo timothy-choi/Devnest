@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import Session
 
+from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import log_event
 from app.services.autoscaler_service.service import run_scale_out_tick
 
@@ -27,6 +28,10 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
         log_event(logger, "autoscaler.loop.tick")
         try:
             decision, node = run_scale_out_tick(session)
+            devnest_metrics.record_autoscaler_decision(
+                action=decision.action,
+                scale_out_recommended=decision.scale_out_recommended,
+            )
             log_event(
                 logger,
                 "autoscaler.loop.decision",
@@ -53,6 +58,7 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
             session.commit()
             return decision.action, node.node_key if node is not None else None
         except Exception:
+            devnest_metrics.record_autoscaler_provision(result="error")
             session.rollback()
             logger.exception("autoscaler.loop.tick_failed")
             raise

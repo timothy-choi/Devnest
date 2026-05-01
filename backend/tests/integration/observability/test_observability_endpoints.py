@@ -28,9 +28,16 @@ def test_ready_ok(client: TestClient) -> None:
 def test_metrics_exposes_devnest_series(client: TestClient) -> None:
     r = client.get("/metrics")
     assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
     body = r.text
+    assert "# HELP" in body
+    assert "# TYPE" in body
     assert "devnest_queue_depth" in body
     assert "devnest_jobs" in body or "devnest_jobs_queued" in body
+    assert "devnest_workspace_states" in body
+    assert "devnest_execution_nodes" in body
+    assert "devnest_autoscaler_decisions" in body
+    assert "devnest_workspace_provisioning_duration_seconds" in body
 
 
 def test_correlation_id_round_trip_on_response(client: TestClient) -> None:
