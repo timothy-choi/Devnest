@@ -1,6 +1,6 @@
 """Allow NULL workspace.execution_node_id until worker placement (async create).
 
-Revision ID: 0013_workspace_execution_node_id_nullable
+Revision ID: 0013_ws_exec_node_id_null
 Revises: 0012_ws_runtime_gateway_rt
 Create Date: 2026-05-03
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0013_workspace_execution_node_id_nullable"
+revision = "0013_ws_exec_node_id_null"
 down_revision = "0012_ws_runtime_gateway_rt"
 branch_labels = None
 depends_on = None
