@@ -63,11 +63,11 @@ def test_post_workspaces_returns_202_and_payload_shape(
 
     assert res.status_code == 202
     data = res.json()
-    assert data["status"] == "CREATING"
+    assert data["status"] == "PENDING"
     assert data["config_version"] == 1
     assert "workspace_id" in data
     assert "job_id" in data
-    assert data["message"] == "Workspace creation accepted."
+    assert "asynchronously" in (data.get("message") or "").lower()
 
     with Session(workspace_unit_engine) as session:
         out = workspace_intent_service.get_workspace(
@@ -118,7 +118,7 @@ def test_get_workspaces_returns_list_shape(workspace_unit_engine, owner_user_id:
     assert body["total"] == 1
     assert len(body["items"]) == 1
     assert body["items"][0]["name"] == "Listed WS"
-    assert body["items"][0]["status"] == "CREATING"
+    assert body["items"][0]["status"] == "PENDING"
 
 
 def test_get_workspace_by_id_returns_200(workspace_unit_engine, owner_user_id: int) -> None:

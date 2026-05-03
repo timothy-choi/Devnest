@@ -51,10 +51,10 @@ def test_post_workspaces_202_persists_rows_and_matches_db(client, db_session) ->
     r = client.post("/workspaces", json=payload, headers=_auth(token))
     assert r.status_code == status.HTTP_202_ACCEPTED, r.text
     data = r.json()
-    assert data["status"] == "CREATING"
+    assert data["status"] == "PENDING"
     assert data["config_version"] == 1
     assert "workspace_id" in data and "job_id" in data
-    assert data["message"] == "Workspace creation accepted."
+    assert "asynchronously" in (data.get("message") or "").lower()
 
     wid = data["workspace_id"]
     jid = data["job_id"]
@@ -63,7 +63,7 @@ def test_post_workspaces_202_persists_rows_and_matches_db(client, db_session) ->
     assert ws is not None
     assert ws.name == "My Workspace"
     assert ws.description == "integration test workspace"
-    assert ws.status == "CREATING"
+    assert ws.status == "PENDING"
     assert ws.is_private is True
 
     cfg = db_session.exec(select(WorkspaceConfig).where(WorkspaceConfig.workspace_id == wid)).first()
@@ -131,7 +131,7 @@ def test_get_workspaces_empty_then_populated(client, db_session) -> None:
     names = {item["name"] for item in body["items"]}
     assert names == {"Listed A", "Listed B"}
     for item in body["items"]:
-        assert item["status"] == "CREATING"
+        assert item["status"] == "PENDING"
         assert "workspace_id" in item
         assert "is_private" in item
         assert "created_at" in item
@@ -155,7 +155,7 @@ def test_get_workspace_by_id_200_and_404(client, db_session) -> None:
     assert detail["name"] == "Single WS"
     assert detail["description"] == "for get"
     assert detail["owner_user_id"] == uid
-    assert detail["status"] == "CREATING"
+    assert detail["status"] == "PENDING"
     assert detail["latest_config_version"] == 1
 
     missing = client.get("/workspaces/999999999", headers=_auth(token))

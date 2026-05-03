@@ -16,6 +16,11 @@ const statusConfig: Record<
     className: "bg-sky-50 text-sky-700 ring-sky-200",
     icon: Loader2,
   },
+  pending: {
+    label: "Preparing Capacity",
+    className: "bg-cyan-50 text-cyan-700 ring-cyan-200",
+    icon: Loader2,
+  },
   running: {
     label: "Running",
     className: "bg-emerald-50 text-emerald-700 ring-emerald-200",
@@ -44,7 +49,7 @@ export function StatusBadge({ status }: { status: WorkspaceStatus }) {
 
   return (
     <Badge className={`gap-2 rounded-full px-3 py-1 font-medium ring-1 ring-inset ${config.className}`}>
-      <Icon className={`h-3.5 w-3.5 ${status === "setting-up" || status === "restarting" ? "animate-spin" : ""}`} />
+      <Icon className={`h-3.5 w-3.5 ${status === "setting-up" || status === "pending" || status === "restarting" ? "animate-spin" : ""}`} />
       {config.label}
     </Badge>
   );

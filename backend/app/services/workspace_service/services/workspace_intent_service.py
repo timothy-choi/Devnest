@@ -17,7 +17,6 @@ from sqlmodel import Session, select
 from app.libs.observability.correlation import generate_correlation_id
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability.metrics import record_job_queued
-from app.services.autoscaler_service.service import record_placement_failed_scale_out_signal
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,6 @@ from app.services.workspace_service.errors import (
     WorkspaceOperatorPinnedDisabledError,
     WorkspaceOperatorPinnedNodeInvalidError,
     WorkspaceOperatorPinnedNotAllowlistedError,
-    WorkspaceSchedulingCapacityError,
     WorkspaceSchedulingInvalidError,
 )
 from app.services.workspace_service.models import (
@@ -84,7 +82,6 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
-from app.services.scheduler_service.service import schedule_workspace
 from app.services.policy_service.service import (
     evaluate_session_creation,
     evaluate_workspace_creation,
@@ -116,6 +113,7 @@ class CreateWorkspaceResult:
     job_id: int
     config_version: int
     status: str
+    message: str = "Workspace creation accepted."
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +169,7 @@ _PROJECT_DATA_MISSING_SHORT_ISSUE = "Persisted project data is missing on the ex
 _BUSY_STATUSES: frozenset[str] = frozenset(
     {
         WorkspaceStatus.CREATING.value,
+        WorkspaceStatus.PENDING.value,
         WorkspaceStatus.STARTING.value,
         WorkspaceStatus.STOPPING.value,
         WorkspaceStatus.RESTARTING.value,
@@ -1372,50 +1371,26 @@ def create_workspace(
     config_json = body.runtime.to_config_dict()
 
     ensure_default_local_execution_node(session)
-    schedule_result = schedule_workspace(
-        session,
-        workspace_id=0,
-        requested_cpu=rt_cpu,
-        requested_memory_mb=rt_mem,
-        requested_disk_mb=int(DEFAULT_WORKSPACE_REQUEST_DISK_MB),
-    )
-    if schedule_result.invalid_request:
-        raise WorkspaceSchedulingInvalidError(schedule_result.message)
-    if schedule_result.execution_node is None or schedule_result.insufficient_capacity:
-        # Full placement diagnostics are already logged by ``schedule_workspace``; API clients get a
-        # short, stable message (internal ``NoSchedulableNodeError`` strings are operator-oriented).
-        try:
-            record_placement_failed_scale_out_signal(
-                session,
-                detail=schedule_result.message,
-                requested_cpu=rt_cpu,
-                requested_memory_mb=rt_mem,
-                requested_disk_mb=int(DEFAULT_WORKSPACE_REQUEST_DISK_MB),
-                actor_user_id=owner_user_id,
-                correlation_id=cid_pre,
-            )
-            session.commit()
-        except Exception:
-            session.rollback()
-            logger.exception("placement_failed_scale_out_signal_record_failed")
-        raise WorkspaceSchedulingCapacityError(
-            "No execution capacity is available to create a workspace. The node may be at its limit "
-            "for CPU, memory, disk, or concurrent workspaces. Stop or delete unused workspaces, or "
-            "ask an operator to raise execution node limits, then try again.",
+
+    disk_mb = int(DEFAULT_WORKSPACE_REQUEST_DISK_MB)
+    if rt_cpu <= 0 or rt_mem <= 0 or disk_mb <= 0:
+        raise WorkspaceSchedulingInvalidError(
+            "placement requires positive requested_cpu, memory_limit_mib, and disk budget",
         )
-    chosen = schedule_result.execution_node
-    assert chosen.id is not None
 
     ws = Workspace(
         name=body.name,
         description=body.description,
         owner_user_id=owner_user_id,
         project_storage_key=uuid4().hex,
-        status=WorkspaceStatus.CREATING.value,
+        status=WorkspaceStatus.PENDING.value,
+        execution_node_id=None,
         is_private=body.is_private,
         created_at=now,
         updated_at=now,
-        execution_node_id=int(chosen.id),
+        last_error_message=None,
+        last_error_code=None,
+        status_reason="Preparing capacity...",
     )
     session.add(ws)
     session.flush()
@@ -1451,6 +1426,7 @@ def create_workspace(
         requested_config_version=1,
         attempt=0,
         correlation_id=cid,
+        next_attempt_after=None,
     )
     session.add(job)
     session.flush()
@@ -1480,11 +1456,12 @@ def create_workspace(
         workspace_id=ws.workspace_id,
         event_type=WorkspaceStreamEventType.INTENT_QUEUED,
         status=ws.status,
-        message="Workspace creation accepted; job queued",
+        message="Workspace creation accepted; provisioning asynchronously",
         payload={
             "job_id": job.workspace_job_id,
             "job_type": WorkspaceJobType.CREATE.value,
             "requested_config_version": 1,
+            "async_placement": True,
         },
     )
 
@@ -1499,7 +1476,7 @@ def create_workspace(
         workspace_id=ws.workspace_id,
         job_id=job.workspace_job_id,
         correlation_id=cid,
-        metadata={"name": ws.name},
+        metadata={"name": ws.name, "async_placement": True},
     )
     record_usage(
         session,
@@ -1525,6 +1502,7 @@ def create_workspace(
         job_id=job.workspace_job_id,
         config_version=1,
         status=ws.status,
+        message="Workspace creation accepted. Placement and provisioning run asynchronously.",
     )
 
 

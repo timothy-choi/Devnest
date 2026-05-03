@@ -178,7 +178,7 @@ def test_create_workspace_events_end_to_end(client: TestClient, db_session: Sess
 
     ws = _reload_workspace(db_session, wid)
     job = _reload_job(db_session, jid)
-    assert ws is not None and ws.status == WorkspaceStatus.CREATING.value
+    assert ws is not None and ws.status == WorkspaceStatus.PENDING.value
     assert job is not None and job.status == WorkspaceJobStatus.QUEUED.value
 
     ev_before = _observed_event_payloads(db_session, workspace_id=wid, owner_user_id=uid)

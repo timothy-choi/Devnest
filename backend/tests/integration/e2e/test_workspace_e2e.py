@@ -183,7 +183,7 @@ def test_e2e_register_login_create_workspace_running(client, db_session: Session
     # Workspace must be in CREATING state immediately
     ws = _reload_workspace(db_session, wid)
     assert ws is not None
-    assert ws.status == WorkspaceStatus.CREATING.value
+    assert ws.status == WorkspaceStatus.PENDING.value
 
     # Process CREATE job with mock orchestrator
     mock_orch = _make_mock_orchestrator(wid_str)

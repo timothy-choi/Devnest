@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 _ACTIVE_WS_STATUSES = frozenset(
     {
         WorkspaceStatus.CREATING.value,
+        WorkspaceStatus.PENDING.value,
         WorkspaceStatus.STARTING.value,
         WorkspaceStatus.RUNNING.value,
         WorkspaceStatus.STOPPING.value,
@@ -65,6 +66,7 @@ _ACTIVE_WS_STATUSES = frozenset(
 _RUNNING_WS_STATUSES = frozenset(
     {
         WorkspaceStatus.RUNNING.value,
+        WorkspaceStatus.PENDING.value,
         WorkspaceStatus.STARTING.value,
         WorkspaceStatus.RESTARTING.value,
     }

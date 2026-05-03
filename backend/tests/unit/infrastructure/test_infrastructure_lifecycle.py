@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 
 from app.services.infrastructure_service.errors import NodeLifecycleError
 from app.services.infrastructure_service.lifecycle import (
+    _ready_gate_script,
     mark_node_draining,
     provision_ec2_node,
     register_catalog_ec2_stub,
@@ -20,6 +21,7 @@ from app.services.infrastructure_service.lifecycle import (
     terminate_ec2_node,
     undrain_node,
 )
+from app.services.node_execution_service.errors import SsmExecutionError
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
 from app.services.placement_service.errors import NoSchedulableNodeError
 from app.services.placement_service.models import (
@@ -400,6 +402,7 @@ def test_sync_promotes_provisioning_to_ready_when_heartbeat_ready(infrastructure
         total_memory_mb=4096,
         allocatable_cpu=2.0,
         allocatable_memory_mb=4096,
+        default_topology_id=1,
         last_heartbeat_at=datetime.now(timezone.utc),
         metadata_json={"heartbeat": {"docker_ok": True, "disk_free_mb": 99_999}},
     )
@@ -423,6 +426,10 @@ def test_sync_promotes_provisioning_to_ready_when_heartbeat_ready(infrastructure
             patch(
                 "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
                 return_value=SimpleNamespace(state="running"),
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.send_run_shell_script",
+                return_value=("node.ready_gate.image_pull_success\nnode.ready_gate.passed\n", ""),
             ),
         ):
             out = sync_node_state(session, node_key="ssm-promote-test")
@@ -450,6 +457,7 @@ def test_sync_promotes_not_ready_to_ready_when_heartbeat_ready(infrastructure_un
         total_memory_mb=4096,
         allocatable_cpu=2.0,
         allocatable_memory_mb=4096,
+        default_topology_id=1,
         last_heartbeat_at=datetime.now(timezone.utc),
         metadata_json={"heartbeat": {"docker_ok": True, "disk_free_mb": 99_999}},
     )
@@ -473,6 +481,10 @@ def test_sync_promotes_not_ready_to_ready_when_heartbeat_ready(infrastructure_un
             patch(
                 "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
                 return_value=SimpleNamespace(state="running"),
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.send_run_shell_script",
+                return_value=("node.ready_gate.image_pull_success\nnode.ready_gate.passed\n", ""),
             ),
         ):
             out = sync_node_state(session, node_key="not-ready-promote-test")
@@ -499,6 +511,7 @@ def test_sync_does_not_promote_provisioning_without_healthy_heartbeat(infrastruc
         total_memory_mb=4096,
         allocatable_cpu=2.0,
         allocatable_memory_mb=4096,
+        default_topology_id=1,
         metadata_json={},
     )
     with Session(infrastructure_unit_engine) as session:
@@ -520,6 +533,10 @@ def test_sync_does_not_promote_provisioning_without_healthy_heartbeat(infrastruc
                 "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
                 return_value=SimpleNamespace(state="running"),
             ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.send_run_shell_script",
+                side_effect=SsmExecutionError("docker: command not found"),
+            ),
         ):
             out = sync_node_state(session, node_key="ssm-waits-heartbeat")
             session.commit()
@@ -527,6 +544,130 @@ def test_sync_does_not_promote_provisioning_without_healthy_heartbeat(infrastruc
 
     assert out.status == ExecutionNodeStatus.PROVISIONING.value
     assert out.schedulable is False
+
+
+def test_ready_gate_script_supports_amazon_linux_docker_install() -> None:
+    script = _ready_gate_script(workspace_image="devnest/workspace:test")
+    assert "dnf install -y docker" in script
+    assert "yum install -y docker" in script
+    assert "apt-get install -y docker.io" in script
+    assert "docker info" in script
+    assert "docker pull devnest/workspace:test" in script
+
+
+def test_sync_keeps_node_unschedulable_when_ready_gate_fails(infrastructure_unit_engine) -> None:
+    iid = "i-0123456789abcdea0"
+    row = ExecutionNode(
+        node_key="ssm-ready-gate-fails",
+        name="ssm-ready-gate-fails",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.PROVISIONING.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        default_topology_id=1,
+        metadata_json={},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+
+        def _fake_register(sess, instance_id, *, ec2_client=None, node_key=None, ssh_user=None, execution_mode=None):
+            r = sess.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ssm-ready-gate-fails")).first()
+            assert r is not None
+            r.status = ExecutionNodeStatus.READY.value
+            r.schedulable = True
+            sess.add(r)
+            sess.flush()
+
+        with (
+            patch(
+                "app.services.infrastructure_service.lifecycle.register_ec2_instance",
+                side_effect=_fake_register,
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+                return_value=SimpleNamespace(state="running"),
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.send_run_shell_script",
+                side_effect=SsmExecutionError("docker: command not found"),
+            ),
+        ):
+            out = sync_node_state(session, node_key="ssm-ready-gate-fails")
+            session.commit()
+            session.refresh(out)
+
+    assert out.status == ExecutionNodeStatus.PROVISIONING.value
+    assert out.schedulable is False
+    assert out.last_error_code == "ReadyGatePending"
+
+
+def test_sync_promotes_ready_only_after_docker_info_and_image_pull_pass(infrastructure_unit_engine) -> None:
+    iid = "i-0123456789abcdea1"
+    row = ExecutionNode(
+        node_key="ssm-ready-gate-passes",
+        name="ssm-ready-gate-passes",
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=iid,
+        region="us-east-1",
+        execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+        ssh_user="ubuntu",
+        status=ExecutionNodeStatus.PROVISIONING.value,
+        schedulable=False,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        default_topology_id=1,
+        metadata_json={},
+    )
+    with Session(infrastructure_unit_engine) as session:
+        session.add(row)
+        session.commit()
+
+        def _fake_register(sess, instance_id, *, ec2_client=None, node_key=None, ssh_user=None, execution_mode=None):
+            r = sess.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ssm-ready-gate-passes")).first()
+            assert r is not None
+            r.status = ExecutionNodeStatus.READY.value
+            r.schedulable = True
+            sess.add(r)
+            sess.flush()
+
+        with (
+            patch(
+                "app.services.infrastructure_service.lifecycle.register_ec2_instance",
+                side_effect=_fake_register,
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+                return_value=SimpleNamespace(state="running"),
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.send_run_shell_script",
+                return_value=(
+                    "node.ready_gate.docker_missing\n"
+                    "node.ready_gate.image_pull_success\n"
+                    "node.ready_gate.passed\n",
+                    "",
+                ),
+            ) as send,
+        ):
+            out = sync_node_state(session, node_key="ssm-ready-gate-passes")
+            session.commit()
+            session.refresh(out)
+
+    assert out.status == ExecutionNodeStatus.READY.value
+    assert out.schedulable is True
+    script = send.call_args[0][2][0]
+    assert "docker info" in script
+    assert "docker pull" in script
 
 
 def test_mark_node_draining_skips_terminated(infrastructure_unit_engine) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -26,7 +27,6 @@ from app.services.workspace_service.models import (
     WorkspaceStatus,
 )
 from app.services.placement_service.bootstrap import ensure_default_local_execution_node
-from app.services.workspace_service.errors import WorkspaceSchedulingCapacityError
 from app.services.workspace_service.services.workspace_secret_service import resolve_workspace_runtime_secret_env
 from app.services.workspace_service.services import workspace_intent_service
 from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
@@ -75,12 +75,10 @@ def test_create_workspace_request_rejects_non_positive_cpu() -> None:
         )
 
 
-def test_create_workspace_rejects_when_execution_node_at_max_slots(
+def test_create_workspace_async_acceptance_always_pending(
     workspace_unit_engine: Engine,
     owner_user_id: int,
 ) -> None:
-    from datetime import datetime, timezone
-
     with Session(workspace_unit_engine) as session:
         node = ensure_default_local_execution_node(session)
         node.max_workspaces = 1
@@ -99,12 +97,27 @@ def test_create_workspace_rejects_when_execution_node_at_max_slots(
         session.commit()
 
     with Session(workspace_unit_engine) as session:
-        with pytest.raises(WorkspaceSchedulingCapacityError):
-            workspace_intent_service.create_workspace(
-                session,
-                owner_user_id=owner_user_id,
-                body=_sample_create_body(),
-            )
+        out = workspace_intent_service.create_workspace(
+            session,
+            owner_user_id=owner_user_id,
+            body=_sample_create_body(),
+        )
+
+    assert out.status == WorkspaceStatus.PENDING.value
+    assert "asynchronously" in out.message.lower()
+
+    with Session(workspace_unit_engine) as session:
+        ws2 = session.get(Workspace, out.workspace_id)
+        assert ws2 is not None
+        assert ws2.status == WorkspaceStatus.PENDING.value
+        assert ws2.execution_node_id is None
+        assert ws2.last_error_message is None
+        assert (ws2.status_reason or "").lower().find("preparing") >= 0
+        job = session.get(WorkspaceJob, out.job_id)
+        assert job is not None
+        assert job.status == WorkspaceJobStatus.QUEUED.value
+        assert job.next_attempt_after is None
+        assert job.job_type == WorkspaceJobType.CREATE.value
 
 
 def test_create_workspace_happy_path_persists_rows_and_result_shape(
@@ -119,7 +132,7 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
             body=body,
         )
 
-    assert out.status == WorkspaceStatus.CREATING.value
+    assert out.status == WorkspaceStatus.PENDING.value
     assert out.config_version == 1
     assert isinstance(out.workspace_id, int)
     assert isinstance(out.job_id, int)
@@ -130,10 +143,10 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
         assert ws.name == "My Workspace"
         assert ws.description == "test workspace"
         assert ws.owner_user_id == owner_user_id
-        assert ws.status == WorkspaceStatus.CREATING.value
+        assert ws.status == WorkspaceStatus.PENDING.value
         assert ws.is_private is False
         assert ws.project_storage_key
-        assert ws.execution_node_id is not None
+        assert ws.execution_node_id is None
 
         cfg = session.exec(
             select(WorkspaceConfig).where(WorkspaceConfig.workspace_id == out.workspace_id),
@@ -163,7 +176,7 @@ def test_create_workspace_happy_path_persists_rows_and_result_shape(
         ).first()
         assert ev is not None
         assert ev.event_type == WorkspaceStreamEventType.INTENT_QUEUED
-        assert ev.status == WorkspaceStatus.CREATING.value
+        assert ev.status == WorkspaceStatus.PENDING.value
         assert ev.payload_json["job_id"] == out.job_id
         assert ev.payload_json["job_type"] == WorkspaceJobType.CREATE.value
 
@@ -366,7 +379,7 @@ def test_get_workspace_returns_detail_and_latest_config_version(
     assert detail.workspace_id == out.workspace_id
     assert detail.name == "My Workspace"
     assert detail.owner_user_id == owner_user_id
-    assert detail.status == WorkspaceStatus.CREATING.value
+    assert detail.status == WorkspaceStatus.PENDING.value
     assert detail.latest_config_version == 2
 
 

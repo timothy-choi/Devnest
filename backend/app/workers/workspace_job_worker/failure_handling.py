@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from app.services.workspace_service.models import WorkspaceJob
 
 logger = logging.getLogger(__name__)
+
+# User-facing / operator-facing text for capacity wait (API + worker retry); not a terminal error.
+WORKSPACE_CAPACITY_PENDING_LAST_ERROR = "Waiting for execution capacity"
 
 
 def utc_now() -> datetime:
@@ -122,6 +126,114 @@ def try_schedule_workspace_job_retry(
             "attempt": current,
             "max_attempts": max_a,
             "failure_stage": stage.value,
+            "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
+        },
+    )
+    return True
+
+
+def _as_aware_utc(ts: datetime) -> datetime:
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def capacity_retry_timeout_seconds() -> int:
+    raw = getattr(get_settings(), "workspace_capacity_retry_timeout_seconds", 600)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 600
+
+
+def capacity_retry_backoff_seconds() -> int:
+    """Seconds to wait before retrying placement after a capacity-class failure.
+
+    ``0`` means immediate retry (tests). Otherwise uses jitter in ``[15, min(config, 30)]``.
+    """
+    raw = getattr(get_settings(), "workspace_capacity_retry_backoff_seconds", 20)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        v = 20
+    if v <= 0:
+        return 0
+    if v < 15:
+        return v
+    hi = min(v, 30)
+    return random.randint(15, hi)
+
+
+def capacity_wait_timed_out(job: WorkspaceJob, *, now: datetime | None = None) -> bool:
+    ts = now if now is not None else utc_now()
+    return (_as_aware_utc(ts) - _as_aware_utc(job.created_at)).total_seconds() >= capacity_retry_timeout_seconds()
+
+
+def try_schedule_capacity_retry(
+    session: Session,
+    job: WorkspaceJob,
+    *,
+    message: str,
+    truncate_message: Callable[[str | None, int], str | None],
+    now: datetime | None = None,
+) -> bool:
+    """
+    Keep capacity placement failures queued until the capacity wait timeout expires.
+
+    This intentionally does not use ``WorkspaceJob.max_attempts`` because capacity retries are
+    autoscaler wait-loop attempts, not repeated runtime/container bring-up attempts.
+    """
+    ts = now if now is not None else utc_now()
+    if capacity_wait_timed_out(job, now=ts):
+        return False
+    job.status = WorkspaceJobStatus.QUEUED.value
+    job.finished_at = None
+    job.started_at = None
+    job.error_msg = truncate_message(message, 8192)
+    job.failure_stage = FailureStage.CAPACITY.value
+    job.failure_code = "no_schedulable_node"
+    job.next_attempt_after = ts + timedelta(seconds=capacity_retry_backoff_seconds())
+    session.add(job)
+    logger.info(
+        "workspace_capacity_retry_scheduled",
+        extra={
+            "workspace_job_id": job.workspace_job_id,
+            "workspace_id": job.workspace_id,
+            "attempt": int(job.attempt or 0),
+            "capacity_retry_timeout_seconds": capacity_retry_timeout_seconds(),
+            "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
+        },
+    )
+    return True
+
+
+def try_schedule_node_readiness_retry(
+    session: Session,
+    job: WorkspaceJob,
+    *,
+    message: str,
+    truncate_message: Callable[[str | None, int], str | None],
+    now: datetime | None = None,
+) -> bool:
+    """Keep placement/bring-up jobs queued while a selected execution node finishes bootstrapping."""
+    ts = now if now is not None else utc_now()
+    if capacity_wait_timed_out(job, now=ts):
+        return False
+    job.status = WorkspaceJobStatus.QUEUED.value
+    job.finished_at = None
+    job.started_at = None
+    job.error_msg = truncate_message(message, 8192)
+    job.failure_stage = FailureStage.CAPACITY.value
+    job.failure_code = "node_readiness"
+    job.next_attempt_after = ts + timedelta(seconds=capacity_retry_backoff_seconds())
+    session.add(job)
+    logger.info(
+        "workspace.retry.scheduled",
+        extra={
+            "workspace_job_id": job.workspace_job_id,
+            "workspace_id": job.workspace_id,
+            "reason": "node_readiness",
+            "attempt": int(job.attempt or 0),
             "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
         },
     )

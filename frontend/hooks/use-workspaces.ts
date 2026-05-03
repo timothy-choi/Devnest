@@ -111,10 +111,10 @@ export function useWorkspaces() {
         description: values.repositoryUrl
           ? `Repository seed requested: ${values.repositoryUrl}`
           : "Provisioning workspace through the DevNest control plane.",
-        status: "setting-up",
-        rawStatus: "CREATING",
-        statusLabel: "Setting up...",
-        statusDetail: "Create accepted and waiting for a worker to process the queued job.",
+        status: "pending",
+        rawStatus: "PENDING",
+        statusLabel: "Preparing capacity...",
+        statusDetail: "Workspace accepted; placement and provisioning run asynchronously.",
         lastOpenedLabel: "Just now",
         lastModifiedLabel: "Just now",
         pendingAction: "Creating",
@@ -135,7 +135,18 @@ export function useWorkspaces() {
     },
     onError: (error, _values, optimisticId) => {
       setOptimisticWorkspaces((current) => current.filter((workspace) => workspace.id !== optimisticId));
-      setCreateError(error instanceof ApiError ? error.detail : "Unable to create the workspace.");
+      if (error instanceof ApiError) {
+        const s = error.status;
+        if (s === 502 || s === 503 || s === 504) {
+          setCreateError(
+            "The service is temporarily unavailable. Refresh the dashboard in a moment — your workspace may still be provisioning.",
+          );
+          return;
+        }
+        setCreateError(error.detail);
+        return;
+      }
+      setCreateError("Could not complete the create request. Try again or refresh the dashboard.");
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["workspaces"] });

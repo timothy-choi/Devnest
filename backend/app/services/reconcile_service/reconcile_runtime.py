@@ -63,6 +63,7 @@ _REMOTE_EXECUTION_MODES = frozenset(
 _BUSY_RECONCILE = frozenset(
     {
         WorkspaceStatus.CREATING.value,
+        WorkspaceStatus.PENDING.value,
         WorkspaceStatus.STARTING.value,
         WorkspaceStatus.STOPPING.value,
         WorkspaceStatus.RESTARTING.value,

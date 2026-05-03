@@ -1,4 +1,4 @@
-export type WorkspaceStatus = "setting-up" | "running" | "stopped" | "restarting" | "error";
+export type WorkspaceStatus = "setting-up" | "pending" | "running" | "stopped" | "restarting" | "error";
 
 /** Control-plane assessment of on-disk project layout vs snapshots (GET /workspaces/{id}). */
 export type ProjectDataLifecycle = "ok" | "unknown" | "restore_required" | "unrecoverable";
