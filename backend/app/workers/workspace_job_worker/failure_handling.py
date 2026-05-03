@@ -193,6 +193,39 @@ def try_schedule_capacity_retry(
     return True
 
 
+def try_schedule_node_readiness_retry(
+    session: Session,
+    job: WorkspaceJob,
+    *,
+    message: str,
+    truncate_message: Callable[[str | None, int], str | None],
+    now: datetime | None = None,
+) -> bool:
+    """Keep placement/bring-up jobs queued while a selected execution node finishes bootstrapping."""
+    ts = now if now is not None else utc_now()
+    if capacity_wait_timed_out(job, now=ts):
+        return False
+    job.status = WorkspaceJobStatus.QUEUED.value
+    job.finished_at = None
+    job.started_at = None
+    job.error_msg = truncate_message(message, 8192)
+    job.failure_stage = FailureStage.CAPACITY.value
+    job.failure_code = "node_readiness"
+    job.next_attempt_after = ts + timedelta(seconds=capacity_retry_backoff_seconds())
+    session.add(job)
+    logger.info(
+        "workspace.retry.scheduled",
+        extra={
+            "workspace_job_id": job.workspace_job_id,
+            "workspace_id": job.workspace_id,
+            "reason": "node_readiness",
+            "attempt": int(job.attempt or 0),
+            "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
+        },
+    )
+    return True
+
+
 def queued_job_eligible_where(job_model_type: type, now: datetime):
     """SQL filter: QUEUED and (no backoff or backoff elapsed)."""
     return and_(

@@ -29,6 +29,7 @@ capacity appears or the capacity wait timeout is reached.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -70,6 +71,7 @@ from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeExecutionMode,
     ExecutionNodeProviderType,
+    ExecutionNodeStatus,
 )
 from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
 from app.services.gateway_client.gateway_client import DevnestGatewayClient
@@ -133,6 +135,7 @@ from .failure_handling import (
     orchestrator_exception_retryable,
     queued_job_eligible_where,
     try_schedule_capacity_retry,
+    try_schedule_node_readiness_retry,
     try_schedule_workspace_job_retry,
 )
 from .results import WorkspaceJobWorkerTickResult
@@ -152,11 +155,21 @@ _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
 _CAPACITY_WAIT_MESSAGE = "Waiting for execution capacity..."
 _CAPACITY_TIMEOUT_MESSAGE = "Timed out waiting for execution capacity. Please try again later."
+_NODE_READINESS_WAIT_MESSAGE = "Waiting for node readiness"
+_NODE_READINESS_TIMEOUT_MESSAGE = "Timed out waiting for node readiness. Please try again later."
 _REMOTE_EXECUTION_MODES = frozenset(
     {
         ExecutionNodeExecutionMode.SSM_DOCKER.value,
         ExecutionNodeExecutionMode.SSH_DOCKER.value,
     }
+)
+_NODE_READINESS_RETRY_JOB_TYPES = frozenset(
+    {
+        WorkspaceJobType.CREATE.value,
+        WorkspaceJobType.START.value,
+        WorkspaceJobType.RESTART.value,
+        WorkspaceJobType.UPDATE.value,
+    },
 )
 
 
@@ -342,6 +355,33 @@ def _export_remote_ec2_snapshot_to_s3(
 def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: WorkspaceJob, exc: BaseException) -> None:
     """Node execution / Docker / SSH binding failed before orchestrator could run the job."""
     message = str(exc)
+    if _node_readiness_retry_allowed(job.job_type) and _is_node_readiness_error(message):
+        _mark_node_not_ready_for_retry(session, node_key=_node_key_from_error_message(message), reason=message)
+        if try_schedule_node_readiness_retry(
+            session,
+            job,
+            message=_NODE_READINESS_WAIT_MESSAGE,
+            truncate_message=_truncate,
+            now=_now(),
+        ):
+            ws.status = WorkspaceStatus.PENDING.value
+            ws.last_error_code = None
+            ws.last_error_message = _NODE_READINESS_WAIT_MESSAGE
+            ws.status_reason = "Waiting for available node..."
+            _touch_workspace(session, ws)
+            return
+        logger.info(
+            "workspace.retry.timeout",
+            extra={"workspace_id": ws.workspace_id, "workspace_job_id": job.workspace_job_id, "reason": "node_readiness"},
+        )
+        message = _NODE_READINESS_TIMEOUT_MESSAGE
+        _mark_job_failed(session, job, message, failure_stage=FailureStage.CAPACITY.value, failure_code="node_readiness")
+        ws.status = WorkspaceStatus.ERROR.value
+        _workspace_set_error(ws, _ERROR_CODE_ORCHESTRATOR_BINDING, message)
+        _touch_workspace(session, ws)
+        assert ws.workspace_id is not None
+        _clear_runtime_capacity_reservation(session, ws.workspace_id)
+        return
     stage, _ = orchestrator_binding_retryable()
     if try_schedule_workspace_job_retry(
         session,
@@ -361,6 +401,55 @@ def _fail_job_from_orchestrator_binding(session: Session, ws: Workspace, job: Wo
     _touch_workspace(session, ws)
     assert ws.workspace_id is not None
     _clear_runtime_capacity_reservation(session, ws.workspace_id)
+
+
+_NODE_KEY_RE = re.compile(r"node ['\"](?P<node_key>[^'\"]+)['\"]")
+
+
+def _node_key_from_error_message(message: str | None) -> str | None:
+    match = _NODE_KEY_RE.search(message or "")
+    if match:
+        return match.group("node_key")
+    return None
+
+
+def _is_node_readiness_error(message: str | None) -> bool:
+    m = (message or "").strip().lower()
+    if not m:
+        return False
+    readiness_markers = (
+        "ssm connectivity check failed",
+        "invocationdoesnotexist",
+        "undeliverable",
+        "ssm runshellscript failed",
+        "docker: command not found",
+        "docker not found",
+        "failed to pull image",
+        "docker pull",
+        "readygatepending",
+        "node.ready_gate",
+    )
+    return any(marker in m for marker in readiness_markers)
+
+
+def _node_readiness_retry_allowed(job_type: str | None) -> bool:
+    return (job_type or "") in _NODE_READINESS_RETRY_JOB_TYPES
+
+
+def _mark_node_not_ready_for_retry(session: Session, *, node_key: str | None, reason: str) -> None:
+    key = (node_key or "").strip()
+    if not key:
+        return
+    node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == key)).first()
+    if node is None or node.provider_type != ExecutionNodeProviderType.EC2.value:
+        return
+    node.status = ExecutionNodeStatus.PROVISIONING.value
+    node.schedulable = False
+    node.last_error_code = "ReadyGatePending"
+    node.last_error_message = _truncate(reason, 4096)
+    node.updated_at = _now()
+    session.add(node)
+    session.flush()
 
 
 def _worker_sessionmaker(bind: Engine):
@@ -1085,6 +1174,17 @@ def _finalize_runtime_running_success(
         reserved_disk_mb=reserved_disk_mb,
     )
     _sync_workspace_execution_node_id(session, ws, node_id)
+    if job.failure_code == "node_readiness":
+        logger.info(
+            "workspace.retry.success",
+            extra={
+                "workspace_id": wid,
+                "workspace_job_id": job.workspace_job_id,
+                "job_type": job.job_type,
+                "reason": "node_readiness",
+                "node_key": node_id,
+            },
+        )
     _mark_job_succeeded(session, job)
     ws.status = WorkspaceStatus.RUNNING.value
     _workspace_clear_errors(ws)
@@ -2311,6 +2411,17 @@ def _process_claimed_running_job(
         job_type=jt,
         attempt=int(job.attempt or 0),
     )
+    if job.failure_code == "node_readiness":
+        logger.info(
+            "workspace.retry.attempt",
+            extra={
+                "workspace_id": wid,
+                "workspace_job_id": jid,
+                "job_type": jt,
+                "reason": "node_readiness",
+                "attempt": int(job.attempt or 0),
+            },
+        )
     record_workspace_event(
         session,
         workspace_id=wid,
@@ -2345,6 +2456,46 @@ def _process_claimed_running_job(
             rb = _format_issues(e.rollback_issues)
             if rb:
                 msg = f"{msg}; rollback_failed: {rb}"
+        if _node_readiness_retry_allowed(jt) and _is_node_readiness_error(msg):
+            _mark_node_not_ready_for_retry(
+                session,
+                node_key=(getattr(orchestrator, "_node_id", None) if orchestrator is not None else None),
+                reason=msg,
+            )
+            if try_schedule_node_readiness_retry(
+                session,
+                job,
+                message=_NODE_READINESS_WAIT_MESSAGE,
+                truncate_message=_truncate,
+                now=_now(),
+            ):
+                ws.status = WorkspaceStatus.PENDING.value
+                ws.last_error_code = None
+                ws.last_error_message = _NODE_READINESS_WAIT_MESSAGE
+                ws.status_reason = "Waiting for available node..."
+                _touch_workspace(session, ws)
+            else:
+                logger.info(
+                    "workspace.retry.timeout",
+                    extra={
+                        "workspace_id": wid,
+                        "workspace_job_id": jid,
+                        "reason": "node_readiness",
+                    },
+                )
+                _mark_job_failed(
+                    session,
+                    job,
+                    _NODE_READINESS_TIMEOUT_MESSAGE,
+                    failure_stage=FailureStage.CAPACITY.value,
+                    failure_code="node_readiness",
+                )
+                ws.status = WorkspaceStatus.ERROR.value
+                _workspace_set_error(ws, _ERROR_CODE_ORCH, _NODE_READINESS_TIMEOUT_MESSAGE)
+                _touch_workspace(session, ws)
+                _clear_runtime_capacity_reservation(session, wid)
+            _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
+            return
         stage = (
             FailureStage.STORAGE
             if jt

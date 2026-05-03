@@ -1703,6 +1703,129 @@ class TestWorkspaceJobRetry:
 
         get_settings.cache_clear()
 
+    def test_node_not_ready_keeps_workspace_pending_and_requeues_job(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.libs.common.config import get_settings
+
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_BACKOFF_SECONDS", "0")
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_TIMEOUT_SECONDS", "600")
+        get_settings.cache_clear()
+
+        def _ssm_not_ready(_s, _ws, _j):
+            raise AppOrchestratorBindingError(
+                "SSM connectivity check failed for node 'ec2-booting' (instance 'i-0123456789abcdef0'): "
+                "InvocationDoesNotExist",
+            )
+
+        with Session(workspace_job_worker_engine) as session:
+            session.add(
+                ExecutionNode(
+                    node_key="ec2-booting",
+                    name="ec2-booting",
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    provider_instance_id="i-0123456789abcdef0",
+                    region="us-east-1",
+                    execution_mode=ExecutionNodeExecutionMode.SSM_DOCKER.value,
+                    status=ExecutionNodeStatus.READY.value,
+                    schedulable=True,
+                    total_cpu=2.0,
+                    total_memory_mb=4096,
+                    allocatable_cpu=2.0,
+                    allocatable_memory_mb=4096,
+                ),
+            )
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.CREATING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+                max_attempts=1,
+            )
+            jid = job.workspace_job_id
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_ssm_not_ready, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws2 = session.get(Workspace, wid)
+            job2 = session.get(WorkspaceJob, jid)
+            node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ec2-booting")).first()
+            assert ws2 is not None and job2 is not None and node is not None
+            assert ws2.status == WorkspaceStatus.PENDING.value
+            assert ws2.last_error_message == "Waiting for node readiness"
+            assert job2.status == WorkspaceJobStatus.QUEUED.value
+            assert job2.failure_stage == "CAPACITY"
+            assert job2.failure_code == "node_readiness"
+            assert node.status == ExecutionNodeStatus.PROVISIONING.value
+            assert node.schedulable is False
+
+        get_settings.cache_clear()
+
+    def test_node_readiness_retry_succeeds_without_manual_retry(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.libs.common.config import get_settings
+
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_BACKOFF_SECONDS", "0")
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_TIMEOUT_SECONDS", "600")
+        get_settings.cache_clear()
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.CREATING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+                max_attempts=1,
+            )
+            jid = job.workspace_job_id
+            session.commit()
+
+        calls = {"n": 0}
+
+        def _node_ready_later(_s, _ws, _j):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise AppOrchestratorBindingError(
+                    "SSM connectivity check failed for node 'ec2-later' (instance 'i-0123456789abcdef1'): "
+                    "InvocationDoesNotExist",
+                )
+            return orch
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_node_ready_later, limit=1)
+            session.commit()
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_node_ready_later, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws2 = session.get(Workspace, wid)
+            job2 = session.get(WorkspaceJob, jid)
+            assert ws2 is not None and job2 is not None
+            assert job2.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws2.status == WorkspaceStatus.RUNNING.value
+            assert ws2.last_error_message is None
+
+        get_settings.cache_clear()
+
     def test_capacity_retry_succeeds_when_node_becomes_available(
         self,
         workspace_job_worker_engine,
