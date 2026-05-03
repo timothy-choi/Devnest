@@ -152,7 +152,7 @@ def test_create_workspace_provisions_runtime_end_to_end(client, db_session: Sess
 
     ws = _reload_workspace(db_session, wid)
     job = _reload_job(db_session, jid)
-    assert ws is not None and ws.status == WorkspaceStatus.CREATING.value
+    assert ws is not None and ws.status == WorkspaceStatus.PENDING.value
     assert job is not None and job.status == WorkspaceJobStatus.QUEUED.value
     assert job.job_type == WorkspaceJobType.CREATE.value
 

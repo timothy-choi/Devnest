@@ -215,6 +215,7 @@ def test_request_update_happy_path_creates_config_v2_and_job(workspace_unit_engi
 @pytest.mark.parametrize(
     "busy_status",
     [
+        WorkspaceStatus.PENDING.value,
         WorkspaceStatus.CREATING.value,
         WorkspaceStatus.STARTING.value,
         WorkspaceStatus.STOPPING.value,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -146,11 +147,21 @@ def capacity_retry_timeout_seconds() -> int:
 
 
 def capacity_retry_backoff_seconds() -> int:
+    """Seconds to wait before retrying placement after a capacity-class failure.
+
+    ``0`` means immediate retry (tests). Otherwise uses jitter in ``[15, min(config, 30)]``.
+    """
     raw = getattr(get_settings(), "workspace_capacity_retry_backoff_seconds", 20)
     try:
-        return max(0, min(int(raw), 30))
+        v = int(raw)
     except (TypeError, ValueError):
-        return 20
+        v = 20
+    if v <= 0:
+        return 0
+    if v < 15:
+        return v
+    hi = min(v, 30)
+    return random.randint(15, hi)
 
 
 def capacity_wait_timed_out(job: WorkspaceJob, *, now: datetime | None = None) -> bool:

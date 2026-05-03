@@ -186,7 +186,7 @@ class TestWorkspaceLifecycleApiHappyPath:
         )
         assert r.status_code == status.HTTP_202_ACCEPTED
         data = r.json()
-        assert data["status"] == WorkspaceStatus.CREATING.value
+        assert data["status"] == WorkspaceStatus.PENDING.value
         assert "workspace_id" in data
         assert "job_id" in data
 
@@ -195,9 +195,7 @@ class TestWorkspaceLifecycleApiHappyPath:
 
         ws = _reload_workspace(db_session, wid)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.CREATING.value
-
-        job = _reload_job(db_session, jid)
+        assert ws.status == WorkspaceStatus.PENDING.value
         assert job is not None
         assert job.status == WorkspaceJobStatus.QUEUED.value
         assert job.job_type == WorkspaceJobType.CREATE.value
@@ -386,16 +384,16 @@ class TestWorkspaceLifecycleApiNegativeCases:
         assert r_start.status_code == status.HTTP_409_CONFLICT
 
     def test_stop_non_running_workspace_returns_409(self, client, db_session: Session) -> None:
-        """Stopping a CREATING workspace returns 409."""
+        """Stopping a PENDING workspace (CREATE not yet RUNNING) returns 409."""
         suffix = uuid.uuid4().hex[:8]
         _, token = _register_and_token(
             client,
             username=f"life_409stop_{suffix}",
             email=f"life_409stop_{suffix}@example.com",
         )
-        # Create workspace but don't process the CREATE job — it stays CREATING
+        # Create workspace but don't process the CREATE job — it stays PENDING until placement/bring-up.
         wid, _ = _create_workspace(client, token)
-        assert _reload_workspace(db_session, wid).status == WorkspaceStatus.CREATING.value
+        assert _reload_workspace(db_session, wid).status == WorkspaceStatus.PENDING.value
 
         r_stop = client.post(f"/workspaces/stop/{wid}", headers=_auth_header(token))
         assert r_stop.status_code == status.HTTP_409_CONFLICT

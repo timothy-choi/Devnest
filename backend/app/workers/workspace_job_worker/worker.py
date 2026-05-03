@@ -858,6 +858,19 @@ def _touch_workspace(session: Session, ws: Workspace) -> None:
     session.add(ws)
 
 
+def _begin_create_bringup_after_placement(session: Session, ws: Workspace, job: WorkspaceJob) -> None:
+    """CREATE jobs accepted as ``PENDING`` move to ``CREATING`` once placement has chosen a node."""
+    if (job.job_type or "") != WorkspaceJobType.CREATE.value:
+        return
+    if ws.status != WorkspaceStatus.PENDING.value:
+        return
+    ws.status = WorkspaceStatus.CREATING.value
+    ws.status_reason = "Provisioning workspace runtime..."
+    ws.last_error_message = None
+    ws.last_error_code = None
+    _touch_workspace(session, ws)
+
+
 def _route_target_port(value: str | None) -> int | None:
     raw = (value or "").strip()
     if not raw:
@@ -2647,6 +2660,7 @@ def _process_next_queued_job_return_id(
             _fail_job_from_orchestrator_binding(session, ws, job, e)
             _emit_job_outcome_event(session, wid=wid, ws=ws, job=job)
             return jid
+        _begin_create_bringup_after_placement(session, ws, job)
         _process_claimed_running_job(session, orchestrator, job)
     return jid
 
@@ -2926,6 +2940,7 @@ def run_queued_workspace_job_by_id(
                 _emit_job_outcome_event(work, wid=wid, ws=ws, job=job)
                 work.commit()
                 return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)
+            _begin_create_bringup_after_placement(work, ws, job)
             _process_claimed_running_job(work, orch, job)
             work.commit()
             return WorkspaceJobWorkerTickResult(processed_count=1, last_job_id=jid)

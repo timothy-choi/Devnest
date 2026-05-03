@@ -93,6 +93,7 @@ class TestWorkspaceCreatePendingCapacity:
             headers=_auth_header(token),
         )
         assert r_a.status_code == status.HTTP_202_ACCEPTED, r_a.text
+        assert r_a.json()["status"] == WorkspaceStatus.PENDING.value
 
         r = client.post(
             "/workspaces",
@@ -102,7 +103,7 @@ class TestWorkspaceCreatePendingCapacity:
         assert r.status_code == status.HTTP_202_ACCEPTED, r.text
         data = r.json()
         assert data["status"] == WorkspaceStatus.PENDING.value
-        assert "waiting for execution capacity" in (data.get("message") or "").lower()
+        assert "asynchronously" in (data.get("message") or "").lower()
         wid = int(data["workspace_id"])
         jid = int(data["job_id"])
 
@@ -113,9 +114,9 @@ class TestWorkspaceCreatePendingCapacity:
         assert ws.status != WorkspaceStatus.ERROR.value
         assert ws.status == WorkspaceStatus.PENDING.value
         assert ws.execution_node_id is None
-        assert ws.last_error_message == "Waiting for execution capacity"
+        assert ws.last_error_message is None
         assert job.status == WorkspaceJobStatus.QUEUED.value
-        assert job.next_attempt_after is not None
+        assert job.next_attempt_after is None
 
     def test_pending_create_job_triggers_autoscaler_scale_out_recommendation(
         self,
@@ -141,6 +142,7 @@ class TestWorkspaceCreatePendingCapacity:
             headers=_auth_header(token),
         )
         assert r_a.status_code == status.HTTP_202_ACCEPTED, r_a.text
+        assert r_a.json()["status"] == WorkspaceStatus.PENDING.value
 
         r = client.post(
             "/workspaces",
@@ -182,6 +184,7 @@ class TestWorkspaceCreatePendingCapacity:
             headers=_auth_header(token),
         )
         assert r1.status_code == status.HTTP_202_ACCEPTED, r1.text
+        assert r1.json()["status"] == WorkspaceStatus.PENDING.value
         wid1 = int(r1.json()["workspace_id"])
         jid1 = int(r1.json()["job_id"])
 

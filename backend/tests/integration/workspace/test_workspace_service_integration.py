@@ -75,7 +75,7 @@ def test_create_workspace_happy_path_persists_workspace_config_and_job(db_sessio
         body=body,
     )
 
-    assert out.status == WorkspaceStatus.CREATING.value
+    assert out.status == WorkspaceStatus.PENDING.value
     assert out.config_version == 1
     assert isinstance(out.workspace_id, int)
     assert isinstance(out.job_id, int)
@@ -85,7 +85,7 @@ def test_create_workspace_happy_path_persists_workspace_config_and_job(db_sessio
     assert ws.name == "My Workspace"
     assert ws.description == "integration test workspace"
     assert ws.owner_user_id == owner_id
-    assert ws.status == WorkspaceStatus.CREATING.value
+    assert ws.status == WorkspaceStatus.PENDING.value
     assert ws.is_private is False
 
     cfg = db_session.exec(
@@ -191,7 +191,7 @@ def test_get_workspace_returns_detail_and_latest_config_version(db_session: Sess
     assert detail.name == "Detail WS"
     assert detail.description == "d"
     assert detail.owner_user_id == owner_id
-    assert detail.status == WorkspaceStatus.CREATING.value
+    assert detail.status == WorkspaceStatus.PENDING.value
     assert detail.latest_config_version == 2
 
 
