@@ -880,6 +880,8 @@ class Settings(BaseSettings):
     # Recent-activity window: a node is considered "recently active" if a workspace was started/stopped
     # within this many seconds of the scale-down evaluation. Default 300s (5 min).
     devnest_autoscaler_recent_activity_window_seconds: int = 300
+    # Minimum age of an otherwise idle READY+schedulable EC2 node before automatic scale-down.
+    devnest_autoscaler_scale_down_idle_seconds: int = 300
 
     # ── Distributed rate limiting (Redis) ───────────────────────────────────
     # Rate limit backend: "memory" (default, single-process) or "redis" (distributed).
@@ -1106,6 +1108,7 @@ class Settings(BaseSettings):
     @field_validator(
         "devnest_autoscaler_scale_out_cooldown_seconds",
         "devnest_autoscaler_scale_in_cooldown_seconds",
+        "devnest_autoscaler_scale_down_idle_seconds",
         mode="before",
     )
     @classmethod

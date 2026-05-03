@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,13 +19,14 @@ from app.services.autoscaler_service.service import (
     evaluate_scale_up,
     maybe_provision_on_no_schedulable_capacity,
     record_placement_failed_scale_out_signal,
+    reclaim_one_idle_ec2_node,
     run_scale_out_tick,
 )
 from app.services.auth_service.models import UserAuth
 from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceJobType, WorkspaceStatus
-from app.workers.autoscaler_loop import run_autoscaler_loop_tick
+from app.workers.autoscaler_loop import run_autoscaler_loop_tick, run_autoscaler_scale_down_tick
 
 
 def _scale_out_settings() -> SimpleNamespace:
@@ -52,6 +54,60 @@ def _scale_out_settings() -> SimpleNamespace:
         devnest_ec2_user_data="",
         devnest_ec2_user_data_b64="",
     )
+
+
+def _scale_down_settings(
+    *,
+    min_nodes: int = 0,
+    min_ec2_before_reclaim: int = 2,
+    cooldown_seconds: int = 0,
+    idle_seconds: int = 300,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        devnest_autoscaler_enabled=True,
+        devnest_autoscaler_min_nodes=min_nodes,
+        devnest_autoscaler_min_ec2_nodes_before_reclaim=min_ec2_before_reclaim,
+        devnest_autoscaler_scale_in_cooldown_seconds=cooldown_seconds,
+        devnest_autoscaler_scale_down_idle_seconds=idle_seconds,
+    )
+
+
+def _seed_ec2_node(
+    session: Session,
+    node_key: str,
+    *,
+    updated_at: datetime | None = None,
+    status: str = ExecutionNodeStatus.READY.value,
+    schedulable: bool = True,
+) -> ExecutionNode:
+    ts = updated_at or (datetime.now(timezone.utc) - timedelta(seconds=600))
+    node = ExecutionNode(
+        node_key=node_key,
+        name=node_key,
+        provider_type=ExecutionNodeProviderType.EC2.value,
+        provider_instance_id=f"i-{node_key.replace('-', '')[:16]:0<16}",
+        status=status,
+        schedulable=schedulable,
+        total_cpu=2.0,
+        total_memory_mb=4096,
+        allocatable_cpu=2.0,
+        allocatable_memory_mb=4096,
+        updated_at=ts,
+    )
+    session.add(node)
+    session.flush()
+    return node
+
+
+def _fake_terminate(session: Session, *, node_key: str, **_kw: object) -> ExecutionNode:
+    node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == node_key)).first()
+    assert node is not None
+    node.status = ExecutionNodeStatus.TERMINATED.value
+    node.schedulable = False
+    node.updated_at = datetime.now(timezone.utc)
+    session.add(node)
+    session.flush()
+    return node
 
 
 @pytest.fixture
@@ -701,6 +757,109 @@ def test_autoscaler_loop_tick_provisions_after_recent_placement_failure_signal(
     assert node_key is not None
     assert mock_provision.call_count == 1
     assert any(row.provider_instance_id == "i-loopplacementfailure" for row in rows)
+
+
+def test_scale_down_idle_node_terminates(autoscaler_unit_engine) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-idle-a", updated_at=old)
+        _seed_ec2_node(session, "ec2-idle-b", updated_at=old)
+        _seed_ec2_node(session, "ec2-idle-c", updated_at=old)
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings()
+        node_key = run_autoscaler_scale_down_tick(autoscaler_unit_engine)
+
+    with Session(autoscaler_unit_engine) as session:
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == node_key)).first()
+        assert node is not None
+        assert node.status == ExecutionNodeStatus.TERMINATED.value
+        assert node.schedulable is False
+    assert node_key == "ec2-idle-a"
+    assert term.call_count == 1
+
+
+def test_scale_down_active_node_does_not_terminate(autoscaler_unit_engine) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="busy-auto", email="busy-auto@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        active = _seed_ec2_node(session, "ec2-active", updated_at=old)
+        _seed_ec2_node(session, "ec2-fresh-a", updated_at=datetime.now(timezone.utc))
+        _seed_ec2_node(session, "ec2-fresh-b", updated_at=datetime.now(timezone.utc))
+        session.commit()
+        ws = Workspace(
+            name="pending-on-node",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+            execution_node_id=int(active.id),
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(WorkspaceRuntime(workspace_id=int(ws.workspace_id), node_id="ec2-active"))
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings()
+        with Session(autoscaler_unit_engine) as session:
+            node = reclaim_one_idle_ec2_node(session)
+
+    assert node is None
+    assert term.call_count == 0
+
+
+def test_scale_down_min_node_floor_respected(autoscaler_unit_engine) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-floor-a", updated_at=old)
+        _seed_ec2_node(session, "ec2-floor-b", updated_at=old)
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings(min_nodes=2, min_ec2_before_reclaim=2)
+        node_key = run_autoscaler_scale_down_tick(autoscaler_unit_engine)
+
+    assert node_key is None
+    assert term.call_count == 0
+
+
+def test_scale_down_cooldown_respected(autoscaler_unit_engine) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-cool-a", updated_at=old)
+        _seed_ec2_node(session, "ec2-cool-b", updated_at=old)
+        _seed_ec2_node(session, "ec2-cool-c", updated_at=old)
+        _seed_ec2_node(
+            session,
+            "ec2-just-terminated",
+            updated_at=datetime.now(timezone.utc),
+            status=ExecutionNodeStatus.TERMINATED.value,
+            schedulable=False,
+        )
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings(cooldown_seconds=900)
+        node_key = run_autoscaler_scale_down_tick(autoscaler_unit_engine)
+
+    assert node_key is None
+    assert term.call_count == 0
 
 
 def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(autoscaler_unit_engine) -> None:

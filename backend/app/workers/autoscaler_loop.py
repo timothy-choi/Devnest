@@ -12,9 +12,11 @@ from sqlmodel import Session
 
 from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import log_event
-from app.services.autoscaler_service.service import run_scale_out_tick
+from app.services.autoscaler_service.service import reclaim_one_idle_ec2_node, run_scale_out_tick
 
 logger = logging.getLogger(__name__)
+
+_SCALE_DOWN_INTERVAL_SECONDS = 60.0
 
 
 def _sessionmaker(engine: Engine) -> sessionmaker:
@@ -64,6 +66,21 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
             raise
 
 
+def run_autoscaler_scale_down_tick(engine: Engine) -> str | None:
+    """Run one automatic scale-down tick and commit any node lifecycle changes."""
+    sm = _sessionmaker(engine)
+    with sm() as session:
+        log_event(logger, "autoscaler.scale_down.tick")
+        try:
+            node = reclaim_one_idle_ec2_node(session)
+            session.commit()
+            return node.node_key if node is not None else None
+        except Exception:
+            session.rollback()
+            logger.exception("autoscaler.scale_down.tick_failed")
+            raise
+
+
 def run_autoscaler_loop(
     engine: Engine,
     stop_event: threading.Event,
@@ -73,11 +90,16 @@ def run_autoscaler_loop(
     """Poll autoscaler decisions until ``stop_event`` is set."""
     interval = max(1.0, float(interval_seconds))
     logger.info("autoscaler_loop_start", extra={"interval_seconds": interval})
+    last_scale_down_at = 0.0
     try:
         while not stop_event.is_set():
             started = time.monotonic()
             try:
                 run_autoscaler_loop_tick(engine)
+                now = time.monotonic()
+                if now - last_scale_down_at >= _SCALE_DOWN_INTERVAL_SECONDS:
+                    run_autoscaler_scale_down_tick(engine)
+                    last_scale_down_at = now
             except Exception:
                 logger.exception("autoscaler_loop_tick_failed")
             elapsed = time.monotonic() - started
