@@ -17,6 +17,7 @@ from app.services.orchestrator_service.results import (
     WorkspaceStopResult,
     WorkspaceUpdateResult,
 )
+from app.services.placement_service.errors import NoSchedulableNodeError
 from app.services.placement_service.models import (
     ExecutionNode,
     ExecutionNodeExecutionMode,
@@ -1656,6 +1657,151 @@ class TestOrchestratorBindingFailure:
 
 
 class TestWorkspaceJobRetry:
+    def test_no_capacity_keeps_workspace_pending_and_requeues_job(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.libs.common.config import get_settings
+
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_BACKOFF_SECONDS", "0")
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_TIMEOUT_SECONDS", "600")
+        get_settings.cache_clear()
+
+        def _no_capacity(_s, _ws, _j):
+            raise NoSchedulableNodeError("no execution node has free slots")
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.CREATING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+                max_attempts=1,
+            )
+            jid = job.workspace_job_id
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_no_capacity, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws2 = session.get(Workspace, wid)
+            job2 = session.get(WorkspaceJob, jid)
+            assert ws2 is not None and job2 is not None
+            assert ws2.status == WorkspaceStatus.PENDING.value
+            assert ws2.last_error_message == "Waiting for execution capacity..."
+            assert ws2.status_reason == "Preparing capacity..."
+            assert job2.status == WorkspaceJobStatus.QUEUED.value
+            assert job2.failure_stage == "CAPACITY"
+            assert job2.failure_code == "no_schedulable_node"
+
+        get_settings.cache_clear()
+
+    def test_capacity_retry_succeeds_when_node_becomes_available(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.libs.common.config import get_settings
+
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_BACKOFF_SECONDS", "0")
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_TIMEOUT_SECONDS", "600")
+        get_settings.cache_clear()
+        orch = _orch()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.CREATING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            orch.bring_up_workspace_runtime.return_value = _bringup_ok(str(wid))
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+                max_attempts=1,
+            )
+            jid = job.workspace_job_id
+            session.commit()
+
+        calls = {"n": 0}
+
+        def _flaky_capacity(_s, _ws, _j):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise NoSchedulableNodeError("no execution node has free slots")
+            return orch
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_flaky_capacity, limit=1)
+            session.commit()
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_flaky_capacity, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws2 = session.get(Workspace, wid)
+            job2 = session.get(WorkspaceJob, jid)
+            assert ws2 is not None and job2 is not None
+            assert job2.status == WorkspaceJobStatus.SUCCEEDED.value
+            assert ws2.status == WorkspaceStatus.RUNNING.value
+            assert ws2.last_error_message is None
+
+        get_settings.cache_clear()
+
+    def test_capacity_retry_timeout_marks_workspace_error(
+        self,
+        workspace_job_worker_engine,
+        owner_user_id: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.libs.common.config import get_settings
+
+        monkeypatch.setenv("WORKSPACE_CAPACITY_RETRY_TIMEOUT_SECONDS", "1")
+        get_settings.cache_clear()
+
+        def _no_capacity(_s, _ws, _j):
+            raise NoSchedulableNodeError("no execution node has free slots")
+
+        with Session(workspace_job_worker_engine) as session:
+            ws = _seed_workspace(session, owner_user_id, status=WorkspaceStatus.PENDING.value)
+            wid = ws.workspace_id
+            assert wid is not None
+            old = datetime.now(timezone.utc) - timedelta(seconds=30)
+            job = _seed_job(
+                session,
+                workspace_id=wid,
+                owner_user_id=owner_user_id,
+                job_type=WorkspaceJobType.CREATE.value,
+                created_at=old,
+                max_attempts=100,
+            )
+            jid = job.workspace_job_id
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            run_pending_jobs(session, get_orchestrator=_no_capacity, limit=1)
+            session.commit()
+
+        with Session(workspace_job_worker_engine) as session:
+            ws2 = session.get(Workspace, wid)
+            job2 = session.get(WorkspaceJob, jid)
+            assert ws2 is not None and job2 is not None
+            assert job2.status == WorkspaceJobStatus.FAILED.value
+            assert job2.failure_stage == "CAPACITY"
+            assert ws2.status == WorkspaceStatus.ERROR.value
+            assert ws2.last_error_code == "PLACEMENT_FAILED"
+            assert ws2.last_error_message == "Timed out waiting for execution capacity. Please try again later."
+
+        get_settings.cache_clear()
+
     def test_bring_up_failure_with_max_attempts_2_requeues_then_terminal(
         self,
         workspace_job_worker_engine,

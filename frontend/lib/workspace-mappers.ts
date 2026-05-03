@@ -3,6 +3,7 @@ import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
 
 const BUSY_STATUSES = new Set([
   "CREATING",
+  "PENDING",
   "STARTING",
   "STOPPING",
   "RESTARTING",
@@ -40,6 +41,8 @@ export function mapBackendStatus(status: string): Workspace["status"] {
   switch (status) {
     case "RUNNING":
       return "running";
+    case "PENDING":
+      return "pending";
     case "STOPPING":
     case "DELETING":
     case "DELETED":
@@ -59,6 +62,8 @@ function getStatusLabel(status: string) {
   switch (status) {
     case "CREATING":
       return "Setting up...";
+    case "PENDING":
+      return "Preparing capacity...";
     case "STARTING":
       return "Starting...";
     case "STOPPING":
@@ -94,6 +99,8 @@ function getStatusDetail(record: WorkspaceRecord) {
   switch (record.status) {
     case "CREATING":
       return "Create accepted and waiting for a worker to process the queued job.";
+    case "PENDING":
+      return "Waiting for available node...";
     case "STARTING":
       return "Start requested and waiting for the worker/orchestrator to finish.";
     case "STOPPING":

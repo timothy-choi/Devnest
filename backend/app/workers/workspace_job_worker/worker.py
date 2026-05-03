@@ -22,7 +22,8 @@ returns result DTOs only; this module maps them onto ORM rows and emits workspac
 
 Best-effort **route-admin** registration (``DEVNEST_GATEWAY_ENABLED``) runs after RUNNING / stop /
 delete finalization; failures are logged only. On ``NoSchedulableNodeError``, optional EC2 autoscaler
-hook (``devnest_autoscaler_*`` settings) may start one provision before the job is marked failed.
+hook (``devnest_autoscaler_*`` settings) may start one provision while the job stays queued until
+capacity appears or the capacity wait timeout is reached.
 """
 
 from __future__ import annotations
@@ -125,11 +126,13 @@ from app.libs.observability import metrics as devnest_metrics
 from .errors import UnsupportedWorkspaceJobTypeError
 from .failure_handling import (
     classify_placement_error,
+    capacity_wait_timed_out,
     effective_max_attempts,
     lifecycle_result_failure_retryable,
     orchestrator_binding_retryable,
     orchestrator_exception_retryable,
     queued_job_eligible_where,
+    try_schedule_capacity_retry,
     try_schedule_workspace_job_retry,
 )
 from .results import WorkspaceJobWorkerTickResult
@@ -147,6 +150,8 @@ _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
 _ERROR_CODE_ORCH = "ORCHESTRATOR_EXCEPTION"
 _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
+_CAPACITY_WAIT_MESSAGE = "Waiting for execution capacity..."
+_CAPACITY_TIMEOUT_MESSAGE = "Timed out waiting for execution capacity. Please try again later."
 _REMOTE_EXECUTION_MODES = frozenset(
     {
         ExecutionNodeExecutionMode.SSM_DOCKER.value,
@@ -185,6 +190,30 @@ def _fail_job_from_placement(
 ) -> None:
     message = str(exc)
     stage, _ = classify_placement_error(exc)
+    if isinstance(exc, NoSchedulableNodeError):
+        if try_schedule_capacity_retry(
+            session,
+            job,
+            message=_CAPACITY_WAIT_MESSAGE,
+            truncate_message=_truncate,
+            now=_now(),
+        ):
+            ws.status = WorkspaceStatus.PENDING.value
+            ws.last_error_message = _CAPACITY_WAIT_MESSAGE
+            ws.last_error_code = None
+            ws.status_reason = "Preparing capacity..."
+            _touch_workspace(session, ws)
+            return
+        if capacity_wait_timed_out(job, now=_now()):
+            message = _CAPACITY_TIMEOUT_MESSAGE
+        devnest_metrics.record_placement_failure(reason=placement_reason)
+        _mark_job_failed(session, job, message, failure_stage=stage.value, failure_code=placement_reason)
+        ws.status = WorkspaceStatus.ERROR.value
+        _workspace_set_error(ws, _ERROR_CODE_PLACEMENT, message)
+        _touch_workspace(session, ws)
+        assert ws.workspace_id is not None
+        _clear_runtime_capacity_reservation(session, ws.workspace_id)
+        return
     if try_schedule_workspace_job_retry(
         session,
         job,

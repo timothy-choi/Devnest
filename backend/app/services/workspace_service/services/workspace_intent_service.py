@@ -171,6 +171,7 @@ _PROJECT_DATA_MISSING_SHORT_ISSUE = "Persisted project data is missing on the ex
 _BUSY_STATUSES: frozenset[str] = frozenset(
     {
         WorkspaceStatus.CREATING.value,
+        WorkspaceStatus.PENDING.value,
         WorkspaceStatus.STARTING.value,
         WorkspaceStatus.STOPPING.value,
         WorkspaceStatus.RESTARTING.value,

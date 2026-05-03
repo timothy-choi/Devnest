@@ -15,6 +15,7 @@ class WorkspaceStatus(str, Enum):
     """
 
     CREATING = "CREATING"
+    PENDING = "PENDING"
     STARTING = "STARTING"
     RUNNING = "RUNNING"
     STOPPING = "STOPPING"

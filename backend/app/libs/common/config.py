@@ -148,6 +148,9 @@ class Settings(BaseSettings):
     # Workspace job worker: bounded retries (per job row) before terminal FAILED + workspace ERROR.
     workspace_job_max_attempts: int = 2
     workspace_job_retry_backoff_seconds: int = 15
+    # Capacity placement retry loop: keep CREATE/START jobs pending while autoscaler adds nodes.
+    workspace_capacity_retry_timeout_seconds: int = 600
+    workspace_capacity_retry_backoff_seconds: int = 20
     password_reset_token_expire_minutes: int = 60
     # If true, PUT /auth/forgot-password includes reset_token in JSON (local/testing only; use email in production).
     password_reset_return_token: bool = False

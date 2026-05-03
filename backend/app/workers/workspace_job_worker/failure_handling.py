@@ -128,6 +128,71 @@ def try_schedule_workspace_job_retry(
     return True
 
 
+def _as_aware_utc(ts: datetime) -> datetime:
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
+
+
+def capacity_retry_timeout_seconds() -> int:
+    raw = getattr(get_settings(), "workspace_capacity_retry_timeout_seconds", 600)
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 600
+
+
+def capacity_retry_backoff_seconds() -> int:
+    raw = getattr(get_settings(), "workspace_capacity_retry_backoff_seconds", 20)
+    try:
+        return max(0, min(int(raw), 30))
+    except (TypeError, ValueError):
+        return 20
+
+
+def capacity_wait_timed_out(job: WorkspaceJob, *, now: datetime | None = None) -> bool:
+    ts = now if now is not None else utc_now()
+    return (_as_aware_utc(ts) - _as_aware_utc(job.created_at)).total_seconds() >= capacity_retry_timeout_seconds()
+
+
+def try_schedule_capacity_retry(
+    session: Session,
+    job: WorkspaceJob,
+    *,
+    message: str,
+    truncate_message: Callable[[str | None, int], str | None],
+    now: datetime | None = None,
+) -> bool:
+    """
+    Keep capacity placement failures queued until the capacity wait timeout expires.
+
+    This intentionally does not use ``WorkspaceJob.max_attempts`` because capacity retries are
+    autoscaler wait-loop attempts, not repeated runtime/container bring-up attempts.
+    """
+    ts = now if now is not None else utc_now()
+    if capacity_wait_timed_out(job, now=ts):
+        return False
+    job.status = WorkspaceJobStatus.QUEUED.value
+    job.finished_at = None
+    job.started_at = None
+    job.error_msg = truncate_message(message, 8192)
+    job.failure_stage = FailureStage.CAPACITY.value
+    job.failure_code = "no_schedulable_node"
+    job.next_attempt_after = ts + timedelta(seconds=capacity_retry_backoff_seconds())
+    session.add(job)
+    logger.info(
+        "workspace_capacity_retry_scheduled",
+        extra={
+            "workspace_job_id": job.workspace_job_id,
+            "workspace_id": job.workspace_id,
+            "attempt": int(job.attempt or 0),
+            "capacity_retry_timeout_seconds": capacity_retry_timeout_seconds(),
+            "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
+        },
+    )
+    return True
+
+
 def queued_job_eligible_where(job_model_type: type, now: datetime):
     """SQL filter: QUEUED and (no backoff or backoff elapsed)."""
     return and_(
