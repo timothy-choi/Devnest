@@ -84,9 +84,9 @@ def _seed_create_job(
 
 
 def test_create_job_fails_when_placement_raises(db_session: Session) -> None:
-    """Reserve failure happens before Docker; job should end FAILED with placement code."""
+    """Reserve capacity miss happens before Docker; job should stay queued while autoscaling catches up."""
     owner = _seed_owner(db_session)
-    _wid, jid = _seed_create_job(db_session, owner, max_attempts=1)
+    wid, jid = _seed_create_job(db_session, owner, max_attempts=1)
 
     with patch(
         "app.services.scheduler_service.service.reserve_node_for_workspace",
@@ -100,9 +100,15 @@ def test_create_job_fails_when_placement_raises(db_session: Session) -> None:
 
     db_session.expire_all()
     job2 = db_session.get(WorkspaceJob, jid)
+    ws2 = db_session.get(Workspace, wid)
     assert job2 is not None
-    assert job2.status == WorkspaceJobStatus.FAILED.value
-    assert job2.error_msg and "no node" in job2.error_msg
+    assert ws2 is not None
+    assert job2.status == WorkspaceJobStatus.QUEUED.value
+    assert job2.failure_stage == "CAPACITY"
+    assert job2.failure_code == "no_schedulable_node"
+    assert job2.error_msg == "Waiting for execution capacity..."
+    assert ws2.status == WorkspaceStatus.PENDING.value
+    assert ws2.last_error_message == "Waiting for execution capacity..."
 
 
 def test_resolve_placement_create_uses_seeded_execution_node(db_session: Session) -> None:
