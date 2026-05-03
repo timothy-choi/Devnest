@@ -102,7 +102,17 @@ set -Eeuo pipefail
 install -d -m 0755 /var/log/devnest
 exec > >(tee -a /var/log/devnest/bootstrap.log) 2>&1
 
-dnf install -y docker awscli-2
+if command -v dnf >/dev/null 2>&1; then
+  dnf install -y docker awscli-2
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y docker awscli-2
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io curl
+else
+  echo "DevNest bootstrap unsupported OS: no dnf, yum, or apt-get" >&2
+  exit 42
+fi
 systemctl enable --now docker
 
 install -d -m 0755 /opt/devnest

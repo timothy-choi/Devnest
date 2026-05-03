@@ -176,7 +176,7 @@ def test_post_heartbeat_node2_catalog_keeps_schedulable_false(
         assert hb.get("docker_ok") is True
 
 
-def test_autoscaled_ec2_heartbeat_promotes_ready(
+def test_autoscaled_ec2_heartbeat_does_not_bypass_ready_gate(
     internal_api_client: TestClient,
     infrastructure_unit_engine: Engine,
 ) -> None:
@@ -213,16 +213,16 @@ def test_autoscaled_ec2_heartbeat_promotes_ready(
     )
     assert r.status_code == 200, r.text
     data = r.json()
-    assert data["status"] == ExecutionNodeStatus.READY.value
-    assert data["schedulable"] is True
+    assert data["status"] == ExecutionNodeStatus.PROVISIONING.value
+    assert data["schedulable"] is False
 
     with Session(infrastructure_unit_engine) as session:
         row = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ec2-autoscale-ready")).first()
         assert row is not None
-        assert row.status == ExecutionNodeStatus.READY.value
-        assert row.schedulable is True
-        lifecycle = (row.metadata_json or {}).get("lifecycle") or {}
-        assert lifecycle.get("readiness") == "heartbeat"
+        assert row.status == ExecutionNodeStatus.PROVISIONING.value
+        assert row.schedulable is False
+        heartbeat = (row.metadata_json or {}).get("heartbeat") or {}
+        assert heartbeat.get("docker_ok") is True
 
 
 def test_list_execution_nodes_with_capacity(internal_api_client: TestClient) -> None:

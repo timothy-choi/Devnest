@@ -2,7 +2,7 @@
 EC2 provisioning and execution-node lifecycle (control plane).
 
 Creates instances via ``run_instances``, tracks ``ExecutionNode`` rows through ``PROVISIONING`` →
-``READY`` (after SSM eligibility for ``ssm_docker``), and supports drain / deregister / terminate.
+``READY`` after the SSM Docker ready gate passes, and supports drain / deregister / terminate.
 
 **Worker IAM (least-privilege sketch — tighten Resource/Condition in production):**
 
@@ -19,6 +19,8 @@ TODO: async provisioning jobs, richer bootstrap (cloud-init), multi-instance bat
 from __future__ import annotations
 
 import logging
+import os
+import shlex
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -51,11 +53,15 @@ from app.services.providers.ec2_provider import (
     register_ec2_instance,
 )
 from app.services.providers.errors import Ec2InstanceNotFoundError, Ec2ProviderError
+from app.services.node_execution_service.errors import SsmExecutionError
+from app.services.node_execution_service.ssm_send_command import build_ssm_client, send_run_shell_script
 
 from .errors import Ec2ProvisionConfigurationError, NodeLifecycleError
 from .models import Ec2ProvisionRequest
 
 logger = logging.getLogger(__name__)
+
+_READY_GATE_TIMEOUT_SECONDS = 900
 
 
 def _now() -> datetime:
@@ -793,15 +799,127 @@ def _ec2_heartbeat_readiness(row: ExecutionNode, *, ec2_state: str | None = None
     return True, "ready", disk_free_mb
 
 
+def _workspace_image_for_ready_gate() -> str:
+    settings = get_settings()
+    image = (settings.workspace_container_image or "").strip()
+    if not image:
+        image = (os.environ.get("DEVNEST_WORKSPACE_CONTAINER_IMAGE", "") or "").strip()
+    if not image:
+        image = (os.environ.get("DEVNEST_WORKSPACE_IMAGE", "") or "").strip()
+    return image or "devnest/workspace:latest"
+
+
+def _ready_gate_script(*, workspace_image: str) -> str:
+    image = shlex.quote((workspace_image or "").strip() or "devnest/workspace:latest")
+    return f"""set -Eeuo pipefail
+echo node.ready_gate.started
+if [ -r /etc/os-release ]; then
+  . /etc/os-release
+  echo "node.ready_gate.os:${{ID:-unknown}}:${{VERSION_ID:-unknown}}"
+else
+  echo node.ready_gate.os:unknown
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo node.ready_gate.docker_missing
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y docker
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y docker
+  else
+    echo "node.ready_gate.docker_install_unsupported"
+    exit 42
+  fi
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl enable --now docker || systemctl start docker || true
+else
+  service docker start || true
+fi
+
+docker info >/tmp/devnest-ready-gate-docker-info.txt 2>&1
+docker pull {image}
+echo node.ready_gate.image_pull_success
+echo node.ready_gate.passed
+"""
+
+
+def _run_ssm_ready_gate(
+    row: ExecutionNode,
+    *,
+    ssm_client: BaseClient | None = None,
+) -> tuple[bool, str, str]:
+    iid = (row.provider_instance_id or "").strip()
+    region = (row.region or get_settings().aws_region or "").strip() or None
+    if not iid:
+        return False, "missing_provider_instance_id", ""
+    if not region:
+        return False, "missing_region", ""
+    if row.default_topology_id is None:
+        return False, "missing_default_topology_id", ""
+
+    logger.info(
+        "node.ready_gate.started",
+        extra={"node_key": row.node_key, "instance_id": iid, "workspace_image": _workspace_image_for_ready_gate()},
+    )
+    try:
+        stdout, stderr = send_run_shell_script(
+            ssm_client or build_ssm_client(region=region),
+            iid,
+            [_ready_gate_script(workspace_image=_workspace_image_for_ready_gate())],
+            comment="DevNest node ready gate",
+            timeout_seconds=_READY_GATE_TIMEOUT_SECONDS,
+        )
+    except SsmExecutionError as e:
+        return False, f"ssm_ready_gate_failed:{e}", ""
+
+    out = f"{stdout}\n{stderr}"
+    if "node.ready_gate.docker_missing" in out:
+        logger.info("node.ready_gate.docker_missing", extra={"node_key": row.node_key, "instance_id": iid})
+    if "node.ready_gate.image_pull_success" not in out:
+        return False, "image_pull_missing_success_marker", out
+    logger.info(
+        "node.ready_gate.image_pull_success",
+        extra={"node_key": row.node_key, "instance_id": iid, "workspace_image": _workspace_image_for_ready_gate()},
+    )
+    if "node.ready_gate.passed" not in out:
+        return False, "ready_gate_missing_pass_marker", out
+    logger.info("node.ready_gate.passed", extra={"node_key": row.node_key, "instance_id": iid})
+    return True, "ready_gate_passed", out
+
+
+def _ready_gate_failure(session: Session, row: ExecutionNode, reason: str) -> None:
+    row.status = ExecutionNodeStatus.PROVISIONING.value
+    row.schedulable = False
+    row.last_error_code = "ReadyGatePending"
+    row.last_error_message = str(reason)[:4096]
+    row.updated_at = _now()
+    row.metadata_json = _merge_metadata(
+        row,
+        {"lifecycle": {"ready_gate_last_failure": str(reason)[:1000], "ready_gate_checked_at": _now().isoformat()}},
+    )
+    session.add(row)
+    session.flush()
+
+
 def promote_ec2_node_if_heartbeat_ready(
     session: Session,
     row: ExecutionNode,
     *,
     ec2_state: str | None = None,
     readiness: str = "heartbeat",
+    ssm_client: BaseClient | None = None,
 ) -> bool:
     """
-    Promote autoscaled EC2 nodes to READY when heartbeat proves Docker and disk readiness.
+    Promote autoscaled EC2 nodes to READY when execution readiness has been proven.
+
+    For SSM Docker nodes, readiness is an active SSM gate: OS detection, Docker installation/start,
+    ``docker info``, workspace image pull, and ``default_topology_id``. Other EC2 execution modes
+    retain the older heartbeat-based gate.
 
     The function is intentionally idempotent and refuses terminal/draining/error nodes. Catalog-only
     EC2 stubs stay unschedulable until an operator explicitly enables them.
@@ -814,19 +932,36 @@ def promote_ec2_node_if_heartbeat_ready(
     if "catalog_ec2_stub" in dict(row.metadata_json or {}):
         return False
 
-    ok, reason, disk_free_mb = _ec2_heartbeat_readiness(row, ec2_state=ec2_state)
-    if not ok:
-        logger.info(
-            "ec2_node_ready_promotion_waiting",
-            extra={
-                "node_key": row.node_key,
-                "instance_id": (row.provider_instance_id or "").strip() or None,
-                "status": row.status,
-                "reason": reason,
-                "disk_free_mb": disk_free_mb,
-            },
-        )
-        return False
+    if (row.execution_mode or "").strip().lower() == ExecutionNodeExecutionMode.SSM_DOCKER.value:
+        ok, reason, _out = _run_ssm_ready_gate(row, ssm_client=ssm_client)
+        if not ok:
+            logger.info(
+                "ec2_node_ready_promotion_waiting",
+                extra={
+                    "node_key": row.node_key,
+                    "instance_id": (row.provider_instance_id or "").strip() or None,
+                    "status": row.status,
+                    "reason": reason[:1000],
+                },
+            )
+            _ready_gate_failure(session, row, reason)
+            return False
+        disk_free_mb = None
+        readiness = "ssm_ready_gate"
+    else:
+        ok, reason, disk_free_mb = _ec2_heartbeat_readiness(row, ec2_state=ec2_state)
+        if not ok:
+            logger.info(
+                "ec2_node_ready_promotion_waiting",
+                extra={
+                    "node_key": row.node_key,
+                    "instance_id": (row.provider_instance_id or "").strip() or None,
+                    "status": row.status,
+                    "reason": reason,
+                    "disk_free_mb": disk_free_mb,
+                },
+            )
+            return False
 
     now = _now()
     row.status = ExecutionNodeStatus.READY.value
@@ -927,7 +1062,13 @@ def sync_node_state(
         row.status = original_status
         row.schedulable = False
 
-    if promote_ec2_node_if_heartbeat_ready(session, row, ec2_state=desc.state, readiness="ec2_running_heartbeat"):
+    if promote_ec2_node_if_heartbeat_ready(
+        session,
+        row,
+        ec2_state=desc.state,
+        readiness="ec2_running_heartbeat",
+        ssm_client=ssm_client,
+    ):
         return row
     session.add(row)
     session.flush()
