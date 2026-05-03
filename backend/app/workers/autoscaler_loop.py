@@ -30,6 +30,9 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
         log_event(logger, "autoscaler.loop.tick")
         try:
             decision, node = run_scale_out_tick(session)
+            reclaimed_node = None
+            if decision.action == "scale_in_recommended":
+                reclaimed_node = reclaim_one_idle_ec2_node(session)
             devnest_metrics.record_autoscaler_decision(
                 action=decision.action,
                 scale_out_recommended=decision.scale_out_recommended,
@@ -39,6 +42,7 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
                 "autoscaler.loop.decision",
                 action=decision.action,
                 scale_out_recommended=decision.scale_out_recommended,
+                scale_in_recommended=decision.scale_in_recommended,
                 suppressed_by_config=decision.suppressed_by_config,
                 suppressed_by_cap=decision.suppressed_by_cap,
                 suppressed_by_cooldown=decision.suppressed_by_cooldown,
@@ -50,6 +54,8 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
             )
             if decision.action == "scale_out_recommended":
                 log_event(logger, "autoscaler.scale_out.triggered", reasons=" | ".join(decision.reasons)[:2000])
+            if decision.action == "scale_in_recommended":
+                log_event(logger, "autoscaler.scale_down.triggered", reasons=" | ".join(decision.reasons)[:2000])
             if node is not None:
                 log_event(
                     logger,
@@ -57,8 +63,16 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
                     node_key=node.node_key,
                     instance_id=(node.provider_instance_id or "").strip() or None,
                 )
+            if reclaimed_node is not None:
+                log_event(
+                    logger,
+                    "autoscaler.scale_down.terminated",
+                    node_key=reclaimed_node.node_key,
+                    instance_id=(reclaimed_node.provider_instance_id or "").strip() or None,
+                )
             session.commit()
-            return decision.action, node.node_key if node is not None else None
+            changed_node = node or reclaimed_node
+            return decision.action, changed_node.node_key if changed_node is not None else None
         except Exception:
             devnest_metrics.record_autoscaler_provision(result="error")
             session.rollback()
@@ -95,9 +109,11 @@ def run_autoscaler_loop(
         while not stop_event.is_set():
             started = time.monotonic()
             try:
-                run_autoscaler_loop_tick(engine)
+                action, _node_key = run_autoscaler_loop_tick(engine)
                 now = time.monotonic()
-                if now - last_scale_down_at >= _SCALE_DOWN_INTERVAL_SECONDS:
+                if action == "scale_in_recommended":
+                    last_scale_down_at = now
+                elif now - last_scale_down_at >= _SCALE_DOWN_INTERVAL_SECONDS:
                     run_autoscaler_scale_down_tick(engine)
                     last_scale_down_at = now
             except Exception:

@@ -65,6 +65,7 @@ def _scale_down_settings(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         devnest_autoscaler_enabled=True,
+        devnest_autoscaler_evaluate_only=False,
         devnest_autoscaler_min_nodes=min_nodes,
         devnest_autoscaler_min_ec2_nodes_before_reclaim=min_ec2_before_reclaim,
         devnest_autoscaler_scale_in_cooldown_seconds=cooldown_seconds,
@@ -902,6 +903,50 @@ def test_scale_down_min_ec2_zero_reclaims_last_idle_ec2_node(autoscaler_unit_eng
         assert node.status == ExecutionNodeStatus.TERMINATED.value
         assert node.schedulable is False
     assert node_key == "ec2-last-idle"
+    assert term.call_count == 1
+
+
+def test_idle_ec2_node_with_min_ec2_zero_recommends_scale_in_without_demand(
+    autoscaler_unit_engine,
+) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-decision-idle", updated_at=old)
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_down_settings(min_nodes=0, min_ec2_before_reclaim=0)
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.pending_workspace_jobs == 0
+    assert decision.capacity.pending_placement_jobs == 0
+    assert decision.scale_in_recommended is True
+    assert decision.scale_out_recommended is False
+    assert decision.no_action is False
+    assert decision.action == "scale_in_recommended"
+    assert any("scale-in recommended" in reason for reason in decision.reasons)
+
+
+def test_autoscaler_loop_tick_terminates_selected_idle_node(autoscaler_unit_engine) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-loop-scale-in", updated_at=old)
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings(min_nodes=0, min_ec2_before_reclaim=0)
+        action, node_key = run_autoscaler_loop_tick(autoscaler_unit_engine)
+
+    with Session(autoscaler_unit_engine) as session:
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ec2-loop-scale-in")).first()
+        assert node is not None
+        assert node.status == ExecutionNodeStatus.TERMINATED.value
+        assert node.schedulable is False
+    assert action == "scale_in_recommended"
+    assert node_key == "ec2-loop-scale-in"
     assert term.call_count == 1
 
 

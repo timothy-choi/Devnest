@@ -674,6 +674,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
 
     cap = build_fleet_capacity_snapshot(session)
     nodes = list(session.exec(select(ExecutionNode)).all())
+    scale_down = evaluate_scale_down(session)
 
     pending = int(cap.pending_placement_jobs)
     live_demand = (
@@ -697,7 +698,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
             or idle_after_pending < min_idle_slots
         )
     )
-    scale_in_recommended = False
+    scale_in_recommended = bool(scale_down.node_key)
 
     reasons: list[str] = []
     suppressed_by_config = False
@@ -751,7 +752,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
                 f"< scale_out_cooldown_seconds {out_cooldown}",
             )
     elif scale_in_recommended:
-        reasons.append("scale-in recommended: idle EC2 capacity exceeds configured floor and queue is empty")
+        reasons.append(f"scale-in recommended: {scale_down.reason}")
         if not enabled:
             suppressed_by_config = True
             reasons.append("suppressed by config: DEVNEST_AUTOSCALER_ENABLED=false")
