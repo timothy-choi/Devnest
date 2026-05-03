@@ -11,6 +11,15 @@ const BUSY_STATUSES = new Set([
   "DELETING",
 ]);
 
+/** Matches control-plane capacity-wait copy (non-terminal); do not surface as an error in the UI. */
+function isBenignCapacityWaitMessage(message: string | null | undefined): boolean {
+  const m = (message || "").trim().toLowerCase();
+  if (!m) {
+    return false;
+  }
+  return m === "waiting for execution capacity" || m.startsWith("waiting for execution capacity");
+}
+
 function formatRelativeDate(value: string | null | undefined) {
   if (!value) {
     return "Unavailable";
@@ -88,6 +97,18 @@ function getStatusLabel(status: string) {
 }
 
 function getStatusDetail(record: WorkspaceRecord) {
+  const capWait =
+    (record.status === "PENDING" || record.status === "CREATING") &&
+    isBenignCapacityWaitMessage(record.lastErrorMessage);
+
+  if (capWait) {
+    const reason = (record.statusReason || "").trim();
+    if (reason) {
+      return reason;
+    }
+    return "Waiting for node...";
+  }
+
   if (record.lastErrorMessage) {
     return record.lastErrorMessage;
   }
@@ -136,6 +157,10 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
   const canOpen = record.status === "RUNNING" && !hasReopenBlockers && !dataStorageIssue;
   const canStart = record.status === "STOPPED" && !hasReopenBlockers && !dataStorageIssue;
 
+  const benignCap =
+    (record.status === "PENDING" || record.status === "CREATING") &&
+    isBenignCapacityWaitMessage(record.lastErrorMessage);
+
   const baseDetail = dataStorageIssue ? null : getStatusDetail(record);
   let reopenDetail: string | null = null;
   if (hasReopenBlockers) {
@@ -145,16 +170,18 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
       reopenDetail = reopenIssues.join(" ");
     }
   }
+
+  const descFromRecord =
+    record.description ||
+    (benignCap ? null : record.statusReason) ||
+    (benignCap ? null : record.lastErrorMessage) ||
+    "Workspace accepted by the control plane.";
   const statusDetail = [reopenDetail, baseDetail].filter(Boolean).join(" ") || null;
 
   return {
     id: record.id,
     name: record.name,
-    description:
-      record.description ||
-      record.statusReason ||
-      record.lastErrorMessage ||
-      "Workspace accepted by the control plane.",
+    description: descFromRecord,
     status: mapBackendStatus(record.status),
     rawStatus: record.status,
     statusLabel: getStatusLabel(record.status),

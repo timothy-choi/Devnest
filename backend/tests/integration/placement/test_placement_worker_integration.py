@@ -106,9 +106,9 @@ def test_create_job_fails_when_placement_raises(db_session: Session) -> None:
     assert job2.status == WorkspaceJobStatus.QUEUED.value
     assert job2.failure_stage == "CAPACITY"
     assert job2.failure_code == "no_schedulable_node"
-    assert job2.error_msg == "Waiting for execution capacity..."
+    assert job2.error_msg == "Waiting for execution capacity"
     assert ws2.status == WorkspaceStatus.PENDING.value
-    assert ws2.last_error_message == "Waiting for execution capacity..."
+    assert ws2.last_error_message == "Waiting for execution capacity"
 
 
 def test_resolve_placement_create_uses_seeded_execution_node(db_session: Session) -> None:

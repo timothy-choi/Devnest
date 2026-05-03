@@ -162,7 +162,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return;
     }
 
-    res.status(200).json({
+    const okStatus =
+      createResponse.status >= 200 && createResponse.status < 300 ? createResponse.status : 200;
+    res.status(okStatus).json({
       message: "Workspace creation accepted.",
       workspace: mapDetail(detail as BackendWorkspaceDetail),
     });

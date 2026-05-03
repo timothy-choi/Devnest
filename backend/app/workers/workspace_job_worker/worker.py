@@ -127,6 +127,7 @@ from app.libs.observability import metrics as devnest_metrics
 
 from .errors import UnsupportedWorkspaceJobTypeError
 from .failure_handling import (
+    WORKSPACE_CAPACITY_PENDING_LAST_ERROR,
     classify_placement_error,
     capacity_wait_timed_out,
     effective_max_attempts,
@@ -153,7 +154,7 @@ _ERROR_CODE_JOB = "WORKSPACE_JOB_FAILED"
 _ERROR_CODE_ORCH = "ORCHESTRATOR_EXCEPTION"
 _ERROR_CODE_PLACEMENT = "PLACEMENT_FAILED"
 _ERROR_CODE_ORCHESTRATOR_BINDING = "ORCHESTRATOR_BINDING_FAILED"
-_CAPACITY_WAIT_MESSAGE = "Waiting for execution capacity..."
+_CAPACITY_WAIT_MESSAGE = WORKSPACE_CAPACITY_PENDING_LAST_ERROR
 _CAPACITY_TIMEOUT_MESSAGE = "Timed out waiting for execution capacity. Please try again later."
 _NODE_READINESS_WAIT_MESSAGE = "Waiting for node readiness"
 _NODE_READINESS_TIMEOUT_MESSAGE = "Timed out waiting for node readiness. Please try again later."

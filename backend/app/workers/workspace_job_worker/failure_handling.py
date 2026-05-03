@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# User-facing / operator-facing text for capacity wait (API + worker retry); not a terminal error.
+WORKSPACE_CAPACITY_PENDING_LAST_ERROR = "Waiting for execution capacity"
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)

@@ -156,6 +156,7 @@ def post_workspace(
         status=out.status,
         config_version=out.config_version,
         job_id=out.job_id,
+        message=out.message,
     )
 
 

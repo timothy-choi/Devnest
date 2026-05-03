@@ -1695,7 +1695,7 @@ class TestWorkspaceJobRetry:
             job2 = session.get(WorkspaceJob, jid)
             assert ws2 is not None and job2 is not None
             assert ws2.status == WorkspaceStatus.PENDING.value
-            assert ws2.last_error_message == "Waiting for execution capacity..."
+            assert ws2.last_error_message == "Waiting for execution capacity"
             assert ws2.status_reason == "Preparing capacity..."
             assert job2.status == WorkspaceJobStatus.QUEUED.value
             assert job2.failure_stage == "CAPACITY"

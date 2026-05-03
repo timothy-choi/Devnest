@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,7 +18,10 @@ from sqlmodel import Session, select
 from app.libs.observability.correlation import generate_correlation_id
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability.metrics import record_job_queued
-from app.services.autoscaler_service.service import record_placement_failed_scale_out_signal
+from app.services.autoscaler_service.service import (
+    maybe_provision_on_no_schedulable_capacity,
+    record_placement_failed_scale_out_signal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +39,6 @@ from app.services.workspace_service.errors import (
     WorkspaceOperatorPinnedDisabledError,
     WorkspaceOperatorPinnedNodeInvalidError,
     WorkspaceOperatorPinnedNotAllowlistedError,
-    WorkspaceSchedulingCapacityError,
     WorkspaceSchedulingInvalidError,
 )
 from app.services.workspace_service.models import (
@@ -85,6 +88,7 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
 )
 from app.services.scheduler_service.service import schedule_workspace
+from app.workers.workspace_job_worker.failure_handling import WORKSPACE_CAPACITY_PENDING_LAST_ERROR
 from app.services.policy_service.service import (
     evaluate_session_creation,
     evaluate_workspace_creation,
@@ -116,6 +120,7 @@ class CreateWorkspaceResult:
     job_id: int
     config_version: int
     status: str
+    message: str = "Workspace creation accepted."
 
 
 @dataclass(frozen=True, slots=True)
@@ -1382,28 +1387,154 @@ def create_workspace(
     )
     if schedule_result.invalid_request:
         raise WorkspaceSchedulingInvalidError(schedule_result.message)
-    if schedule_result.execution_node is None or schedule_result.insufficient_capacity:
-        # Full placement diagnostics are already logged by ``schedule_workspace``; API clients get a
-        # short, stable message (internal ``NoSchedulableNodeError`` strings are operator-oriented).
-        try:
-            record_placement_failed_scale_out_signal(
-                session,
-                detail=schedule_result.message,
-                requested_cpu=rt_cpu,
-                requested_memory_mb=rt_mem,
-                requested_disk_mb=int(DEFAULT_WORKSPACE_REQUEST_DISK_MB),
-                actor_user_id=owner_user_id,
-                correlation_id=cid_pre,
+    if schedule_result.execution_node is None:
+        # No schedulable capacity at create time: persist a PENDING workspace and a deferred CREATE job
+        # so the worker can retry placement (and the autoscaler can observe queued demand).
+        pending_after = now + timedelta(seconds=random.randint(15, 30))
+        ws = Workspace(
+            name=body.name,
+            description=body.description,
+            owner_user_id=owner_user_id,
+            project_storage_key=uuid4().hex,
+            status=WorkspaceStatus.PENDING.value,
+            execution_node_id=None,
+            is_private=body.is_private,
+            created_at=now,
+            updated_at=now,
+            last_error_message=WORKSPACE_CAPACITY_PENDING_LAST_ERROR,
+            last_error_code=None,
+            status_reason="Preparing capacity...",
+        )
+        session.add(ws)
+        session.flush()
+        settings = get_settings()
+        if settings.devnest_gateway_enabled and ws.workspace_id is not None:
+            ws.public_host = _gateway_unique_public_host(
+                int(ws.workspace_id),
+                settings.devnest_base_domain,
+                project_storage_key=ws.project_storage_key,
             )
+            session.add(ws)
+            session.flush()
+
+        cfg = WorkspaceConfig(workspace_id=ws.workspace_id, version=1, config_json=config_json)
+        session.add(cfg)
+        session.flush()
+
+        if body.ai_secret is not None and ws.workspace_id is not None:
+            upsert_workspace_ai_secret(
+                session,
+                workspace_id=ws.workspace_id,
+                owner_user_id=owner_user_id,
+                provider=body.ai_secret.provider,
+                api_key=body.ai_secret.api_key,
+            )
+
+        cid = _effective_correlation_id(correlation_id)
+        job = WorkspaceJob(
+            workspace_id=ws.workspace_id,
+            job_type=WorkspaceJobType.CREATE.value,
+            status=WorkspaceJobStatus.QUEUED.value,
+            requested_by_user_id=owner_user_id,
+            requested_config_version=1,
+            attempt=0,
+            correlation_id=cid,
+            next_attempt_after=pending_after,
+        )
+        session.add(job)
+        session.flush()
+
+        record_placement_failed_scale_out_signal(
+            session,
+            detail=schedule_result.message,
+            requested_cpu=rt_cpu,
+            requested_memory_mb=rt_mem,
+            requested_disk_mb=int(DEFAULT_WORKSPACE_REQUEST_DISK_MB),
+            actor_user_id=owner_user_id,
+            correlation_id=cid_pre,
+            workspace_id=int(ws.workspace_id),
+            workspace_job_id=int(job.workspace_job_id),
+            job_type=WorkspaceJobType.CREATE.value,
+        )
+        try:
+            maybe_provision_on_no_schedulable_capacity(session)
+        except Exception:
+            logger.exception("autoscaler_provision_on_no_capacity_unexpected_error")
+
+        record_job_queued(job_type=WorkspaceJobType.CREATE.value)
+        assert job.workspace_job_id is not None
+        assert ws.workspace_id is not None
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_INTENT_CREATED,
+            correlation_id=cid,
+            workspace_id=ws.workspace_id,
+            workspace_job_id=job.workspace_job_id,
+            job_type=WorkspaceJobType.CREATE.value,
+        )
+        log_event(
+            logger,
+            LogEvent.WORKSPACE_JOB_QUEUED,
+            correlation_id=cid,
+            workspace_id=ws.workspace_id,
+            workspace_job_id=job.workspace_job_id,
+            job_type=WorkspaceJobType.CREATE.value,
+        )
+
+        record_workspace_event(
+            session,
+            workspace_id=ws.workspace_id,
+            event_type=WorkspaceStreamEventType.INTENT_QUEUED,
+            status=ws.status,
+            message="Workspace creation accepted; waiting for execution capacity",
+            payload={
+                "job_id": job.workspace_job_id,
+                "job_type": WorkspaceJobType.CREATE.value,
+                "requested_config_version": 1,
+                "pending_placement": True,
+            },
+        )
+
+        record_audit(
+            session,
+            action=AuditAction.WORKSPACE_CREATE_REQUESTED.value,
+            resource_type="workspace",
+            resource_id=ws.workspace_id,
+            actor_user_id=owner_user_id,
+            actor_type=AuditActorType.USER.value,
+            outcome=AuditOutcome.SUCCESS.value,
+            workspace_id=ws.workspace_id,
+            job_id=job.workspace_job_id,
+            correlation_id=cid,
+            metadata={"name": ws.name, "pending_placement": True},
+        )
+        record_usage(
+            session,
+            workspace_id=int(ws.workspace_id),
+            owner_user_id=owner_user_id,
+            event_type=UsageEventType.WORKSPACE_CREATED.value,
+            correlation_id=cid,
+        )
+
+        try:
             session.commit()
         except Exception:
             session.rollback()
-            logger.exception("placement_failed_scale_out_signal_record_failed")
-        raise WorkspaceSchedulingCapacityError(
-            "No execution capacity is available to create a workspace. The node may be at its limit "
-            "for CPU, memory, disk, or concurrent workspaces. Stop or delete unused workspaces, or "
-            "ask an operator to raise execution node limits, then try again.",
+            raise
+        session.refresh(ws)
+        session.refresh(job)
+
+        assert ws.workspace_id is not None
+        assert job.workspace_job_id is not None
+
+        return CreateWorkspaceResult(
+            workspace_id=ws.workspace_id,
+            job_id=job.workspace_job_id,
+            config_version=1,
+            status=ws.status,
+            message="Workspace creation accepted; waiting for execution capacity.",
         )
+
     chosen = schedule_result.execution_node
     assert chosen.id is not None
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -26,7 +27,6 @@ from app.services.workspace_service.models import (
     WorkspaceStatus,
 )
 from app.services.placement_service.bootstrap import ensure_default_local_execution_node
-from app.services.workspace_service.errors import WorkspaceSchedulingCapacityError
 from app.services.workspace_service.services.workspace_secret_service import resolve_workspace_runtime_secret_env
 from app.services.workspace_service.services import workspace_intent_service
 from app.services.workspace_service.services.workspace_event_service import WorkspaceStreamEventType
@@ -75,11 +75,11 @@ def test_create_workspace_request_rejects_non_positive_cpu() -> None:
         )
 
 
-def test_create_workspace_rejects_when_execution_node_at_max_slots(
+def test_create_workspace_queues_pending_when_execution_node_at_max_slots(
     workspace_unit_engine: Engine,
     owner_user_id: int,
 ) -> None:
-    from datetime import datetime, timezone
+    from app.workers.workspace_job_worker.failure_handling import WORKSPACE_CAPACITY_PENDING_LAST_ERROR
 
     with Session(workspace_unit_engine) as session:
         node = ensure_default_local_execution_node(session)
@@ -99,12 +99,27 @@ def test_create_workspace_rejects_when_execution_node_at_max_slots(
         session.commit()
 
     with Session(workspace_unit_engine) as session:
-        with pytest.raises(WorkspaceSchedulingCapacityError):
-            workspace_intent_service.create_workspace(
-                session,
-                owner_user_id=owner_user_id,
-                body=_sample_create_body(),
-            )
+        out = workspace_intent_service.create_workspace(
+            session,
+            owner_user_id=owner_user_id,
+            body=_sample_create_body(),
+        )
+
+    assert out.status == WorkspaceStatus.PENDING.value
+    assert "waiting for execution capacity" in out.message.lower()
+
+    with Session(workspace_unit_engine) as session:
+        ws2 = session.get(Workspace, out.workspace_id)
+        assert ws2 is not None
+        assert ws2.status == WorkspaceStatus.PENDING.value
+        assert ws2.execution_node_id is None
+        assert ws2.last_error_message == WORKSPACE_CAPACITY_PENDING_LAST_ERROR
+        assert (ws2.status_reason or "").lower().find("preparing") >= 0
+        job = session.get(WorkspaceJob, out.job_id)
+        assert job is not None
+        assert job.status == WorkspaceJobStatus.QUEUED.value
+        assert job.next_attempt_after is not None
+        assert job.job_type == WorkspaceJobType.CREATE.value
 
 
 def test_create_workspace_happy_path_persists_rows_and_result_shape(
