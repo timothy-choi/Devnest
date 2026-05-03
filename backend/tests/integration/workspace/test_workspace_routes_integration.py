@@ -54,7 +54,7 @@ def test_post_workspaces_202_persists_rows_and_matches_db(client, db_session) ->
     assert data["status"] == "PENDING"
     assert data["config_version"] == 1
     assert "workspace_id" in data and "job_id" in data
-    assert data["message"] == "Workspace creation accepted."
+    assert "asynchronously" in (data.get("message") or "").lower()
 
     wid = data["workspace_id"]
     jid = data["job_id"]

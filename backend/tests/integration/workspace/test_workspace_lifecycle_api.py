@@ -196,6 +196,7 @@ class TestWorkspaceLifecycleApiHappyPath:
         ws = _reload_workspace(db_session, wid)
         assert ws is not None
         assert ws.status == WorkspaceStatus.PENDING.value
+        job = _reload_job(db_session, jid)
         assert job is not None
         assert job.status == WorkspaceJobStatus.QUEUED.value
         assert job.job_type == WorkspaceJobType.CREATE.value
