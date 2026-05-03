@@ -6,12 +6,18 @@ from app.libs.common.config import Settings
 from app.services.infrastructure_service.models import Ec2ProvisionRequest
 
 
-def test_devnest_autoscaler_min_ec2_nodes_before_reclaim_coerces_below_two() -> None:
+def test_devnest_autoscaler_min_ec2_nodes_before_reclaim_allows_zero() -> None:
     s = Settings(
         database_url="sqlite://",
-        devnest_autoscaler_min_ec2_nodes_before_reclaim=1,
+        devnest_autoscaler_min_ec2_nodes_before_reclaim=0,
     )
-    assert s.devnest_autoscaler_min_ec2_nodes_before_reclaim == 2
+    assert s.devnest_autoscaler_min_ec2_nodes_before_reclaim == 0
+
+
+def test_devnest_autoscaler_min_ec2_nodes_before_reclaim_reads_env_zero(monkeypatch) -> None:
+    monkeypatch.setenv("DEVNEST_AUTOSCALER_MIN_EC2_NODES_BEFORE_RECLAIM", "0")
+    s = Settings(database_url="sqlite://")
+    assert s.devnest_autoscaler_min_ec2_nodes_before_reclaim == 0
 
 
 def test_phase2_scale_out_autoscaler_defaults() -> None:

@@ -63,6 +63,7 @@ def _down(ev: ScaleDownEvaluation) -> ScaleDownEvaluationResponse:
         node_key=ev.node_key,
         reason=ev.reason,
         idle_ec2_ready_nodes=ev.idle_ec2_ready_nodes,
+        min_ec2_nodes_before_reclaim=ev.min_ec2_nodes_before_reclaim,
     )
 
 

@@ -871,8 +871,8 @@ class Settings(BaseSettings):
     devnest_autoscaler_max_concurrent_provisioning: int = 3
     devnest_autoscaler_scale_out_cooldown_seconds: int = 300
     devnest_autoscaler_scale_in_cooldown_seconds: int = 900
-    # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist (last-node safety).
-    # Values below 2 are coerced to 2 so scale-down cannot target the sole READY EC2 node via misconfiguration.
+    # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist.
+    # Set to 0 to allow autoscaled EC2 capacity to scale all the way down to zero.
     devnest_autoscaler_min_ec2_nodes_before_reclaim: int = 2
     # Drain delay: minimum seconds to wait after a node is marked DRAINING before allowing termination.
     # Prevents premature scale-down on nodes that still have recently-started workloads.
@@ -1126,7 +1126,7 @@ class Settings(BaseSettings):
             n = int(v)
         except (TypeError, ValueError):
             return 2
-        return max(2, min(n, 100))
+        return max(0, min(n, 100))
 
     @field_validator("devnest_internal_api_key_min_length", mode="before")
     @classmethod

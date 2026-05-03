@@ -114,8 +114,8 @@ def count_ec2_provisioning_nodes(session: Session) -> int:
 
 
 def _min_ready_ec2_before_reclaim() -> int:
-    """Effective floor for last-node safety (never below 2, even if settings are mocked or stale)."""
-    return max(2, int(get_settings().devnest_autoscaler_min_ec2_nodes_before_reclaim))
+    """Effective configured READY+schedulable EC2 floor before reclaim."""
+    return max(0, _config_int(get_settings(), "devnest_autoscaler_min_ec2_nodes_before_reclaim", 2))
 
 
 def _scale_down_idle_seconds() -> int:
@@ -281,6 +281,22 @@ def _count_queued_jobs(session: Session, *, job_types: frozenset[str] | None = N
     return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
+def _count_active_or_queued_jobs(session: Session) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(WorkspaceJob)
+        .where(WorkspaceJob.status.in_([WorkspaceJobStatus.QUEUED.value, WorkspaceJobStatus.RUNNING.value]))
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _count_non_deleted_workspaces(session: Session) -> int:
+    stmt = select(func.count()).select_from(Workspace).where(Workspace.status != WorkspaceStatus.DELETED.value)
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
 def _placement_failure_signal_window_seconds() -> int:
     raw = getattr(get_settings(), "devnest_autoscaler_recent_activity_window_seconds", 300)
     try:
@@ -307,6 +323,25 @@ def _count_recent_placement_failure_signals(session: Session) -> int:
     )
     raw = session.exec(stmt).one()
     return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _effective_recent_placement_failure_signals(
+    session: Session,
+    *,
+    pending_placement_jobs: int,
+    active_or_queued_jobs: int,
+    non_deleted_workspaces: int,
+) -> int:
+    raw_recent = _count_recent_placement_failure_signals(session)
+    if raw_recent <= 0:
+        return 0
+    if pending_placement_jobs <= 0 and active_or_queued_jobs <= 0 and non_deleted_workspaces <= 0:
+        logger.info(
+            "autoscaler.stale_placement_failures_ignored",
+            extra={"recent_placement_failures": raw_recent},
+        )
+        return 0
+    return raw_recent
 
 
 def record_placement_failed_scale_out_signal(
@@ -585,8 +620,16 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         total_disk += alloc_disk
         free_disk += max(0, alloc_disk - used_disk)
 
-    recent_placement_failures = _count_recent_placement_failure_signals(session)
     pending_placement_jobs = _count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES)
+    pending_workspace_jobs = _count_queued_jobs(session)
+    active_or_queued_jobs = _count_active_or_queued_jobs(session)
+    non_deleted_workspaces = _count_non_deleted_workspaces(session)
+    recent_placement_failures = _effective_recent_placement_failure_signals(
+        session,
+        pending_placement_jobs=pending_placement_jobs,
+        active_or_queued_jobs=active_or_queued_jobs,
+        non_deleted_workspaces=non_deleted_workspaces,
+    )
     return FleetCapacitySnapshot(
         total_nodes=total_nodes,
         ec2_nodes_active=ec2_nodes_active,
@@ -598,7 +641,7 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         draining_nodes=draining_nodes,
         active_slots=active_slots,
         free_slots=free_slots,
-        pending_workspace_jobs=_count_queued_jobs(session),
+        pending_workspace_jobs=pending_workspace_jobs,
         pending_placement_jobs=pending_placement_jobs + recent_placement_failures,
         recent_placement_failures=recent_placement_failures,
         total_allocatable_cpu=round(total_cpu, 4),
@@ -633,17 +676,26 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     nodes = list(session.exec(select(ExecutionNode)).all())
 
     pending = int(cap.pending_placement_jobs)
+    live_demand = (
+        pending > 0
+        or int(cap.pending_workspace_jobs) > 0
+        or int(cap.recent_placement_failures) > 0
+        or _count_non_deleted_workspaces(session) > 0
+    )
     idle_after_pending = int(cap.free_slots) - pending
     capacity_insufficiency_reasons = _capacity_insufficient_for_one_workspace(cap)
     capacity_insufficient = bool(capacity_insufficiency_reasons)
     provider_mode = (getattr(settings, "devnest_node_provider", "all") or "all").strip().lower()
     ec2_allowed = provider_mode in ("all", "ec2")
     scale_out_recommended = (
-        cap.ready_schedulable_nodes == 0
-        or capacity_insufficient
-        or int(cap.recent_placement_failures) > 0
-        or pending > int(cap.free_slots)
-        or idle_after_pending < min_idle_slots
+        live_demand
+        and (
+            cap.ready_schedulable_nodes == 0
+            or capacity_insufficient
+            or int(cap.recent_placement_failures) > 0
+            or pending > int(cap.free_slots)
+            or idle_after_pending < min_idle_slots
+        )
     )
     scale_in_recommended = False
 
@@ -717,7 +769,10 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
                 f"< scale_in_cooldown_seconds {in_cooldown}",
             )
     else:
-        reasons.append("no action: ready capacity, pending demand, idle buffer, and node floors are within policy")
+        if not live_demand:
+            reasons.append("no action: no active workspace or workspace-job placement demand")
+        else:
+            reasons.append("no action: ready capacity, pending demand, idle buffer, and node floors are within policy")
 
     if suppressed_by_config:
         action = "suppressed_by_config"
@@ -1021,14 +1076,15 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
     """
     Find whether an idle EC2 node could be reclaimed.
 
-    Never selects the last READY+schedulable EC2 node. Local nodes are never considered.
+    Local nodes are never considered. Set ``devnest_autoscaler_min_ec2_nodes_before_reclaim=0``
+    to allow autoscaled EC2 capacity to scale to zero.
     """
     n_ready = count_ec2_ready_schedulable(session)
     min_ready_required = _min_ready_ec2_before_reclaim()
     if n_ready < min_ready_required:
         reason = (
             f"READY+schedulable EC2 count {n_ready} below minimum {min_ready_required} "
-            f"(devnest_autoscaler_min_ec2_nodes_before_reclaim; last-node safety)"
+            f"(devnest_autoscaler_min_ec2_nodes_before_reclaim)"
         )
         log_event(
             logger,
@@ -1041,6 +1097,7 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
             node_key=None,
             reason=reason,
             idle_ec2_ready_nodes=n_ready,
+            min_ec2_nodes_before_reclaim=min_ready_required,
         )
     stmt = (
         select(ExecutionNode)
@@ -1069,6 +1126,7 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
             node_key=None,
             reason=reason,
             idle_ec2_ready_nodes=n_ready,
+            min_ec2_nodes_before_reclaim=min_ready_required,
         )
     # Cost-aware: reclaim the node with the smallest allocatable capacity first.
     # This preserves larger-capacity nodes for future workloads requiring more resources.
@@ -1089,6 +1147,7 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
             f"{n_ready} READY+schedulable EC2 node(s) (minimum before reclaim={min_ready_required})"
         ),
         idle_ec2_ready_nodes=n_ready,
+        min_ec2_nodes_before_reclaim=min_ready_required,
     )
 
 

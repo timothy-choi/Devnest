@@ -253,14 +253,15 @@ class TestScaleDownSuppressedLog:
     def test_suppressed_log_event_emitted_when_below_minimum_ready(
         self, mock_settings: MagicMock, _n_ready: MagicMock
     ) -> None:
-        """AUTOSCALER_SCALE_DOWN_SUPPRESSED must also fire for the last-node safety guard."""
+        """AUTOSCALER_SCALE_DOWN_SUPPRESSED must also fire for the configured EC2 floor."""
         mock_settings.return_value = SimpleNamespace(devnest_autoscaler_min_ec2_nodes_before_reclaim=2)
 
         with patch("app.services.autoscaler_service.service.log_event") as mock_log:
             ev = evaluate_scale_down(MagicMock())
 
         assert ev.node_key is None
-        assert "last-node safety" in ev.reason
+        assert "devnest_autoscaler_min_ec2_nodes_before_reclaim" in ev.reason
+        assert ev.min_ec2_nodes_before_reclaim == 2
         from app.libs.observability.log_events import LogEvent
         logged_events = [c.args[1] for c in mock_log.call_args_list]
         assert LogEvent.AUTOSCALER_SCALE_DOWN_SUPPRESSED in logged_events

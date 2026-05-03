@@ -16,6 +16,7 @@ class ScaleDownEvaluationResponse(BaseModel):
     node_key: str | None
     reason: str
     idle_ec2_ready_nodes: int
+    min_ec2_nodes_before_reclaim: int
 
 
 class FleetCapacitySnapshotResponse(BaseModel):

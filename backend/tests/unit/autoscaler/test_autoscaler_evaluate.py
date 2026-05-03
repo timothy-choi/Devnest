@@ -249,16 +249,16 @@ def test_evaluate_scale_down_refuses_below_min_ready(
     ev = evaluate_scale_down(MagicMock())
     assert ev.node_key is None
     assert "below minimum" in ev.reason
-    assert "last-node safety" in ev.reason
+    assert ev.min_ec2_nodes_before_reclaim == 2
 
 
 @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=2)
 @patch("app.services.autoscaler_service.service.get_settings")
-def test_evaluate_scale_down_effective_min_ready_is_at_least_two(
+def test_evaluate_scale_down_uses_configured_min_ready_exactly(
     mock_settings: MagicMock,
     _n_ready: MagicMock,
 ) -> None:
-    """Misconfigured ``min_ec2_nodes_before_reclaim=1`` must not weaken last-node safety."""
+    """``min_ec2_nodes_before_reclaim`` is an explicit operator floor, including 0 or 1."""
     mock_settings.return_value = SimpleNamespace(devnest_autoscaler_min_ec2_nodes_before_reclaim=1)
     from app.services.placement_service.models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
 
@@ -298,7 +298,8 @@ def test_evaluate_scale_down_effective_min_ready_is_at_least_two(
     ):
         ev = evaluate_scale_down(session)
     assert ev.node_key == "ec2-a"
-    assert "minimum before reclaim=2" in ev.reason
+    assert ev.min_ec2_nodes_before_reclaim == 1
+    assert "minimum before reclaim=1" in ev.reason
 
 
 def test_evaluate_only_tick_recommends_scale_out_without_mutating_nodes(autoscaler_unit_engine) -> None:
@@ -576,6 +577,18 @@ def test_recent_placement_failure_signal_triggers_scale_out_even_without_pending
     autoscaler_unit_engine,
 ) -> None:
     with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="recent-demand", email="recent-demand@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ws = Workspace(
+            name="recent-placement-demand",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
         session.add(
             ExecutionNode(
                 node_key="ec2-fragmented",
@@ -594,7 +607,7 @@ def test_recent_placement_failure_signal_triggers_scale_out_even_without_pending
         session.commit()
         record_placement_failed_scale_out_signal(
             session,
-            workspace_id=None,
+            workspace_id=int(ws.workspace_id),
             workspace_job_id=None,
             job_type=WorkspaceJobType.CREATE.value,
             detail="No schedulable node qualified for placement",
@@ -618,10 +631,83 @@ def test_recent_placement_failure_signal_triggers_scale_out_even_without_pending
     assert any("recent placement failure demand signals=1" in reason for reason in decision.reasons)
 
 
+def test_recent_placement_failure_signal_is_ignored_after_demand_disappears(
+    autoscaler_unit_engine,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-empty",
+                name="ec2-empty",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                allocatable_disk_mb=102400,
+                max_workspaces=64,
+            ),
+        )
+        session.commit()
+        record_placement_failed_scale_out_signal(
+            session,
+            job_type=WorkspaceJobType.CREATE.value,
+            detail="placement.no_schedulable_node",
+        )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.pending_workspace_jobs == 0
+    assert decision.capacity.recent_placement_failures == 0
+    assert decision.capacity.pending_placement_jobs == 0
+    assert decision.scale_out_recommended is False
+    assert decision.action == "no_action"
+
+
+def test_empty_fleet_without_workspace_or_job_demand_does_not_scale_out(
+    autoscaler_unit_engine,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        record_placement_failed_scale_out_signal(
+            session,
+            job_type=WorkspaceJobType.CREATE.value,
+            detail="placement.no_schedulable_node",
+        )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.total_nodes == 0
+    assert decision.capacity.pending_workspace_jobs == 0
+    assert decision.capacity.recent_placement_failures == 0
+    assert decision.capacity.pending_placement_jobs == 0
+    assert decision.scale_out_recommended is False
+    assert decision.action == "no_action"
+
+
 def test_scale_out_tick_provisions_after_recent_placement_failure_signal(
     autoscaler_unit_engine,
 ) -> None:
     with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="recent-provision", email="recent-provision@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ws = Workspace(
+            name="recent-provision-demand",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
         session.add(
             ExecutionNode(
                 node_key="ec2-current",
@@ -640,6 +726,7 @@ def test_scale_out_tick_provisions_after_recent_placement_failure_signal(
         session.commit()
         record_placement_failed_scale_out_signal(
             session,
+            workspace_id=int(ws.workspace_id),
             job_type=WorkspaceJobType.CREATE.value,
             detail="placement.no_schedulable_node",
         )
@@ -692,6 +779,18 @@ def test_autoscaler_loop_tick_provisions_after_recent_placement_failure_signal(
     autoscaler_unit_engine,
 ) -> None:
     with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="recent-loop", email="recent-loop@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ws = Workspace(
+            name="recent-loop-demand",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
         session.add(
             ExecutionNode(
                 node_key="ec2-current-loop",
@@ -709,6 +808,7 @@ def test_autoscaler_loop_tick_provisions_after_recent_placement_failure_signal(
         )
         record_placement_failed_scale_out_signal(
             session,
+            workspace_id=int(ws.workspace_id),
             job_type=WorkspaceJobType.CREATE.value,
             detail="placement.no_schedulable_node",
         )
@@ -780,6 +880,28 @@ def test_scale_down_idle_node_terminates(autoscaler_unit_engine) -> None:
         assert node.status == ExecutionNodeStatus.TERMINATED.value
         assert node.schedulable is False
     assert node_key == "ec2-idle-a"
+    assert term.call_count == 1
+
+
+def test_scale_down_min_ec2_zero_reclaims_last_idle_ec2_node(autoscaler_unit_engine) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-last-idle", updated_at=old)
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings(min_nodes=0, min_ec2_before_reclaim=0)
+        node_key = run_autoscaler_scale_down_tick(autoscaler_unit_engine)
+
+    with Session(autoscaler_unit_engine) as session:
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ec2-last-idle")).first()
+        assert node is not None
+        assert node.status == ExecutionNodeStatus.TERMINATED.value
+        assert node.schedulable is False
+    assert node_key == "ec2-last-idle"
     assert term.call_count == 1
 
 
@@ -864,6 +986,28 @@ def test_scale_down_cooldown_respected(autoscaler_unit_engine) -> None:
 
 def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(autoscaler_unit_engine) -> None:
     with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="phase2-auto", email="phase2-auto@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ws = Workspace(
+            name="phase2-pending",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(ws.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
+            )
+        )
+        session.commit()
         with (
             patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
             patch("app.services.autoscaler_service.service.provision_ec2_node") as mock_provision,
@@ -942,6 +1086,27 @@ def test_phase2_scale_out_tick_provisions_one_provisioning_unschedulable_node(au
 
 def test_phase2_scale_out_tick_respects_max_nodes_cap(autoscaler_unit_engine) -> None:
     with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="cap-auto", email="cap-auto@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ws = Workspace(
+            name="cap-pending",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(ws.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
+            )
+        )
         session.add(
             ExecutionNode(
                 node_key="ec2-existing",
