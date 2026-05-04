@@ -13,7 +13,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
@@ -28,6 +28,7 @@ from app.services.infrastructure_service.lifecycle import (
     provision_ec2_node,
     sync_node_state,
     terminate_ec2_node,
+    undrain_node,
 )
 from app.services.infrastructure_service.models import Ec2ProvisionRequest, build_default_amazon_linux_2023_user_data
 from app.services.placement_service.capacity import max_effective_free_resources_across_schedulable
@@ -47,6 +48,7 @@ from app.services.placement_service.models import (
     ExecutionNodeStatus,
 )
 from app.services.placement_service.node_placement import schedulable_placement_predicates
+from app.services.providers.errors import Ec2ProviderError
 from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
 from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceJobType, WorkspaceStatus
 
@@ -114,8 +116,12 @@ def count_ec2_provisioning_nodes(session: Session) -> int:
 
 
 def _min_ready_ec2_before_reclaim() -> int:
-    """Effective floor for last-node safety (never below 2, even if settings are mocked or stale)."""
-    return max(2, int(get_settings().devnest_autoscaler_min_ec2_nodes_before_reclaim))
+    """Effective configured READY+schedulable EC2 floor before reclaim."""
+    return max(0, _config_int(get_settings(), "devnest_autoscaler_min_ec2_nodes_before_reclaim", 2))
+
+
+def _scale_down_idle_seconds() -> int:
+    return max(0, _config_int(get_settings(), "devnest_autoscaler_scale_down_idle_seconds", 300))
 
 
 def _workload_counts_by_node_keys(session: Session, node_keys: list[str]) -> dict[str, int]:
@@ -146,6 +152,47 @@ def _workload_counts_by_node_keys(session: Session, node_keys: list[str]) -> dic
         if sk in out:
             out[sk] = int(cnt)
     return out
+
+
+def _active_workspace_count_for_scale_down(session: Session, node: ExecutionNode) -> int:
+    """Count any non-DELETED workspace associated with this node by FK or runtime placement."""
+    node_id = node.id
+    node_key = (node.node_key or "").strip()
+    if node_id is None and not node_key:
+        return 0
+    preds = []
+    if node_id is not None:
+        preds.append(Workspace.execution_node_id == int(node_id))
+    if node_key:
+        preds.append(WorkspaceRuntime.node_id == node_key)
+    stmt = (
+        select(func.count())
+        .select_from(Workspace)
+        .outerjoin(WorkspaceRuntime, WorkspaceRuntime.workspace_id == Workspace.workspace_id)
+        .where(
+            and_(
+                Workspace.status != WorkspaceStatus.DELETED.value,
+                or_(*preds),
+            ),
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _active_ec2_nodes_count(session: Session) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(ExecutionNode)
+        .where(
+            and_(
+                ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+                ExecutionNode.status.in_(sorted(_ACTIVE_EC2_NODE_STATUSES)),
+            ),
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
 def _count_idle_ec2_nodes(session: Session) -> int:
@@ -198,6 +245,23 @@ def count_ec2_ready_schedulable(session: Session) -> int:
     return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
+def _count_all_ready_schedulable_ec2(session: Session) -> int:
+    """Count READY+schedulable EC2 nodes independent of placement single-node gating."""
+    stmt = (
+        select(func.count())
+        .select_from(ExecutionNode)
+        .where(
+            and_(
+                ExecutionNode.provider_type == ExecutionNodeProviderType.EC2.value,
+                ExecutionNode.status == ExecutionNodeStatus.READY.value,
+                ExecutionNode.schedulable == True,  # noqa: E712
+            ),
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
 def workload_count_on_node(session: Session, node_key: str) -> int:
     """
     Count non-deleted workspaces whose runtime row is pinned to ``node_key``.
@@ -215,6 +279,22 @@ def _count_queued_jobs(session: Session, *, job_types: frozenset[str] | None = N
     if job_types is not None:
         preds.append(WorkspaceJob.job_type.in_(sorted(job_types)))
     stmt = select(func.count()).select_from(WorkspaceJob).where(and_(*preds))
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _count_active_or_queued_jobs(session: Session) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(WorkspaceJob)
+        .where(WorkspaceJob.status.in_([WorkspaceJobStatus.QUEUED.value, WorkspaceJobStatus.RUNNING.value]))
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _count_non_deleted_workspaces(session: Session) -> int:
+    stmt = select(func.count()).select_from(Workspace).where(Workspace.status != WorkspaceStatus.DELETED.value)
     raw = session.exec(stmt).one()
     return int(raw[0] if isinstance(raw, tuple) else raw)
 
@@ -245,6 +325,25 @@ def _count_recent_placement_failure_signals(session: Session) -> int:
     )
     raw = session.exec(stmt).one()
     return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _effective_recent_placement_failure_signals(
+    session: Session,
+    *,
+    pending_placement_jobs: int,
+    active_or_queued_jobs: int,
+    non_deleted_workspaces: int,
+) -> int:
+    raw_recent = _count_recent_placement_failure_signals(session)
+    if raw_recent <= 0:
+        return 0
+    if pending_placement_jobs <= 0 and active_or_queued_jobs <= 0 and non_deleted_workspaces <= 0:
+        logger.info(
+            "autoscaler.stale_placement_failures_ignored",
+            extra={"recent_placement_failures": raw_recent},
+        )
+        return 0
+    return raw_recent
 
 
 def record_placement_failed_scale_out_signal(
@@ -523,8 +622,16 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         total_disk += alloc_disk
         free_disk += max(0, alloc_disk - used_disk)
 
-    recent_placement_failures = _count_recent_placement_failure_signals(session)
     pending_placement_jobs = _count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES)
+    pending_workspace_jobs = _count_queued_jobs(session)
+    active_or_queued_jobs = _count_active_or_queued_jobs(session)
+    non_deleted_workspaces = _count_non_deleted_workspaces(session)
+    recent_placement_failures = _effective_recent_placement_failure_signals(
+        session,
+        pending_placement_jobs=pending_placement_jobs,
+        active_or_queued_jobs=active_or_queued_jobs,
+        non_deleted_workspaces=non_deleted_workspaces,
+    )
     return FleetCapacitySnapshot(
         total_nodes=total_nodes,
         ec2_nodes_active=ec2_nodes_active,
@@ -536,7 +643,7 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         draining_nodes=draining_nodes,
         active_slots=active_slots,
         free_slots=free_slots,
-        pending_workspace_jobs=_count_queued_jobs(session),
+        pending_workspace_jobs=pending_workspace_jobs,
         pending_placement_jobs=pending_placement_jobs + recent_placement_failures,
         recent_placement_failures=recent_placement_failures,
         total_allocatable_cpu=round(total_cpu, 4),
@@ -569,21 +676,31 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
 
     cap = build_fleet_capacity_snapshot(session)
     nodes = list(session.exec(select(ExecutionNode)).all())
+    scale_down = evaluate_scale_down(session)
 
     pending = int(cap.pending_placement_jobs)
+    live_demand = (
+        pending > 0
+        or int(cap.pending_workspace_jobs) > 0
+        or int(cap.recent_placement_failures) > 0
+        or _count_non_deleted_workspaces(session) > 0
+    )
     idle_after_pending = int(cap.free_slots) - pending
     capacity_insufficiency_reasons = _capacity_insufficient_for_one_workspace(cap)
     capacity_insufficient = bool(capacity_insufficiency_reasons)
     provider_mode = (getattr(settings, "devnest_node_provider", "all") or "all").strip().lower()
     ec2_allowed = provider_mode in ("all", "ec2")
     scale_out_recommended = (
-        cap.ready_schedulable_nodes == 0
-        or capacity_insufficient
-        or int(cap.recent_placement_failures) > 0
-        or pending > int(cap.free_slots)
-        or idle_after_pending < min_idle_slots
+        live_demand
+        and (
+            cap.ready_schedulable_nodes == 0
+            or capacity_insufficient
+            or int(cap.recent_placement_failures) > 0
+            or pending > int(cap.free_slots)
+            or idle_after_pending < min_idle_slots
+        )
     )
-    scale_in_recommended = False
+    scale_in_recommended = bool(scale_down.node_key)
 
     reasons: list[str] = []
     suppressed_by_config = False
@@ -637,7 +754,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
                 f"< scale_out_cooldown_seconds {out_cooldown}",
             )
     elif scale_in_recommended:
-        reasons.append("scale-in recommended: idle EC2 capacity exceeds configured floor and queue is empty")
+        reasons.append(f"scale-in recommended: {scale_down.reason}")
         if not enabled:
             suppressed_by_config = True
             reasons.append("suppressed by config: DEVNEST_AUTOSCALER_ENABLED=false")
@@ -655,7 +772,10 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
                 f"< scale_in_cooldown_seconds {in_cooldown}",
             )
     else:
-        reasons.append("no action: ready capacity, pending demand, idle buffer, and node floors are within policy")
+        if not live_demand:
+            reasons.append("no action: no active workspace or workspace-job placement demand")
+        else:
+            reasons.append("no action: ready capacity, pending demand, idle buffer, and node floors are within policy")
 
     if suppressed_by_config:
         action = "suppressed_by_config"
@@ -688,6 +808,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         scale_in_cooldown_seconds=in_cooldown,
         evaluate_only=evaluate_only,
         enabled=enabled,
+        scale_down=scale_down,
     )
     log_event(
         logger,
@@ -959,14 +1080,15 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
     """
     Find whether an idle EC2 node could be reclaimed.
 
-    Never selects the last READY+schedulable EC2 node. Local nodes are never considered.
+    Local nodes are never considered. Set ``devnest_autoscaler_min_ec2_nodes_before_reclaim=0``
+    to allow autoscaled EC2 capacity to scale to zero.
     """
-    n_ready = count_ec2_ready_schedulable(session)
+    n_ready = _count_all_ready_schedulable_ec2(session)
     min_ready_required = _min_ready_ec2_before_reclaim()
     if n_ready < min_ready_required:
         reason = (
             f"READY+schedulable EC2 count {n_ready} below minimum {min_ready_required} "
-            f"(devnest_autoscaler_min_ec2_nodes_before_reclaim; last-node safety)"
+            f"(devnest_autoscaler_min_ec2_nodes_before_reclaim)"
         )
         log_event(
             logger,
@@ -979,6 +1101,7 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
             node_key=None,
             reason=reason,
             idle_ec2_ready_nodes=n_ready,
+            min_ec2_nodes_before_reclaim=min_ready_required,
         )
     stmt = (
         select(ExecutionNode)
@@ -1007,18 +1130,54 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
             node_key=None,
             reason=reason,
             idle_ec2_ready_nodes=n_ready,
+            min_ec2_nodes_before_reclaim=min_ready_required,
+        )
+    idle_seconds = _scale_down_idle_seconds()
+    if isinstance(session, Session) and session.bind is not None:
+        cutoff_ts = (datetime.now(timezone.utc) - timedelta(seconds=idle_seconds)).timestamp()
+        idle_long = []
+        for n in idle:
+            ua = n.updated_at
+            if ua is None:
+                continue
+            try:
+                if ua.tzinfo is None:
+                    ua = ua.replace(tzinfo=timezone.utc)
+                ts = float(ua.timestamp())
+            except (OSError, ValueError):
+                continue
+            if ts <= cutoff_ts:
+                idle_long.append(n)
+    else:
+        idle_long = list(idle)
+    if not idle_long:
+        reason = (
+            f"no EC2 nodes idle long enough for scale-in (devnest_autoscaler_scale_down_idle_seconds={idle_seconds}s; "
+            "all idle candidates were recently updated)"
+        )
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_DOWN_SUPPRESSED,
+            idle_ec2_ready_nodes=n_ready,
+            detail=reason,
+        )
+        return ScaleDownEvaluation(
+            node_key=None,
+            reason=reason,
+            idle_ec2_ready_nodes=n_ready,
+            min_ec2_nodes_before_reclaim=min_ready_required,
         )
     # Cost-aware: reclaim the node with the smallest allocatable capacity first.
     # This preserves larger-capacity nodes for future workloads requiring more resources.
     # Tiebreak by allocatable_memory_mb, then node_key for stability.
-    idle.sort(
+    idle_long.sort(
         key=lambda n: (
             float(n.allocatable_cpu or 0.0),
             int(n.allocatable_memory_mb or 0),
             (n.node_key or ""),
         )
     )
-    pick = idle[0]
+    pick = idle_long[0]
     return ScaleDownEvaluation(
         node_key=pick.node_key,
         reason=(
@@ -1027,6 +1186,7 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
             f"{n_ready} READY+schedulable EC2 node(s) (minimum before reclaim={min_ready_required})"
         ),
         idle_ec2_ready_nodes=n_ready,
+        min_ec2_nodes_before_reclaim=min_ready_required,
     )
 
 
@@ -1121,62 +1281,157 @@ def _find_draining_node_past_delay(
     return None
 
 
+def execute_scale_down(
+    session: Session,
+    decision: FleetAutoscalerDecision,
+    *,
+    ec2_client: object | None = None,
+) -> ExecutionNode | None:
+    """Drain and terminate the EC2 node selected by ``decision`` when ``action == scale_in_recommended``.
+
+    Commits after marking DRAINING so schedulers observe ``schedulable=false``, re-checks active
+    workspaces, then calls :func:`terminate_ec2_node` (AWS ``terminate_instances``). Caller may
+    ``commit`` again at end of tick for hygiene.
+    """
+    if decision.action != "scale_in_recommended" or not decision.scale_down.node_key:
+        return None
+    settings = get_settings()
+    if not _config_bool(settings, "devnest_autoscaler_enabled", False):
+        return None
+
+    min_nodes = _config_int(settings, "devnest_autoscaler_min_nodes", 1)
+    active_ec2 = _active_ec2_nodes_count(session)
+    if active_ec2 <= min_nodes:
+        logger.info(
+            "autoscaler.scale_down.skipped_min_nodes",
+            extra={"active_ec2_nodes": active_ec2, "min_nodes": min_nodes},
+        )
+        return None
+
+    cooldown = _config_int(settings, "devnest_autoscaler_scale_in_cooldown_seconds", 900)
+    nodes = list(session.exec(select(ExecutionNode)).all())
+    last_scale_in = _latest_ec2_scale_in_at(nodes)
+    age = _seconds_since(last_scale_in)
+    if age is not None and age >= 0 and age < cooldown:
+        logger.info(
+            "autoscaler.scale_down.skipped_cooldown",
+            extra={"last_scale_in_age_seconds": int(age), "scale_in_cooldown_seconds": cooldown},
+        )
+        return None
+
+    nk = (decision.scale_down.node_key or "").strip()
+    if not nk:
+        return None
+
+    node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+    if node is None:
+        logger.info("autoscaler.scale_down.skipped_missing_node", extra={"node_key": nk})
+        return None
+    if (
+        (node.provider_type or "").strip() != ExecutionNodeProviderType.EC2.value
+        or (node.status or "").strip() != ExecutionNodeStatus.READY.value
+        or not bool(node.schedulable)
+    ):
+        logger.info(
+            "autoscaler.scale_down.skipped_node_state",
+            extra={"node_key": nk, "status": node.status, "schedulable": bool(node.schedulable)},
+        )
+        return None
+
+    if _active_workspace_count_for_scale_down(session, node) != 0:
+        logger.info("autoscaler.scale_down.skipped_active_workspaces", extra={"node_key": nk})
+        return None
+
+    iid = (node.provider_instance_id or "").strip()
+    if not iid:
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_DOWN_FAILED,
+            node_key=nk,
+            instance_id=None,
+            detail="missing provider_instance_id for EC2 terminate",
+            level=logging.ERROR,
+        )
+        return None
+
+    mark_node_draining(session, node_key=nk)
+    session.commit()
+
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_SCALE_DOWN_DRAINING,
+        node_key=nk,
+        instance_id=iid,
+    )
+
+    session.expire_all()
+    node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+    if node is None:
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_DOWN_FAILED,
+            node_key=nk,
+            instance_id=iid,
+            detail="node row missing after drain commit",
+            level=logging.ERROR,
+        )
+        return None
+
+    active_after_drain = _active_workspace_count_for_scale_down(session, node)
+    if active_after_drain != 0:
+        logger.info(
+            "autoscaler.scale_down.skipped_active_workspaces",
+            extra={"node_key": nk, "active_workspaces": active_after_drain, "after_drain": True},
+        )
+        undrain_node(session, node_key=nk)
+        session.commit()
+        return None
+
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_SCALE_DOWN_AWS_TERMINATE_REQUESTED,
+        node_key=nk,
+        instance_id=iid,
+    )
+    try:
+        out = terminate_ec2_node(session, node_key=nk, ec2_client=ec2_client, wait_until_terminated=True)
+    except Ec2ProviderError as e:
+        log_event(
+            logger,
+            LogEvent.AUTOSCALER_SCALE_DOWN_FAILED,
+            node_key=nk,
+            instance_id=iid,
+            detail=str(e)[:2000],
+            level=logging.ERROR,
+        )
+        session.commit()
+        return None
+
+    record_autoscaler_scale_down()
+    log_event(
+        logger,
+        LogEvent.AUTOSCALER_SCALE_DOWN_TERMINATED,
+        node_key=nk,
+        instance_id=iid,
+    )
+    session.commit()
+    return out
+
+
 def reclaim_one_idle_ec2_node(
     session: Session,
     *,
     ec2_client: object | None = None,
 ) -> ExecutionNode | None:
     """
-    Two-phase drain + terminate for a safe, non-premature scale-down.
+    Drain and terminate one EC2 node when the fleet tick recommends scale-in.
 
-    **Phase 1 — Mark:** Find an idle READY EC2 node, check for recent workspace activity,
-    mark it ``DRAINING``. The node will not be immediately terminated.
-
-    **Phase 2 — Terminate:** Find a DRAINING node that has waited at least
-    ``DEVNEST_AUTOSCALER_DRAIN_DELAY_SECONDS`` (default 30 s) and terminate it.
-
-    Both phases run on each call; a node marked in Phase 1 will be terminated on the next
-    call once the delay elapses.
-
-    **Destructive:** use internal/admin routes only. Caller must ``commit``.
+    **Destructive:** use internal/admin routes only. Caller must ``commit`` for any remaining
+    session state (this function commits the scale-down path internally).
     """
-    settings = get_settings()
-    drain_delay = int(getattr(settings, "devnest_autoscaler_drain_delay_seconds", 30))
-    activity_window = int(getattr(settings, "devnest_autoscaler_recent_activity_window_seconds", 300))
-
-    # Phase 2: terminate a DRAINING node past the delay window.
-    out: ExecutionNode | None = None
-    draining_candidate = _find_draining_node_past_delay(session, drain_delay_seconds=drain_delay)
-    if draining_candidate is not None:
-        out = terminate_ec2_node(session, node_key=draining_candidate.node_key, ec2_client=ec2_client)
-        record_autoscaler_scale_down()
-        log_event(
-            logger,
-            LogEvent.AUTOSCALER_SCALE_DOWN_TRIGGERED,
-            node_key=draining_candidate.node_key,
-            instance_id=(draining_candidate.provider_instance_id or "").strip() or None,
-            drain_delay_seconds=drain_delay,
-        )
-
-    # Phase 1: select a new idle node and mark it DRAINING (for future termination).
-    ready_node = select_node_for_scale_down(session)
-    if ready_node is not None:
-        # Safety: skip nodes with recent workspace heartbeat activity.
-        nk = (ready_node.node_key or "").strip()
-        if activity_window > 0 and _node_has_recent_activity(session, nk, window_seconds=activity_window):
-            logger.info(
-                "autoscaler_drain_suppressed_recent_activity",
-                extra={"node_key": nk, "activity_window_seconds": activity_window},
-            )
-        else:
-            mark_node_draining(session, node_key=ready_node.node_key)
-            logger.info(
-                "autoscaler_node_marked_draining",
-                extra={
-                    "node_key": nk,
-                    "drain_delay_seconds": drain_delay,
-                    "will_terminate_after": f"{drain_delay}s",
-                },
-            )
-
-    return out
+    if not _config_bool(get_settings(), "devnest_autoscaler_enabled", False):
+        return None
+    decision = evaluate_fleet_autoscaler_tick(session)
+    if decision.action != "scale_in_recommended":
+        return None
+    return execute_scale_down(session, decision, ec2_client=ec2_client)
