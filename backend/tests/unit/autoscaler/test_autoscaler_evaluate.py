@@ -80,11 +80,14 @@ def _seed_ec2_node(
     session: Session,
     node_key: str,
     *,
+    created_at: datetime | None = None,
     updated_at: datetime | None = None,
+    last_resource_check_at: datetime | None = None,
     status: str = ExecutionNodeStatus.READY.value,
     schedulable: bool = True,
 ) -> ExecutionNode:
-    ts = updated_at or (datetime.now(timezone.utc) - timedelta(seconds=600))
+    ts_created = created_at or (datetime.now(timezone.utc) - timedelta(seconds=600))
+    ts_updated = updated_at if updated_at is not None else datetime.now(timezone.utc)
     node = ExecutionNode(
         node_key=node_key,
         name=node_key,
@@ -96,8 +99,11 @@ def _seed_ec2_node(
         total_memory_mb=4096,
         allocatable_cpu=2.0,
         allocatable_memory_mb=4096,
-        updated_at=ts,
+        created_at=ts_created,
+        updated_at=ts_updated,
     )
+    if last_resource_check_at is not None:
+        node.last_resource_check_at = last_resource_check_at
     session.add(node)
     session.flush()
     return node
@@ -870,9 +876,9 @@ def test_autoscaler_loop_tick_provisions_after_recent_placement_failure_signal(
 def test_scale_down_idle_node_terminates(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-idle-a", updated_at=old)
-        _seed_ec2_node(session, "ec2-idle-b", updated_at=old)
-        _seed_ec2_node(session, "ec2-idle-c", updated_at=old)
+        _seed_ec2_node(session, "ec2-idle-a", created_at=old)
+        _seed_ec2_node(session, "ec2-idle-b", created_at=old)
+        _seed_ec2_node(session, "ec2-idle-c", created_at=old)
         session.commit()
 
     with (
@@ -894,7 +900,7 @@ def test_scale_down_idle_node_terminates(autoscaler_unit_engine) -> None:
 def test_scale_down_min_ec2_zero_reclaims_last_idle_ec2_node(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-last-idle", updated_at=old)
+        _seed_ec2_node(session, "ec2-last-idle", created_at=old)
         session.commit()
 
     with (
@@ -918,7 +924,7 @@ def test_idle_ec2_node_with_min_ec2_zero_recommends_scale_in_without_demand(
 ) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-decision-idle", updated_at=old)
+        _seed_ec2_node(session, "ec2-decision-idle", created_at=old)
         session.commit()
 
         with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
@@ -937,7 +943,7 @@ def test_idle_ec2_node_with_min_ec2_zero_recommends_scale_in_without_demand(
 def test_autoscaler_loop_tick_terminates_selected_idle_node(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-loop-scale-in", updated_at=old)
+        _seed_ec2_node(session, "ec2-loop-scale-in", created_at=old)
         session.commit()
 
     with (
@@ -964,9 +970,10 @@ def test_scale_down_active_node_does_not_terminate(autoscaler_unit_engine) -> No
         session.add(user)
         session.commit()
         session.refresh(user)
-        active = _seed_ec2_node(session, "ec2-active", updated_at=old)
-        _seed_ec2_node(session, "ec2-fresh-a", updated_at=datetime.now(timezone.utc))
-        _seed_ec2_node(session, "ec2-fresh-b", updated_at=datetime.now(timezone.utc))
+        active = _seed_ec2_node(session, "ec2-active", created_at=old)
+        fresh = datetime.now(timezone.utc)
+        _seed_ec2_node(session, "ec2-fresh-a", created_at=fresh)
+        _seed_ec2_node(session, "ec2-fresh-b", created_at=fresh)
         session.commit()
         ws = Workspace(
             name="pending-on-node",
@@ -992,11 +999,73 @@ def test_scale_down_active_node_does_not_terminate(autoscaler_unit_engine) -> No
     assert term.call_count == 0
 
 
+def test_scale_down_idle_ignores_updated_at_and_last_resource_check(autoscaler_unit_engine) -> None:
+    """Resource-monitor timestamps must not defer scale-down; idle age uses ``created_at`` only."""
+    old_created = datetime.now(timezone.utc) - timedelta(seconds=900)
+    fresh = datetime.now(timezone.utc)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(
+            session,
+            "ec2-resource-noise",
+            created_at=old_created,
+            updated_at=fresh,
+            last_resource_check_at=fresh,
+        )
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings(min_nodes=0, min_ec2_before_reclaim=0)
+        node_key = run_autoscaler_scale_down_tick(autoscaler_unit_engine)
+
+    assert node_key == "ec2-resource-noise"
+    assert term.call_count == 1
+
+
+def test_scale_down_suppressed_when_created_at_too_recent_despite_zero_workloads(autoscaler_unit_engine) -> None:
+    """No workloads but ``created_at`` inside ``scale_down_idle_seconds`` → no reclaim."""
+    recent_created = datetime.now(timezone.utc) - timedelta(seconds=60)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-young", created_at=recent_created)
+        session.commit()
+
+    with (
+        patch("app.services.autoscaler_service.service.get_settings") as mock_settings,
+        patch("app.services.autoscaler_service.service.terminate_ec2_node", side_effect=_fake_terminate) as term,
+    ):
+        mock_settings.return_value = _scale_down_settings(min_nodes=0, min_ec2_before_reclaim=0, idle_seconds=300)
+        node_key = run_autoscaler_scale_down_tick(autoscaler_unit_engine)
+
+    assert node_key is None
+    assert term.call_count == 0
+
+
+def test_evaluate_scale_down_emits_idle_and_runtime_logs(autoscaler_unit_engine) -> None:
+    old = datetime.now(timezone.utc) - timedelta(seconds=900)
+    with Session(autoscaler_unit_engine) as session:
+        _seed_ec2_node(session, "ec2-log-a", created_at=old)
+        _seed_ec2_node(session, "ec2-log-b", created_at=old)
+        session.commit()
+
+    from app.libs.observability.log_events import LogEvent
+
+    with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+        mock_settings.return_value = SimpleNamespace(devnest_autoscaler_min_ec2_nodes_before_reclaim=2)
+        with Session(autoscaler_unit_engine) as session:
+            with patch("app.services.autoscaler_service.service.log_event") as mock_log:
+                evaluate_scale_down(session)
+        codes = [c.args[1] for c in mock_log.call_args_list]
+        assert LogEvent.AUTOSCALER_SCALE_DOWN_RUNTIME_COUNT in codes
+        assert LogEvent.AUTOSCALER_SCALE_DOWN_IDLE_DURATION in codes
+
+
 def test_scale_down_min_node_floor_respected(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-floor-a", updated_at=old)
-        _seed_ec2_node(session, "ec2-floor-b", updated_at=old)
+        _seed_ec2_node(session, "ec2-floor-a", created_at=old)
+        _seed_ec2_node(session, "ec2-floor-b", created_at=old)
         session.commit()
 
     with (
@@ -1013,12 +1082,13 @@ def test_scale_down_min_node_floor_respected(autoscaler_unit_engine) -> None:
 def test_scale_down_cooldown_respected(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-cool-a", updated_at=old)
-        _seed_ec2_node(session, "ec2-cool-b", updated_at=old)
-        _seed_ec2_node(session, "ec2-cool-c", updated_at=old)
+        _seed_ec2_node(session, "ec2-cool-a", created_at=old)
+        _seed_ec2_node(session, "ec2-cool-b", created_at=old)
+        _seed_ec2_node(session, "ec2-cool-c", created_at=old)
         _seed_ec2_node(
             session,
             "ec2-just-terminated",
+            created_at=old,
             updated_at=datetime.now(timezone.utc),
             status=ExecutionNodeStatus.TERMINATED.value,
             schedulable=False,
@@ -1239,8 +1309,8 @@ def test_ec2_autoscaler_config_errors_are_aggregated() -> None:
 def test_scale_in_recommended_execute_scale_down_calls_terminate_ec2(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-exec-term-a", updated_at=old)
-        _seed_ec2_node(session, "ec2-exec-term-b", updated_at=old)
+        _seed_ec2_node(session, "ec2-exec-term-a", created_at=old)
+        _seed_ec2_node(session, "ec2-exec-term-b", created_at=old)
         session.commit()
 
     with (
@@ -1269,8 +1339,8 @@ def _terminate_asserts_draining_then_fake(session: Session, *, node_key: str, **
 def test_execute_scale_down_node_is_draining_before_terminate(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-drain-seq-a", updated_at=old)
-        _seed_ec2_node(session, "ec2-drain-seq-b", updated_at=old)
+        _seed_ec2_node(session, "ec2-drain-seq-a", created_at=old)
+        _seed_ec2_node(session, "ec2-drain-seq-b", created_at=old)
         session.commit()
 
     with (
@@ -1291,8 +1361,8 @@ def test_execute_scale_down_node_is_draining_before_terminate(autoscaler_unit_en
 def test_execute_scale_down_active_workspace_race_reverts_ready(autoscaler_unit_engine) -> None:
     old = datetime.now(timezone.utc) - timedelta(seconds=900)
     with Session(autoscaler_unit_engine) as session:
-        _seed_ec2_node(session, "ec2-race-a", updated_at=old)
-        _seed_ec2_node(session, "ec2-race-b", updated_at=old)
+        _seed_ec2_node(session, "ec2-race-a", created_at=old)
+        _seed_ec2_node(session, "ec2-race-b", created_at=old)
         session.commit()
 
     with (

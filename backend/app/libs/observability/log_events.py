@@ -122,6 +122,8 @@ class LogEvent:
     AUTOSCALER_SCALE_UP_SUPPRESSED = "autoscaler.scale_up.suppressed"
     AUTOSCALER_SCALE_UP_TRIGGERED = "autoscaler.scale_up.triggered"
     AUTOSCALER_SCALE_DOWN_TRIGGERED = "autoscaler.scale_down.triggered"
+    AUTOSCALER_SCALE_DOWN_IDLE_DURATION = "autoscaler.scale_down.idle_duration"
+    AUTOSCALER_SCALE_DOWN_RUNTIME_COUNT = "autoscaler.scale_down.runtime_count"
     AUTOSCALER_SCALE_DOWN_SUPPRESSED = "autoscaler.scale_down.suppressed"
     AUTOSCALER_SCALE_DOWN_DRAINING = "autoscaler.scale_down.draining"
     AUTOSCALER_SCALE_DOWN_AWS_TERMINATE_REQUESTED = "autoscaler.scale_down.aws_terminate_requested"
