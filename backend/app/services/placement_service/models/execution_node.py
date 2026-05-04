@@ -13,7 +13,12 @@ from ..constants import (
     DEFAULT_EXECUTION_NODE_ALLOCATABLE_DISK_MB,
     DEFAULT_EXECUTION_NODE_MAX_WORKSPACES,
 )
-from .enums import ExecutionNodeExecutionMode, ExecutionNodeProviderType, ExecutionNodeStatus
+from .enums import (
+    ExecutionNodeExecutionMode,
+    ExecutionNodeProviderType,
+    ExecutionNodeResourceStatus,
+    ExecutionNodeStatus,
+)
 
 
 class ExecutionNode(SQLModel, table=True):
@@ -157,3 +162,23 @@ class ExecutionNode(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc),
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+
+    # Host telemetry (EC2 via SSM); optional for local nodes. Used by resource-aware placement.
+    disk_total_mb: int | None = Field(default=None, description="df / root total MiB (last check)")
+    disk_free_mb: int | None = Field(default=None, description="df / available MiB (last check)")
+    memory_total_mb: int | None = Field(default=None, description="MemTotal from free -m (last check)")
+    memory_free_mb: int | None = Field(
+        default=None,
+        description="MemAvailable from free -m when present else MemFree (MiB)",
+    )
+    last_resource_check_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+        description="When host disk/memory script last succeeded on this node.",
+    )
+    resource_status: str | None = Field(
+        default=None,
+        max_length=32,
+        description=f"OK | {ExecutionNodeResourceStatus.LOW_DISK.value} | {ExecutionNodeResourceStatus.LOW_MEMORY.value}",
+    )
+    resource_warning_message: str | None = Field(default=None, max_length=512)

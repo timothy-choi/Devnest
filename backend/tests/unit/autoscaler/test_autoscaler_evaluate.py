@@ -29,6 +29,8 @@ from app.services.workspace_service.models import Workspace, WorkspaceJob, Works
 from app.services.workspace_service.models.enums import WorkspaceJobStatus, WorkspaceJobType, WorkspaceStatus
 from app.workers.autoscaler_loop import run_autoscaler_loop_tick, run_autoscaler_scale_down_tick
 
+from app.libs.common.config import get_settings
+
 
 def _scale_out_settings() -> SimpleNamespace:
     return SimpleNamespace(
@@ -113,14 +115,18 @@ def _fake_terminate(session: Session, *, node_key: str, **_kw: object) -> Execut
 
 
 @pytest.fixture
-def autoscaler_unit_engine() -> Engine:
+def autoscaler_unit_engine(monkeypatch: pytest.MonkeyPatch) -> Engine:
+    """Disable host-resource placement gate by default; predicates use real ``get_settings()``."""
+    monkeypatch.setenv("DEVNEST_NODE_RESOURCE_MONITOR_ENABLED", "false")
+    get_settings.cache_clear()
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     SQLModel.metadata.create_all(engine)
-    return engine
+    yield engine
+    get_settings.cache_clear()
 
 
 @patch("app.services.autoscaler_service.service.count_ec2_provisioning_nodes", return_value=0)
@@ -1309,3 +1315,84 @@ def test_execute_scale_down_active_workspace_race_reverts_ready(autoscaler_unit_
         assert row is not None
         assert row.status == ExecutionNodeStatus.READY.value
         assert row.schedulable is True
+
+
+def test_evaluate_recommends_scale_out_when_all_ec2_fail_host_resource_gate(
+    autoscaler_unit_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fleet snapshot uses placement predicates (real settings): low disk excludes EC2 from schedulable pool."""
+    monkeypatch.setenv("DEVNEST_NODE_RESOURCE_MONITOR_ENABLED", "true")
+    monkeypatch.setenv("DEVNEST_NODE_PROVIDER", "ec2")
+    monkeypatch.setenv("DEVNEST_ENABLE_MULTI_NODE_SCHEDULING", "true")
+    get_settings.cache_clear()
+    now = datetime.now(timezone.utc)
+    with Session(autoscaler_unit_engine) as session:
+        session.add(
+            ExecutionNode(
+                node_key="ec2-host-resource-blocked",
+                name="ec2-host-resource-blocked",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                allocatable_disk_mb=102_400,
+                max_workspaces=8,
+                disk_free_mb=4096,
+                memory_free_mb=8192,
+                last_resource_check_at=now,
+            ),
+        )
+        session.commit()
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == "ec2-host-resource-blocked")).first()
+        assert node is not None
+        user = UserAuth(username="hr-u1", password_hash="x", email="hr-u1@example.com")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        session.add(
+            Workspace(
+                name="hr-ws",
+                owner_user_id=int(user.user_auth_id),
+                status=WorkspaceStatus.RUNNING.value,
+                execution_node_id=int(node.id),
+            ),
+        )
+        session.commit()
+
+    with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+        mock_settings.return_value = SimpleNamespace(
+            devnest_autoscaler_enabled=True,
+            devnest_autoscaler_evaluate_only=True,
+            devnest_autoscaler_min_nodes=1,
+            devnest_autoscaler_max_nodes=5,
+            devnest_autoscaler_min_idle_slots=1,
+            devnest_autoscaler_max_concurrent_provisioning=3,
+            devnest_autoscaler_scale_out_cooldown_seconds=0,
+            devnest_autoscaler_scale_in_cooldown_seconds=0,
+            devnest_enable_multi_node_scheduling=True,
+            devnest_node_provider="ec2",
+            devnest_require_fresh_node_heartbeat=False,
+            aws_region="us-east-1",
+            devnest_ec2_ami_id="ami-12345678",
+            devnest_ec2_instance_type="t3.micro",
+            devnest_ec2_subnet_id="subnet-12345678",
+            devnest_ec2_security_group_ids="sg-12345678",
+            devnest_ec2_instance_profile="DevNestExecutionNodeProfile",
+            devnest_ec2_key_name="",
+            devnest_ec2_default_execution_mode="ssm_docker",
+            devnest_ec2_bootstrap_prebaked=True,
+            devnest_ec2_user_data="",
+            devnest_ec2_user_data_b64="",
+        )
+        with Session(autoscaler_unit_engine) as session:
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.scale_out_recommended is True
+    assert decision.capacity.ready_schedulable_nodes == 0
+    assert decision.capacity.ready_schedulable_ec2_nodes == 0
+    joined = " ".join(decision.reasons).lower()
+    assert "capacity insufficient" in joined or "no ready schedulable nodes" in joined

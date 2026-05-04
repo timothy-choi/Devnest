@@ -36,6 +36,7 @@ from app.services.storage.factory import get_snapshot_storage_provider, snapshot
 from app.services.placement_service.node_heartbeat import try_emit_default_local_execution_node_heartbeat
 
 from .autoscaler_loop import run_autoscaler_loop
+from .node_resource_monitor_loop import run_node_resource_monitor_loop
 from .workspace_job_worker.worker import poll_workspace_jobs_tick
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,22 @@ def run_poll_loop(
         )
         autoscaler_thread.start()
 
+    resource_monitor_stop = threading.Event()
+    resource_monitor_thread: threading.Thread | None = None
+    if bool(getattr(ws, "devnest_node_resource_monitor_enabled", True)):
+        interval_rm = int(getattr(ws, "devnest_node_resource_check_interval_seconds", 60) or 60)
+        resource_monitor_thread = threading.Thread(
+            target=run_node_resource_monitor_loop,
+            kwargs={
+                "engine": engine,
+                "stop_event": resource_monitor_stop,
+                "interval_seconds": float(interval_rm),
+            },
+            name="node-resource-monitor",
+            daemon=True,
+        )
+        resource_monitor_thread.start()
+
     logger.info(
         "workspace_job_poll_loop_start",
         extra={"poll_interval_sec": interval, "jobs_per_tick": limit},
@@ -202,6 +219,10 @@ def run_poll_loop(
         autoscaler_stop.set()
         if autoscaler_thread is not None:
             autoscaler_thread.join(timeout=min(15.0, float(interval) + 10.0))
+        resource_monitor_stop.set()
+        if resource_monitor_thread is not None:
+            rm_iv = float(getattr(ws, "devnest_node_resource_check_interval_seconds", 60) or 60)
+            resource_monitor_thread.join(timeout=min(15.0, max(rm_iv, 15.0) + 10.0))
 
     logger.info("workspace_job_poll_loop_stop")
 

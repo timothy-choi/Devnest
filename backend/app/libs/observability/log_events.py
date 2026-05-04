@@ -111,9 +111,16 @@ class LogEvent:
     # and ``placement_reason`` (Phase 3b Step 7).
     SCHEDULER_NODE_SELECTED = "scheduler.node.selected"
     SCHEDULER_FAIRNESS_SPREAD_APPLIED = "scheduler.fairness_spread_applied"
+    SCHEDULER_NODE_SKIPPED_LOW_DISK = "scheduler.node.skipped_low_disk"
+    SCHEDULER_NODE_SKIPPED_LOW_MEMORY = "scheduler.node.skipped_low_memory"
 
-    AUTOSCALER_SCALE_UP_TRIGGERED = "autoscaler.scale_up.triggered"
+    NODE_RESOURCE_CHECK_STARTED = "node_resource.check.started"
+    NODE_RESOURCE_CHECK_SUCCEEDED = "node_resource.check.succeeded"
+    NODE_RESOURCE_CHECK_FAILED = "node_resource.check.failed"
+    NODE_RESOURCE_LOW_DISK = "node_resource.low_disk"
+    NODE_RESOURCE_LOW_MEMORY = "node_resource.low_memory"
     AUTOSCALER_SCALE_UP_SUPPRESSED = "autoscaler.scale_up.suppressed"
+    AUTOSCALER_SCALE_UP_TRIGGERED = "autoscaler.scale_up.triggered"
     AUTOSCALER_SCALE_DOWN_TRIGGERED = "autoscaler.scale_down.triggered"
     AUTOSCALER_SCALE_DOWN_SUPPRESSED = "autoscaler.scale_down.suppressed"
     AUTOSCALER_SCALE_DOWN_DRAINING = "autoscaler.scale_down.draining"
