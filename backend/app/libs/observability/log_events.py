@@ -116,6 +116,10 @@ class LogEvent:
     AUTOSCALER_SCALE_UP_SUPPRESSED = "autoscaler.scale_up.suppressed"
     AUTOSCALER_SCALE_DOWN_TRIGGERED = "autoscaler.scale_down.triggered"
     AUTOSCALER_SCALE_DOWN_SUPPRESSED = "autoscaler.scale_down.suppressed"
+    AUTOSCALER_SCALE_DOWN_DRAINING = "autoscaler.scale_down.draining"
+    AUTOSCALER_SCALE_DOWN_AWS_TERMINATE_REQUESTED = "autoscaler.scale_down.aws_terminate_requested"
+    AUTOSCALER_SCALE_DOWN_TERMINATED = "autoscaler.scale_down.terminated"
+    AUTOSCALER_SCALE_DOWN_FAILED = "autoscaler.scale_down.failed"
     AUTOSCALER_EVALUATE_ONLY_DECISION = "autoscaler.evaluate_only.decision"
 
     EC2_NODE_PROVISIONED = "ec2.node.provisioned"

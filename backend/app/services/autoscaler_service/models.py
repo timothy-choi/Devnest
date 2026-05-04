@@ -46,6 +46,8 @@ class FleetAutoscalerDecision:
     scale_in_cooldown_seconds: int
     evaluate_only: bool
     enabled: bool
+    # Latest scale-down evaluation (idle candidate); ``node_key`` is None when none.
+    scale_down: ScaleDownEvaluation
 
 
 @dataclass(frozen=True)

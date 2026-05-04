@@ -132,7 +132,7 @@ class TestScaleDownCostAwareCandidateSelection:
         "app.services.autoscaler_service.service._workload_counts_by_node_keys",
         return_value={"big": 0, "small": 0},
     )
-    @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=3)
+    @patch("app.services.autoscaler_service.service._count_all_ready_schedulable_ec2", return_value=3)
     @patch("app.services.autoscaler_service.service.get_settings")
     def test_prefers_smallest_capacity_idle_node(
         self, mock_settings: MagicMock, _n_ready: MagicMock, _counts: MagicMock
@@ -159,7 +159,7 @@ class TestScaleDownCostAwareCandidateSelection:
         "app.services.autoscaler_service.service._workload_counts_by_node_keys",
         return_value={"ec2-a": 0, "ec2-b": 0, "ec2-c": 0},
     )
-    @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=4)
+    @patch("app.services.autoscaler_service.service._count_all_ready_schedulable_ec2", return_value=4)
     @patch("app.services.autoscaler_service.service.get_settings")
     def test_tiebreak_by_node_key_when_equal_capacity(
         self, mock_settings: MagicMock, _n_ready: MagicMock, _counts: MagicMock
@@ -183,7 +183,7 @@ class TestScaleDownCostAwareCandidateSelection:
         "app.services.autoscaler_service.service._workload_counts_by_node_keys",
         return_value={"busy": 3},
     )
-    @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=2)
+    @patch("app.services.autoscaler_service.service._count_all_ready_schedulable_ec2", return_value=2)
     @patch("app.services.autoscaler_service.service.get_settings")
     def test_no_reclaim_when_all_nodes_have_workloads(
         self, mock_settings: MagicMock, _n_ready: MagicMock, _counts: MagicMock
@@ -203,7 +203,7 @@ class TestScaleDownCostAwareCandidateSelection:
         assert ev.node_key is None
         assert "no idle" in ev.reason
 
-    @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=1)
+    @patch("app.services.autoscaler_service.service._count_all_ready_schedulable_ec2", return_value=1)
     @patch("app.services.autoscaler_service.service.get_settings")
     def test_no_reclaim_below_minimum_ready(
         self, mock_settings: MagicMock, _n_ready: MagicMock
@@ -223,7 +223,7 @@ class TestScaleDownSuppressedLog:
         "app.services.autoscaler_service.service._workload_counts_by_node_keys",
         return_value={"node-a": 1},
     )
-    @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=3)
+    @patch("app.services.autoscaler_service.service._count_all_ready_schedulable_ec2", return_value=3)
     @patch("app.services.autoscaler_service.service.get_settings")
     def test_suppressed_log_event_emitted_when_all_nodes_busy(
         self, mock_settings: MagicMock, _n_ready: MagicMock, _counts: MagicMock
@@ -248,7 +248,7 @@ class TestScaleDownSuppressedLog:
         logged_events = [c.args[1] for c in mock_log.call_args_list]
         assert LogEvent.AUTOSCALER_SCALE_DOWN_SUPPRESSED in logged_events
 
-    @patch("app.services.autoscaler_service.service.count_ec2_ready_schedulable", return_value=1)
+    @patch("app.services.autoscaler_service.service._count_all_ready_schedulable_ec2", return_value=1)
     @patch("app.services.autoscaler_service.service.get_settings")
     def test_suppressed_log_event_emitted_when_below_minimum_ready(
         self, mock_settings: MagicMock, _n_ready: MagicMock

@@ -12,7 +12,11 @@ from sqlmodel import Session
 
 from app.libs.observability import metrics as devnest_metrics
 from app.libs.observability.log_events import log_event
-from app.services.autoscaler_service.service import reclaim_one_idle_ec2_node, run_scale_out_tick
+from app.services.autoscaler_service.service import (
+    execute_scale_down,
+    reclaim_one_idle_ec2_node,
+    run_scale_out_tick,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +34,6 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
         log_event(logger, "autoscaler.loop.tick")
         try:
             decision, node = run_scale_out_tick(session)
-            reclaimed_node = None
-            if decision.action == "scale_in_recommended":
-                reclaimed_node = reclaim_one_idle_ec2_node(session)
             devnest_metrics.record_autoscaler_decision(
                 action=decision.action,
                 scale_out_recommended=decision.scale_out_recommended,
@@ -54,21 +55,16 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
             )
             if decision.action == "scale_out_recommended":
                 log_event(logger, "autoscaler.scale_out.triggered", reasons=" | ".join(decision.reasons)[:2000])
+            reclaimed_node = None
             if decision.action == "scale_in_recommended":
                 log_event(logger, "autoscaler.scale_down.triggered", reasons=" | ".join(decision.reasons)[:2000])
+                reclaimed_node = execute_scale_down(session, decision)
             if node is not None:
                 log_event(
                     logger,
                     "autoscaler.scale_out.provisioned",
                     node_key=node.node_key,
                     instance_id=(node.provider_instance_id or "").strip() or None,
-                )
-            if reclaimed_node is not None:
-                log_event(
-                    logger,
-                    "autoscaler.scale_down.terminated",
-                    node_key=reclaimed_node.node_key,
-                    instance_id=(reclaimed_node.provider_instance_id or "").strip() or None,
                 )
             session.commit()
             changed_node = node or reclaimed_node
