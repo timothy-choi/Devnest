@@ -31,6 +31,11 @@ class FleetCapacitySnapshotResponse(BaseModel):
     pending_workspace_jobs: int
     pending_placement_jobs: int
     recent_placement_failures: int
+    filtered_placement_failure_signals: int = 0
+    pending_demand_workspace_units: int = 0
+    ready_workspace_capacity: int = 0
+    provisioning_workspace_capacity: int = 0
+    total_available_workspace_capacity: int = 0
     total_allocatable_cpu: float
     free_cpu: float
     total_allocatable_memory_mb: int
@@ -43,7 +48,7 @@ class FleetCapacitySnapshotResponse(BaseModel):
 class FleetAutoscalerDecisionResponse(BaseModel):
     action: str = Field(
         description="One of scale_out_recommended, scale_in_recommended, no_action, "
-        "suppressed_by_cooldown, suppressed_by_cap, suppressed_by_config.",
+        "suppressed_by_cooldown, suppressed_by_cap, suppressed_by_config, suppressed_by_recent_provisioning.",
     )
     scale_out_recommended: bool
     scale_in_recommended: bool
@@ -51,6 +56,7 @@ class FleetAutoscalerDecisionResponse(BaseModel):
     suppressed_by_cooldown: bool
     suppressed_by_cap: bool
     suppressed_by_config: bool
+    suppressed_by_recent_provisioning: bool = False
     reasons: list[str]
     capacity: FleetCapacitySnapshotResponse
     min_nodes: int

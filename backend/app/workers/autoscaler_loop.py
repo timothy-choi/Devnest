@@ -47,6 +47,7 @@ def run_autoscaler_loop_tick(engine: Engine) -> tuple[str, str | None]:
                 suppressed_by_config=decision.suppressed_by_config,
                 suppressed_by_cap=decision.suppressed_by_cap,
                 suppressed_by_cooldown=decision.suppressed_by_cooldown,
+                suppressed_by_recent_provisioning=decision.suppressed_by_recent_provisioning,
                 pending_placement_jobs=decision.capacity.pending_placement_jobs,
                 recent_placement_failures=decision.capacity.recent_placement_failures,
                 free_cpu=decision.capacity.free_cpu,
