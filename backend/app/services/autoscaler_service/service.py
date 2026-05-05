@@ -875,12 +875,14 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         or (no_incoming_or_ready_capacity and effective_pending > 0)
         or idle_buffer_violation
     )
-    # Ready pool cannot accept another default-shaped workspace (misleading free_slots, host gate,
-    # or resource-bound schedulable nodes). This may apply even when no workspace job is queued.
+    # If pending demand already exceeds ready + incoming capacity, scale out even when one existing
+    # node can fit one workspace. The fit check only suppresses single-workspace "no fit" noise.
     scale_out_recommended = (
         live_demand
-        and not existing_node_can_fit
-        and (demand_driven_scale_out or schedulable_pool_exhausted_or_missing)
+        and (
+            demand_driven_scale_out
+            or (not existing_node_can_fit and schedulable_pool_exhausted_or_missing)
+        )
     )
     scale_in_recommended = bool(scale_down.node_key)
 

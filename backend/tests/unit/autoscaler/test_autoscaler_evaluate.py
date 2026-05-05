@@ -846,6 +846,60 @@ def test_provisioning_node_incoming_capacity_suppresses_extra_scale_out(
     assert decision.scale_out_recommended is False
 
 
+def test_pending_jobs_exceed_single_ready_slot_triggers_scale_out_even_when_one_fits(
+    autoscaler_unit_engine,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="ready-slot-short", email="ready-slot-short@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        session.add(
+            ExecutionNode(
+                node_key="local-one-slot",
+                name="local-one-slot",
+                provider_type=ExecutionNodeProviderType.LOCAL.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                allocatable_disk_mb=102400,
+                max_workspaces=1,
+            ),
+        )
+        for i in range(2):
+            ws = Workspace(
+                name=f"pending-ready-short-{i}",
+                owner_user_id=int(user.user_auth_id),
+                status=WorkspaceStatus.PENDING.value,
+            )
+            session.add(ws)
+            session.commit()
+            session.refresh(ws)
+            session.add(
+                WorkspaceJob(
+                    workspace_id=int(ws.workspace_id),
+                    job_type=WorkspaceJobType.CREATE.value,
+                    status=WorkspaceJobStatus.QUEUED.value,
+                    requested_by_user_id=int(user.user_auth_id),
+                    requested_config_version=1,
+                ),
+            )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.ready_workspace_capacity == 1
+    assert decision.capacity.pending_placement_jobs == 2
+    assert decision.capacity.total_available_workspace_capacity == 1
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
+
+
 def test_multiple_pending_placement_jobs_exceed_incoming_capacity_triggers_scale_out(
     autoscaler_unit_engine,
 ) -> None:
