@@ -883,6 +883,13 @@ class Settings(BaseSettings):
     # Minimum age of an otherwise idle READY+schedulable EC2 node before automatic scale-down.
     devnest_autoscaler_scale_down_idle_seconds: int = 300
 
+    # EC2 host disk/memory telemetry (SSM). When enabled, placement skips EC2 nodes below thresholds
+    # or with stale probes (workspace-worker runs ``run_ec2_node_resource_monitor_tick``).
+    devnest_node_resource_monitor_enabled: bool = True
+    devnest_node_min_free_disk_mb: int = 10240
+    devnest_node_min_free_memory_mb: int = 1024
+    devnest_node_resource_check_interval_seconds: int = 60
+
     # ── Distributed rate limiting (Redis) ───────────────────────────────────
     # Rate limit backend: "memory" (default, single-process) or "redis" (distributed).
     # When "redis", DEVNEST_REDIS_URL must be set.
@@ -1118,6 +1125,42 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 300
         return max(0, min(n, 86_400))
+
+    @field_validator("devnest_node_min_free_disk_mb", mode="before")
+    @classmethod
+    def _node_min_free_disk_mb(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 10240
+        return max(0, min(n, 1_000_000))
+
+    @field_validator("devnest_node_min_free_memory_mb", mode="before")
+    @classmethod
+    def _node_min_free_memory_mb(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 1024
+        return max(0, min(n, 1_000_000))
+
+    @field_validator("devnest_node_resource_check_interval_seconds", mode="before")
+    @classmethod
+    def _node_resource_check_interval_seconds(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 60
+        return max(15, min(n, 3600))
+
+    @field_validator("devnest_node_resource_monitor_enabled", mode="before")
+    @classmethod
+    def _parse_devnest_node_resource_monitor_enabled(cls, v):  # noqa: ANN001
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
 
     @field_validator("devnest_autoscaler_min_ec2_nodes_before_reclaim", mode="before")
     @classmethod

@@ -124,6 +124,19 @@ def _scale_down_idle_seconds() -> int:
     return max(0, _config_int(get_settings(), "devnest_autoscaler_scale_down_idle_seconds", 300))
 
 
+def _execution_node_created_at_timestamp_utc(node: ExecutionNode) -> float | None:
+    """UTC POSIX timestamp for ``created_at``, or ``None`` if missing or unusable."""
+    ca = node.created_at
+    if ca is None:
+        return None
+    if ca.tzinfo is None:
+        ca = ca.replace(tzinfo=timezone.utc)
+    try:
+        return float(ca.timestamp())
+    except (OSError, ValueError):
+        return None
+
+
 def _workload_counts_by_node_keys(session: Session, node_keys: list[str]) -> dict[str, int]:
     """
     Count non-deleted workspaces pinned to each ``node_key`` via ``WorkspaceRuntime.node_id``.
@@ -1080,6 +1093,11 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
     """
     Find whether an idle EC2 node could be reclaimed.
 
+    Idle means zero workspace-runtime placements for non-deleted workspaces on that ``node_key``.
+    How long the node must stay idle before scale-in uses ``devnest_autoscaler_scale_down_idle_seconds``
+    against ``execution_node.created_at`` (not ``updated_at`` or ``last_resource_check_at``), so
+    background probes do not reset the timer.
+
     Local nodes are never considered. Set ``devnest_autoscaler_min_ec2_nodes_before_reclaim=0``
     to allow autoscaled EC2 capacity to scale to zero.
     """
@@ -1134,26 +1152,48 @@ def evaluate_scale_down(session: Session) -> ScaleDownEvaluation:
         )
     idle_seconds = _scale_down_idle_seconds()
     if isinstance(session, Session) and session.bind is not None:
-        cutoff_ts = (datetime.now(timezone.utc) - timedelta(seconds=idle_seconds)).timestamp()
+        now_utc = datetime.now(timezone.utc)
+        cutoff_ts = (now_utc - timedelta(seconds=idle_seconds)).timestamp()
         idle_long = []
         for n in idle:
-            ua = n.updated_at
-            if ua is None:
+            nk = (n.node_key or "").strip()
+            runtime_count = int(counts.get(nk, 0))
+            log_event(
+                logger,
+                LogEvent.AUTOSCALER_SCALE_DOWN_RUNTIME_COUNT,
+                node_key=nk or None,
+                runtime_count=runtime_count,
+            )
+            ca_ts = _execution_node_created_at_timestamp_utc(n)
+            if ca_ts is None:
+                log_event(
+                    logger,
+                    LogEvent.AUTOSCALER_SCALE_DOWN_IDLE_DURATION,
+                    node_key=nk or None,
+                    idle_duration_seconds=None,
+                    detail="missing_or_invalid_created_at",
+                    scale_down_idle_seconds=idle_seconds,
+                )
                 continue
-            try:
-                if ua.tzinfo is None:
-                    ua = ua.replace(tzinfo=timezone.utc)
-                ts = float(ua.timestamp())
-            except (OSError, ValueError):
-                continue
-            if ts <= cutoff_ts:
+            idle_duration_sec = max(0.0, float(now_utc.timestamp()) - ca_ts)
+            log_event(
+                logger,
+                LogEvent.AUTOSCALER_SCALE_DOWN_IDLE_DURATION,
+                node_key=nk or None,
+                idle_duration_seconds=round(idle_duration_sec, 3),
+                scale_down_idle_seconds=idle_seconds,
+            )
+            # Idle cohort already has runtime_count == 0; duration uses created_at only (not updated_at /
+            # last_resource_check_at) so resource-monitor writes do not reset the scale-down timer.
+            if runtime_count == 0 and ca_ts <= cutoff_ts:
                 idle_long.append(n)
     else:
         idle_long = list(idle)
     if not idle_long:
         reason = (
             f"no EC2 nodes idle long enough for scale-in (devnest_autoscaler_scale_down_idle_seconds={idle_seconds}s; "
-            "all idle candidates were recently updated)"
+            "idle duration uses execution_node.created_at when runtime workload count is zero, "
+            "not updated_at or last_resource_check_at)"
         )
         log_event(
             logger,

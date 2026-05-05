@@ -14,7 +14,18 @@ from app.services.placement_service.models import (
     ExecutionNodeProviderType,
     ExecutionNodeStatus,
 )
+from app.libs.common.config import get_settings
 from app.services.placement_service.node_placement import select_node_for_workspace
+
+
+@pytest.fixture(autouse=True)
+def _placement_provider_filter_real_settings_gates_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Heartbeat / host-resource predicates read ``config.get_settings``, not the patched mock below."""
+    monkeypatch.setenv("DEVNEST_NODE_RESOURCE_MONITOR_ENABLED", "false")
+    monkeypatch.setenv("DEVNEST_REQUIRE_FRESH_NODE_HEARTBEAT", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture

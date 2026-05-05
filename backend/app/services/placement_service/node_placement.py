@@ -82,6 +82,9 @@ def _schedulable_base_predicates():
     sng = _single_node_primary_id_clause()
     if sng is not None:
         preds.append(sng)
+    from .host_resource import ec2_host_resource_placement_predicates
+
+    preds.extend(ec2_host_resource_placement_predicates())
     return preds
 
 
@@ -231,6 +234,9 @@ def select_node_for_workspace(
         stmt = stmt.with_for_update()
     row = session.exec(stmt).first()
     if row is None:
+        from .host_resource import log_scheduler_skipped_ec2_nodes_for_host_resources
+
+        log_scheduler_skipped_ec2_nodes_for_host_resources(session)
         n_gate = _count_ready_schedulable_nodes(session)
         prov = (get_settings().devnest_node_provider or "all").strip().lower()
         pool_hint = ""

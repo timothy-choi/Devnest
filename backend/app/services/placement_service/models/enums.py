@@ -29,3 +29,11 @@ class ExecutionNodeExecutionMode(str, Enum):
     LOCAL_DOCKER = "local_docker"
     SSH_DOCKER = "ssh_docker"
     SSM_DOCKER = "ssm_docker"
+
+
+class ExecutionNodeResourceStatus(str, Enum):
+    """Host-level disk/memory gate from SSM telemetry (EC2)."""
+
+    OK = "OK"
+    LOW_DISK = "LOW_DISK"
+    LOW_MEMORY = "LOW_MEMORY"
