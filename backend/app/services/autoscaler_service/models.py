@@ -16,8 +16,20 @@ class FleetCapacitySnapshot:
     active_slots: int
     free_slots: int
     pending_workspace_jobs: int
+    # Queued workspace jobs whose types imply placement demand (CREATE/START/…); not merged with failures.
     pending_placement_jobs: int
+    # Raw audit count in the recent-activity window (see ``devnest_autoscaler_recent_activity_window_seconds``).
     recent_placement_failures: int
+    # Failures counted toward scale-out demand (0 when raw failures <= 1 to ignore transients).
+    filtered_placement_failure_signals: int
+    # Queued placement jobs + filtered failure signals (workspace-unit demand estimate).
+    pending_demand_workspace_units: int
+    # Estimated additional workspaces schedulable on READY pool from free slots vs default request shape.
+    ready_workspace_capacity: int
+    # Sum of estimated empty capacity on EC2 nodes in PROVISIONING (incoming capacity).
+    provisioning_workspace_capacity: int
+    # Incoming + ready estimated workspace slots (placement demand compared against this).
+    total_available_workspace_capacity: int
     total_allocatable_cpu: float
     free_cpu: float
     total_allocatable_memory_mb: int
@@ -36,6 +48,7 @@ class FleetAutoscalerDecision:
     suppressed_by_cooldown: bool
     suppressed_by_cap: bool
     suppressed_by_config: bool
+    suppressed_by_recent_provisioning: bool
     reasons: list[str]
     capacity: FleetCapacitySnapshot
     min_nodes: int

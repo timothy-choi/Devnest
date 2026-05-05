@@ -871,6 +871,9 @@ class Settings(BaseSettings):
     devnest_autoscaler_max_concurrent_provisioning: int = 3
     devnest_autoscaler_scale_out_cooldown_seconds: int = 300
     devnest_autoscaler_scale_in_cooldown_seconds: int = 900
+    # After any EC2 node enters the active lifecycle set, suppress additional scale-out for this many
+    # seconds so transient placement failures do not stack provisions while capacity is still landing.
+    devnest_autoscaler_suppress_scale_out_recent_provision_seconds: int = 60
     # Do not reclaim EC2 nodes unless at least this many READY+schedulable EC2 nodes exist.
     # Set to 0 to allow autoscaled EC2 capacity to scale all the way down to zero.
     devnest_autoscaler_min_ec2_nodes_before_reclaim: int = 2
@@ -1116,6 +1119,7 @@ class Settings(BaseSettings):
         "devnest_autoscaler_scale_out_cooldown_seconds",
         "devnest_autoscaler_scale_in_cooldown_seconds",
         "devnest_autoscaler_scale_down_idle_seconds",
+        "devnest_autoscaler_suppress_scale_out_recent_provision_seconds",
         mode="before",
     )
     @classmethod

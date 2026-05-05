@@ -40,6 +40,7 @@ def _scale_out_settings() -> SimpleNamespace:
         devnest_autoscaler_max_nodes=5,
         devnest_autoscaler_min_idle_slots=1,
         devnest_autoscaler_max_concurrent_provisioning=3,
+        devnest_autoscaler_suppress_scale_out_recent_provision_seconds=0,
         devnest_autoscaler_scale_out_cooldown_seconds=0,
         devnest_autoscaler_scale_in_cooldown_seconds=0,
         devnest_enable_multi_node_scheduling=True,
@@ -587,9 +588,10 @@ def test_evaluate_tick_free_slots_high_but_cpu_zero_triggers_scale_out(autoscale
     assert any("free_cpu 0.0 < required_cpu 1.0" in reason for reason in decision.reasons)
 
 
-def test_recent_placement_failure_signal_triggers_scale_out_even_without_pending_jobs(
+def test_single_placement_failure_does_not_trigger_scale_out_when_capacity_exists(
     autoscaler_unit_engine,
 ) -> None:
+    """Transient placement audit (count <= 1) must not add demand units or scale out."""
     with Session(autoscaler_unit_engine) as session:
         user = UserAuth(username="recent-demand", email="recent-demand@example.com", password_hash="x")
         session.add(user)
@@ -639,10 +641,256 @@ def test_recent_placement_failure_signal_triggers_scale_out_even_without_pending
 
     assert decision.capacity.pending_workspace_jobs == 0
     assert decision.capacity.recent_placement_failures == 1
-    assert decision.capacity.pending_placement_jobs == 1
+    assert decision.capacity.filtered_placement_failure_signals == 0
+    assert decision.capacity.pending_placement_jobs == 0
+    assert decision.capacity.pending_demand_workspace_units == 0
+    assert decision.scale_out_recommended is False
+    assert decision.action == "no_action"
+
+
+def test_repeated_placement_failures_trigger_scale_out_when_no_capacity(
+    autoscaler_unit_engine,
+) -> None:
+    """Two+ failure signals count as sustained demand only when capacity cannot absorb them."""
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="demand2", email="demand2@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ws = Workspace(
+            name="ws-demand",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.STARTING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        for _ in range(2):
+            record_placement_failed_scale_out_signal(
+                session,
+                workspace_id=int(ws.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                detail="No schedulable node",
+            )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.recent_placement_failures == 2
+    assert decision.capacity.filtered_placement_failure_signals == 2
+    assert decision.capacity.total_available_workspace_capacity == 0
     assert decision.scale_out_recommended is True
     assert decision.action == "scale_out_recommended"
-    assert any("recent placement failure demand signals=1" in reason for reason in decision.reasons)
+
+
+def test_provisioning_node_incoming_capacity_suppresses_extra_scale_out(
+    autoscaler_unit_engine,
+) -> None:
+    """One queued CREATE + one PROVISIONING EC2 with estimated slots >= demand → no scale-out."""
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="prov-cap", email="prov-cap@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        old = datetime.now(timezone.utc) - timedelta(seconds=900)
+        session.add(
+            ExecutionNode(
+                node_key="ec2-prov",
+                name="ec2-prov",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.PROVISIONING.value,
+                schedulable=False,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                allocatable_disk_mb=102400,
+                max_workspaces=8,
+                created_at=old,
+                updated_at=old,
+            ),
+        )
+        ws = Workspace(
+            name="pending-ws",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.CREATING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(ws.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
+            ),
+        )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.pending_placement_jobs == 1
+    assert decision.capacity.provisioning_workspace_capacity >= 1
+    assert decision.capacity.total_available_workspace_capacity >= decision.capacity.pending_placement_jobs
+    assert decision.scale_out_recommended is False
+
+
+def test_multiple_pending_placement_jobs_exceed_incoming_capacity_triggers_scale_out(
+    autoscaler_unit_engine,
+) -> None:
+    """Several queued jobs can exceed provisioning incoming estimates."""
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="many-jobs", email="many-jobs@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        old = datetime.now(timezone.utc) - timedelta(seconds=900)
+        session.add(
+            ExecutionNode(
+                node_key="ec2-small-prov",
+                name="ec2-small-prov",
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                status=ExecutionNodeStatus.PROVISIONING.value,
+                schedulable=False,
+                total_cpu=2.0,
+                total_memory_mb=4096,
+                allocatable_cpu=2.0,
+                allocatable_memory_mb=4096,
+                allocatable_disk_mb=8192,
+                max_workspaces=1,
+                created_at=old,
+                updated_at=old,
+            ),
+        )
+        for i in range(3):
+            ws = Workspace(
+                name=f"ws-{i}",
+                owner_user_id=int(user.user_auth_id),
+                status=WorkspaceStatus.CREATING.value,
+            )
+            session.add(ws)
+            session.commit()
+            session.refresh(ws)
+            session.add(
+                WorkspaceJob(
+                    workspace_id=int(ws.workspace_id),
+                    job_type=WorkspaceJobType.CREATE.value,
+                    status=WorkspaceJobStatus.QUEUED.value,
+                    requested_by_user_id=int(user.user_auth_id),
+                    requested_config_version=1,
+                ),
+            )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.pending_placement_jobs == 3
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
+
+
+def test_suppressed_provisioning_cap_logs_and_blocks_action(autoscaler_unit_engine) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="cap-test", email="cap-test@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        ts_old = datetime.now(timezone.utc) - timedelta(seconds=900)
+        ready_node = ExecutionNode(
+            node_key="ec2-busy-cap",
+            name="ec2-busy-cap",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            status=ExecutionNodeStatus.READY.value,
+            schedulable=True,
+            total_cpu=2.0,
+            total_memory_mb=4096,
+            allocatable_cpu=2.0,
+            allocatable_memory_mb=4096,
+            allocatable_disk_mb=102400,
+            max_workspaces=8,
+            created_at=ts_old,
+            updated_at=ts_old,
+        )
+        session.add(ready_node)
+        session.commit()
+        session.refresh(ready_node)
+        ws_busy = Workspace(
+            name="busy-cap",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(ready_node.id),
+        )
+        session.add(ws_busy)
+        session.commit()
+        session.refresh(ws_busy)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=int(ws_busy.workspace_id),
+                node_id="ec2-busy-cap",
+                reserved_cpu=2.0,
+                reserved_memory_mb=4096,
+                reserved_disk_mb=4096,
+            ),
+        )
+        for i in range(3):
+            session.add(
+                ExecutionNode(
+                    node_key=f"ec2-prov-{i}",
+                    name=f"ec2-prov-{i}",
+                    provider_type=ExecutionNodeProviderType.EC2.value,
+                    status=ExecutionNodeStatus.PROVISIONING.value,
+                    schedulable=False,
+                    total_cpu=2.0,
+                    total_memory_mb=4096,
+                    allocatable_cpu=2.0,
+                    allocatable_memory_mb=4096,
+                    max_workspaces=4,
+                    created_at=ts_old,
+                    updated_at=ts_old,
+                ),
+            )
+        ws = Workspace(
+            name="need-node",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.CREATING.value,
+        )
+        session.add(ws)
+        session.commit()
+        session.refresh(ws)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(ws.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
+            ),
+        )
+        session.commit()
+
+        cap_ns = _scale_out_settings()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = cap_ns
+            with patch("app.services.autoscaler_service.service.logger.info") as mock_info:
+                decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.provisioning_nodes == 3
+    assert decision.scale_out_recommended is True
+    assert decision.suppressed_by_cap is True
+    assert decision.action == "suppressed_by_cap"
+    assert any(
+        call.args[0] == "autoscaler.scale_up.suppressed_provisioning_cap"
+        for call in mock_info.call_args_list
+    )
 
 
 def test_recent_placement_failure_signal_is_ignored_after_demand_disappears(
@@ -709,6 +957,7 @@ def test_empty_fleet_without_workspace_or_job_demand_does_not_scale_out(
 def test_scale_out_tick_provisions_after_recent_placement_failure_signal(
     autoscaler_unit_engine,
 ) -> None:
+    """Sustained placement failures (>1) with no absorbable fleet capacity trigger scale-out."""
     with Session(autoscaler_unit_engine) as session:
         user = UserAuth(username="recent-provision", email="recent-provision@example.com", password_hash="x")
         session.add(user)
@@ -722,28 +971,13 @@ def test_scale_out_tick_provisions_after_recent_placement_failure_signal(
         session.add(ws)
         session.commit()
         session.refresh(ws)
-        session.add(
-            ExecutionNode(
-                node_key="ec2-current",
-                name="ec2-current",
-                provider_type=ExecutionNodeProviderType.EC2.value,
-                status=ExecutionNodeStatus.READY.value,
-                schedulable=True,
-                total_cpu=4.0,
-                total_memory_mb=8192,
-                allocatable_cpu=4.0,
-                allocatable_memory_mb=8192,
-                allocatable_disk_mb=102400,
-                max_workspaces=64,
-            ),
-        )
-        session.commit()
-        record_placement_failed_scale_out_signal(
-            session,
-            workspace_id=int(ws.workspace_id),
-            job_type=WorkspaceJobType.CREATE.value,
-            detail="placement.no_schedulable_node",
-        )
+        for _ in range(2):
+            record_placement_failed_scale_out_signal(
+                session,
+                workspace_id=int(ws.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                detail="placement.no_schedulable_node",
+            )
         session.commit()
 
         with (
@@ -792,6 +1026,7 @@ def test_scale_out_tick_provisions_after_recent_placement_failure_signal(
 def test_autoscaler_loop_tick_provisions_after_recent_placement_failure_signal(
     autoscaler_unit_engine,
 ) -> None:
+    """Loop tick: sustained failures with zero schedulable capacity still provisions one node."""
     with Session(autoscaler_unit_engine) as session:
         user = UserAuth(username="recent-loop", email="recent-loop@example.com", password_hash="x")
         session.add(user)
@@ -805,27 +1040,13 @@ def test_autoscaler_loop_tick_provisions_after_recent_placement_failure_signal(
         session.add(ws)
         session.commit()
         session.refresh(ws)
-        session.add(
-            ExecutionNode(
-                node_key="ec2-current-loop",
-                name="ec2-current-loop",
-                provider_type=ExecutionNodeProviderType.EC2.value,
-                status=ExecutionNodeStatus.READY.value,
-                schedulable=True,
-                total_cpu=4.0,
-                total_memory_mb=8192,
-                allocatable_cpu=4.0,
-                allocatable_memory_mb=8192,
-                allocatable_disk_mb=102400,
-                max_workspaces=64,
-            ),
-        )
-        record_placement_failed_scale_out_signal(
-            session,
-            workspace_id=int(ws.workspace_id),
-            job_type=WorkspaceJobType.CREATE.value,
-            detail="placement.no_schedulable_node",
-        )
+        for _ in range(2):
+            record_placement_failed_scale_out_signal(
+                session,
+                workspace_id=int(ws.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                detail="placement.no_schedulable_node",
+            )
         session.commit()
 
     with (
@@ -1441,6 +1662,7 @@ def test_evaluate_recommends_scale_out_when_all_ec2_fail_host_resource_gate(
             devnest_autoscaler_max_nodes=5,
             devnest_autoscaler_min_idle_slots=1,
             devnest_autoscaler_max_concurrent_provisioning=3,
+            devnest_autoscaler_suppress_scale_out_recent_provision_seconds=0,
             devnest_autoscaler_scale_out_cooldown_seconds=0,
             devnest_autoscaler_scale_in_cooldown_seconds=0,
             devnest_enable_multi_node_scheduling=True,

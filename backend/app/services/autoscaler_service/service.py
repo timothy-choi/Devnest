@@ -95,6 +95,93 @@ def _capacity_insufficient_for_one_workspace(cap: FleetCapacitySnapshot) -> list
     return reasons
 
 
+_WORKSPACE_PENDING_COMPUTE_STATUSES = frozenset(
+    {
+        WorkspaceStatus.CREATING.value,
+        WorkspaceStatus.PENDING.value,
+        WorkspaceStatus.STARTING.value,
+        WorkspaceStatus.RESTARTING.value,
+        WorkspaceStatus.UPDATING.value,
+    },
+)
+
+
+def _workspace_slots_from_free_resources(
+    free_slots: int,
+    free_cpu: float,
+    free_memory_mb: int,
+    free_disk_mb: int,
+) -> int:
+    """Upper bound on additional default-shaped workspaces the READY pool can accept."""
+    fs = max(0, int(free_slots))
+    if fs <= 0:
+        return 0
+    req_c = float(DEFAULT_WORKSPACE_REQUEST_CPU)
+    req_m = int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
+    req_d = int(DEFAULT_WORKSPACE_REQUEST_DISK_MB)
+    by_cpu = int(float(free_cpu) // req_c) if req_c > 0 else fs
+    by_mem = int(free_memory_mb // req_m) if req_m > 0 else fs
+    by_disk = int(free_disk_mb // req_d) if req_d > 0 else fs
+    return max(0, min(fs, by_cpu, by_mem, by_disk))
+
+
+def _estimated_empty_workspace_capacity_on_node(node: ExecutionNode) -> int:
+    """Schedulable workspace slots if the node were empty (PROVISIONING estimate)."""
+    max_ws = max(0, int(node.max_workspaces or 0))
+    cpu = max(0.0, float(node.allocatable_cpu or 0.0))
+    mem = max(0, int(node.allocatable_memory_mb or 0))
+    disk = max(0, int(node.allocatable_disk_mb or 0))
+    req_c = float(DEFAULT_WORKSPACE_REQUEST_CPU)
+    req_m = int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
+    req_d = int(DEFAULT_WORKSPACE_REQUEST_DISK_MB)
+    by_cpu = int(cpu // req_c) if req_c > 0 else max_ws
+    by_mem = int(mem // req_m) if req_m > 0 else max_ws
+    by_disk = int(disk // req_d) if req_d > 0 else max_ws
+    return max(0, min(max_ws, by_cpu, by_mem, by_disk))
+
+
+def _count_workspaces_pending_placement_compute(session: Session) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(Workspace)
+        .where(Workspace.status.in_(sorted(_WORKSPACE_PENDING_COMPUTE_STATUSES)))
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
+def _effective_pending_demand_workspace_units(cap: FleetCapacitySnapshot, session: Session) -> int:
+    """Demand units for scale-out; strips failure-only spikes when no workspace is mid-provisioning."""
+    base = int(cap.pending_placement_jobs) + int(cap.filtered_placement_failure_signals)
+    if int(cap.filtered_placement_failure_signals) > 0 and int(cap.pending_placement_jobs) == 0:
+        if _count_workspaces_pending_placement_compute(session) == 0:
+            return 0
+    return base
+
+
+def _minimum_age_seconds_among_active_ec2_nodes(nodes: list[ExecutionNode]) -> float | None:
+    """Smallest age among active EC2 nodes (most recently created has the minimum age)."""
+    ages: list[float] = []
+    now = datetime.now(timezone.utc)
+    for n in nodes:
+        if n.provider_type != ExecutionNodeProviderType.EC2.value:
+            continue
+        if (n.status or "") not in _ACTIVE_EC2_NODE_STATUSES:
+            continue
+        ca = n.created_at
+        if ca is None:
+            continue
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        try:
+            age = (now - ca).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if age >= 0:
+            ages.append(age)
+    return min(ages) if ages else None
+
+
 def _provider_allows_ec2_autoscale() -> bool:
     mode = (get_settings().devnest_node_provider or "all").strip().lower()
     return mode in ("all", "ec2")
@@ -635,16 +722,33 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         total_disk += alloc_disk
         free_disk += max(0, alloc_disk - used_disk)
 
-    pending_placement_jobs = _count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES)
+    pending_placement_jobs_queued = _count_queued_jobs(session, job_types=_PENDING_PLACEMENT_DEMAND_JOB_TYPES)
     pending_workspace_jobs = _count_queued_jobs(session)
     active_or_queued_jobs = _count_active_or_queued_jobs(session)
     non_deleted_workspaces = _count_non_deleted_workspaces(session)
     recent_placement_failures = _effective_recent_placement_failure_signals(
         session,
-        pending_placement_jobs=pending_placement_jobs,
+        pending_placement_jobs=pending_placement_jobs_queued,
         active_or_queued_jobs=active_or_queued_jobs,
         non_deleted_workspaces=non_deleted_workspaces,
     )
+    filtered_placement_failure_signals = (
+        int(recent_placement_failures) if int(recent_placement_failures) > 1 else 0
+    )
+    pending_demand_workspace_units = int(pending_placement_jobs_queued) + int(filtered_placement_failure_signals)
+    ready_workspace_capacity = _workspace_slots_from_free_resources(
+        free_slots,
+        free_cpu,
+        free_mem,
+        free_disk,
+    )
+    provisioning_workspace_capacity = sum(
+        _estimated_empty_workspace_capacity_on_node(n)
+        for n in nodes
+        if n.provider_type == ExecutionNodeProviderType.EC2.value
+        and n.status == ExecutionNodeStatus.PROVISIONING.value
+    )
+    total_available_workspace_capacity = int(ready_workspace_capacity) + int(provisioning_workspace_capacity)
     return FleetCapacitySnapshot(
         total_nodes=total_nodes,
         ec2_nodes_active=ec2_nodes_active,
@@ -657,8 +761,13 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
         active_slots=active_slots,
         free_slots=free_slots,
         pending_workspace_jobs=pending_workspace_jobs,
-        pending_placement_jobs=pending_placement_jobs + recent_placement_failures,
-        recent_placement_failures=recent_placement_failures,
+        pending_placement_jobs=int(pending_placement_jobs_queued),
+        recent_placement_failures=int(recent_placement_failures),
+        filtered_placement_failure_signals=int(filtered_placement_failure_signals),
+        pending_demand_workspace_units=int(pending_demand_workspace_units),
+        ready_workspace_capacity=int(ready_workspace_capacity),
+        provisioning_workspace_capacity=int(provisioning_workspace_capacity),
+        total_available_workspace_capacity=int(total_available_workspace_capacity),
         total_allocatable_cpu=round(total_cpu, 4),
         free_cpu=round(free_cpu, 4),
         total_allocatable_memory_mb=total_mem,
@@ -691,51 +800,118 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     nodes = list(session.exec(select(ExecutionNode)).all())
     scale_down = evaluate_scale_down(session)
 
-    pending = int(cap.pending_placement_jobs)
-    live_demand = (
-        pending > 0
-        or int(cap.pending_workspace_jobs) > 0
-        or int(cap.recent_placement_failures) > 0
-        or _count_non_deleted_workspaces(session) > 0
+    suppress_recent_sec = _config_int(
+        settings,
+        "devnest_autoscaler_suppress_scale_out_recent_provision_seconds",
+        60,
     )
-    idle_after_pending = int(cap.free_slots) - pending
+    youngest_active_ec2_age_s = _minimum_age_seconds_among_active_ec2_nodes(nodes)
+
+    effective_pending = _effective_pending_demand_workspace_units(cap, session)
+    live_demand = effective_pending > 0 or int(cap.pending_workspace_jobs) > 0
+
     capacity_insufficiency_reasons = _capacity_insufficient_for_one_workspace(cap)
     capacity_insufficient = bool(capacity_insufficiency_reasons)
-    provider_mode = (getattr(settings, "devnest_node_provider", "all") or "all").strip().lower()
-    ec2_allowed = provider_mode in ("all", "ec2")
-    scale_out_recommended = (
-        live_demand
-        and (
-            cap.ready_schedulable_nodes == 0
-            or capacity_insufficient
-            or int(cap.recent_placement_failures) > 0
-            or pending > int(cap.free_slots)
-            or idle_after_pending < min_idle_slots
+    # Do not treat "no ready rows in the rollup" as exhaustion when PROVISIONING EC2 is
+    # already incoming capacity (that case is covered by pending_demand vs total_available).
+    schedulable_pool_exhausted_or_missing = capacity_insufficient and (
+        int(cap.ready_schedulable_nodes) > 0
+        or (
+            int(cap.ec2_nodes_active) > 0
+            and int(cap.ready_schedulable_ec2_nodes) == 0
+            and int(cap.provisioning_nodes) == 0
         )
     )
+
+    idle_after_pending_ready = int(cap.free_slots) - effective_pending
+    idle_buffer_violation = (
+        effective_pending > 0
+        and idle_after_pending_ready < min_idle_slots
+        and int(cap.provisioning_workspace_capacity) == 0
+    )
+
+    capacity_shortfall = effective_pending > int(cap.total_available_workspace_capacity)
+    no_incoming_or_ready_capacity = int(cap.total_available_workspace_capacity) == 0
+
+    provider_mode = (getattr(settings, "devnest_node_provider", "all") or "all").strip().lower()
+    ec2_allowed = provider_mode in ("all", "ec2")
+
+    demand_driven_scale_out = live_demand and (
+        capacity_shortfall
+        or (no_incoming_or_ready_capacity and effective_pending > 0)
+        or idle_buffer_violation
+    )
+    # Ready pool cannot accept another default-shaped workspace (misleading free_slots, host gate,
+    # or resource-bound schedulable nodes). This may apply even when no workspace job is queued.
+    scale_out_recommended = demand_driven_scale_out or schedulable_pool_exhausted_or_missing
     scale_in_recommended = bool(scale_down.node_key)
+
+    logger.info(
+        "autoscaler.capacity.ready_capacity",
+        extra={"ready_workspace_capacity": cap.ready_workspace_capacity},
+    )
+    logger.info(
+        "autoscaler.capacity.provisioning_capacity",
+        extra={"provisioning_workspace_capacity": cap.provisioning_workspace_capacity},
+    )
+    logger.info(
+        "autoscaler.capacity.total_available_capacity",
+        extra={"total_available_workspace_capacity": cap.total_available_workspace_capacity},
+    )
+    logger.info(
+        "autoscaler.demand.filtered",
+        extra={
+            "effective_pending_workspace_units": effective_pending,
+            "pending_placement_jobs_queued": cap.pending_placement_jobs,
+            "filtered_placement_failure_signals": cap.filtered_placement_failure_signals,
+            "recent_placement_failures_raw": cap.recent_placement_failures,
+            "pending_demand_workspace_units_snapshot": cap.pending_demand_workspace_units,
+        },
+    )
 
     reasons: list[str] = []
     suppressed_by_config = False
     suppressed_by_cap = False
     suppressed_by_cooldown = False
+    suppressed_by_recent_provisioning = False
+    scale_up_reason = "no_scale_out"
 
     if scale_out_recommended:
-        if capacity_insufficient:
+        if schedulable_pool_exhausted_or_missing:
+            scale_up_reason = "insufficient_resources_for_default_workspace_on_ready_pool"
             reasons.append(
                 "scale-out recommended: capacity insufficient for one workspace: "
                 + "; ".join(capacity_insufficiency_reasons),
             )
-        elif int(cap.recent_placement_failures) > 0:
+        elif capacity_shortfall:
+            scale_up_reason = "pending_demand_exceeds_total_available_capacity"
             reasons.append(
-                f"scale-out recommended: recent placement failure demand signals={cap.recent_placement_failures}",
+                "scale-out recommended: "
+                f"effective_pending_workspace_units={effective_pending} > "
+                f"total_available_workspace_capacity={cap.total_available_workspace_capacity} "
+                f"(ready={cap.ready_workspace_capacity} provisioning_incoming={cap.provisioning_workspace_capacity})",
             )
-        elif cap.ready_schedulable_nodes == 0:
-            reasons.append("scale-out recommended: no ready schedulable nodes")
-        else:
+        elif idle_buffer_violation:
+            scale_up_reason = "ready_idle_slot_buffer_violation"
             reasons.append(
-                "scale-out recommended: pending placement demand plus idle-slot buffer exceeds ready capacity",
+                "scale-out recommended: pending demand consumes ready free-slot headroom "
+                f"(free_slots={cap.free_slots} effective_pending={effective_pending} "
+                f"min_idle_slots={min_idle_slots}; no provisioning incoming)",
             )
+        elif no_incoming_or_ready_capacity and effective_pending > 0:
+            scale_up_reason = "no_ready_or_provisioning_capacity_with_pending_demand"
+            reasons.append(
+                "scale-out recommended: no ready or provisioning workspace capacity "
+                f"while effective_pending_workspace_units={effective_pending}",
+            )
+        logger.info(
+            "autoscaler.scale_up.reason",
+            extra={
+                "reason": scale_up_reason,
+                "effective_pending_workspace_units": effective_pending,
+                "total_available_workspace_capacity": cap.total_available_workspace_capacity,
+            },
+        )
         if not enabled:
             suppressed_by_config = True
             reasons.append("suppressed by config: DEVNEST_AUTOSCALER_ENABLED=false")
@@ -758,6 +934,30 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
             reasons.append(
                 f"suppressed by cap: provisioning nodes {cap.provisioning_nodes} >= "
                 f"max_concurrent_provisioning {max_concurrent}",
+            )
+            logger.info(
+                "autoscaler.scale_up.suppressed_provisioning_cap",
+                extra={
+                    "provisioning_in_flight": cap.provisioning_nodes,
+                    "max_concurrent_provisioning": max_concurrent,
+                },
+            )
+        if (
+            suppress_recent_sec > 0
+            and youngest_active_ec2_age_s is not None
+            and youngest_active_ec2_age_s < suppress_recent_sec
+        ):
+            suppressed_by_recent_provisioning = True
+            reasons.append(
+                "suppressed by recent provisioning: youngest active EC2 node age "
+                f"{youngest_active_ec2_age_s:.1f}s < suppress_scale_out_recent_provision_seconds {suppress_recent_sec}",
+            )
+            logger.info(
+                "autoscaler.scale_up.suppressed_recent_provisioning",
+                extra={
+                    "youngest_active_ec2_age_seconds": round(float(youngest_active_ec2_age_s), 4),
+                    "suppress_scale_out_recent_provision_seconds": suppress_recent_sec,
+                },
             )
         age = _seconds_since(_latest_ec2_created_at(nodes))
         if age is not None and age >= 0 and age < out_cooldown:
@@ -794,6 +994,8 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         action = "suppressed_by_config"
     elif suppressed_by_cap:
         action = "suppressed_by_cap"
+    elif suppressed_by_recent_provisioning:
+        action = "suppressed_by_recent_provisioning"
     elif suppressed_by_cooldown:
         action = "suppressed_by_cooldown"
     elif scale_out_recommended:
@@ -811,6 +1013,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         suppressed_by_cooldown=suppressed_by_cooldown,
         suppressed_by_cap=suppressed_by_cap,
         suppressed_by_config=suppressed_by_config,
+        suppressed_by_recent_provisioning=suppressed_by_recent_provisioning,
         reasons=reasons,
         capacity=cap,
         min_nodes=min_nodes,
@@ -832,6 +1035,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         suppressed_by_config=decision.suppressed_by_config,
         suppressed_by_cap=decision.suppressed_by_cap,
         suppressed_by_cooldown=decision.suppressed_by_cooldown,
+        suppressed_by_recent_provisioning=decision.suppressed_by_recent_provisioning,
         ready_schedulable_nodes=cap.ready_schedulable_nodes,
         ready_schedulable_ec2_nodes=cap.ready_schedulable_ec2_nodes,
         provisioning_nodes=cap.provisioning_nodes,
@@ -844,6 +1048,11 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
         pending_workspace_jobs=cap.pending_workspace_jobs,
         pending_placement_jobs=cap.pending_placement_jobs,
         recent_placement_failures=cap.recent_placement_failures,
+        filtered_placement_failure_signals=cap.filtered_placement_failure_signals,
+        effective_pending_workspace_units=effective_pending,
+        ready_workspace_capacity=cap.ready_workspace_capacity,
+        provisioning_workspace_capacity=cap.provisioning_workspace_capacity,
+        total_available_workspace_capacity=cap.total_available_workspace_capacity,
         idle_ec2_node_count=cap.idle_ec2_node_count,
         reasons=" | ".join(reasons)[:2000],
     )
