@@ -1,11 +1,11 @@
 """
 Pure scheduling policy for V1 execution nodes (effective free capacity + spread fairness).
 
-**Sort policy (spread-aware best-fit, deterministic):**
-  1. Highest effective free CPU  (capacity-first: prevents fragmentation).
-  2. Highest effective free memory.
-  3. Fewest active workloads (fairness: anti-concentration / spread across nodes).
-  4. Lowest node_key lexicographically (stable tiebreak).
+**Sort policy (packing best-fit, deterministic):**
+  1. Lowest remaining free CPU after placement.
+  2. Lowest remaining free memory after placement.
+  3. Lowest remaining free disk after placement.
+  4. Most active workloads, then lowest node_key as a stable tiebreak.
 
 "Active workload" = workspace not STOPPED / DELETED / ERROR, matching the capacity-accounting cohort.
 
@@ -24,6 +24,7 @@ from sqlmodel import Session
 
 from app.services.placement_service.capacity import (
     count_active_workloads_on_node_key,
+    count_workspace_slot_claims_on_node_id,
     total_reserved_disk_mb_on_node_key,
     total_reserved_on_node_key,
 )
@@ -44,6 +45,24 @@ def scheduling_sort_key_spread(
     while workload_count breaks ties to distribute evenly across similarly-loaded nodes.
     """
     return (-float(free_cpu), -int(free_mem), int(workload_count), (node_key or "").strip())
+
+
+def scheduling_sort_key_packing(
+    free_cpu: float,
+    free_mem: int,
+    free_disk: int,
+    workload_count: int,
+    req: WorkspaceComputeRequest,
+    node_key: str,
+) -> tuple[float, int, int, int, str]:
+    """Best-fit packing key: choose the fitting node that leaves the least unused capacity."""
+    return (
+        round(float(free_cpu) - float(req.requested_cpu), 6),
+        int(free_mem) - int(req.requested_memory_mb),
+        int(free_disk) - int(req.requested_disk_mb),
+        -int(workload_count),
+        (node_key or "").strip(),
+    )
 
 
 def scheduling_sort_key_effective(free_cpu: float, free_mem: int, node_key: str) -> tuple[float, int, str]:
@@ -105,7 +124,7 @@ def rank_candidate_nodes(
 
     TODO: affinity / anti-affinity, topology-zone awareness.
     """
-    scored: list[tuple[tuple[float, int, int, str], ExecutionNode]] = []
+    scored: list[tuple[tuple[float, int, int, int, str], ExecutionNode]] = []
     for n in nodes:
         if not _is_v1_scheduling_candidate(n):
             continue
@@ -116,10 +135,12 @@ def rank_candidate_nodes(
         free_m = max(0, int(n.allocatable_memory_mb or 0) - used_m)
         free_d = max(0, int(n.allocatable_disk_mb or 0) - used_d)
         wcount = count_active_workloads_on_node_key(session, k)
+        slot_claims = count_workspace_slot_claims_on_node_id(session, n.id)
         if not can_fit_workspace_effective(free_c, free_m, free_d, req):
             continue
-        if wcount >= int(n.max_workspaces or 0):
+        free_slots = max(0, int(n.max_workspaces or 0) - max(wcount, slot_claims))
+        if free_slots < int(req.requested_slots):
             continue
-        scored.append((scheduling_sort_key_spread(free_c, free_m, wcount, k), n))
+        scored.append((scheduling_sort_key_packing(free_c, free_m, free_d, wcount, req, k), n))
     scored.sort(key=lambda x: x[0])
     return [x[1] for x in scored]

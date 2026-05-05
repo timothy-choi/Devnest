@@ -249,6 +249,27 @@ def count_active_workloads_on_node_key(session: Session, node_key: str) -> int:
     return int(raw[0] if isinstance(raw, tuple) else raw)
 
 
+def count_workspace_slot_claims_on_node_id(session: Session, node_id: int | None) -> int:
+    """Count non-terminal workspaces assigned to ``ExecutionNode.id``.
+
+    This catches placement claims made before a runtime row exists, so slot-based packing does not
+    overbook during concurrent create/start retries.
+    """
+    if node_id is None:
+        return 0
+    stmt = (
+        select(func.count())
+        .select_from(Workspace)
+        .where(
+            Workspace.execution_node_id == int(node_id),
+            Workspace.execution_node_id.isnot(None),
+            Workspace.status.not_in(_WORKSPACE_STATUSES_EXCLUDED_FROM_RESERVATION_SUM),
+        )
+    )
+    raw = session.exec(stmt).one()
+    return int(raw[0] if isinstance(raw, tuple) else raw)
+
+
 def max_effective_free_cpu_across_schedulable(session: Session, *, base_predicates: list) -> float:
     """
     Best-effort max effective free CPU among nodes matching ``base_predicates`` (for diagnostics).

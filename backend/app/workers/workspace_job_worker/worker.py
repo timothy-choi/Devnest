@@ -62,9 +62,9 @@ from app.services.cleanup_service import (
     ensure_durable_cleanup_task,
 )
 from app.services.placement_service.constants import (
-    DEFAULT_WORKSPACE_REQUEST_CPU,
-    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
-    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    default_workspace_requested_cpu,
+    default_workspace_requested_disk_mb,
+    default_workspace_requested_memory_mb,
 )
 from app.services.placement_service.errors import NoSchedulableNodeError, PlacementError
 from app.services.placement_service.models import (
@@ -617,9 +617,9 @@ def _apply_runtime_bringup_like(
     config_version: int,
     probe_healthy: bool | None,
     gateway_route_target: str | None = None,
-    reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
-    reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
-    reserved_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    reserved_cpu: float | None = None,
+    reserved_memory_mb: int | None = None,
+    reserved_disk_mb: int | None = None,
 ) -> None:
     """Persist placement + health snapshot after a successful bring-up / restart / update (running)."""
     rt = _get_or_create_runtime(session, workspace_id)
@@ -633,9 +633,11 @@ def _apply_runtime_bringup_like(
     rt.config_version = config_version
     nk = (node_id or "").strip()
     if nk:
-        rt.reserved_cpu = float(reserved_cpu)
-        rt.reserved_memory_mb = int(reserved_memory_mb)
-        rt.reserved_disk_mb = int(reserved_disk_mb)
+        rt.reserved_cpu = float(default_workspace_requested_cpu() if reserved_cpu is None else reserved_cpu)
+        rt.reserved_memory_mb = int(
+            default_workspace_requested_memory_mb() if reserved_memory_mb is None else reserved_memory_mb
+        )
+        rt.reserved_disk_mb = int(default_workspace_requested_disk_mb() if reserved_disk_mb is None else reserved_disk_mb)
     else:
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
@@ -1154,9 +1156,9 @@ def _finalize_runtime_running_success(
     internal_endpoint: str | None,
     probe_healthy: bool | None,
     gateway_route_target: str | None = None,
-    reserved_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
-    reserved_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
-    reserved_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    reserved_cpu: float | None = None,
+    reserved_memory_mb: int | None = None,
+    reserved_disk_mb: int | None = None,
 ) -> None:
     """
     Shared success path for CREATE/START, RESTART, and UPDATE (restart path): persist runtime,

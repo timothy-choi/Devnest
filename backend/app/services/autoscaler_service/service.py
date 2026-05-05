@@ -34,13 +34,15 @@ from app.services.infrastructure_service.models import Ec2ProvisionRequest, buil
 from app.services.placement_service.capacity import max_effective_free_resources_across_schedulable
 from app.services.placement_service.capacity import (
     count_active_workloads_on_node_key,
+    count_workspace_slot_claims_on_node_id,
     total_reserved_disk_mb_on_node_key,
     total_reserved_on_node_key,
 )
 from app.services.placement_service.constants import (
-    DEFAULT_WORKSPACE_REQUEST_CPU,
-    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
-    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    default_workspace_requested_cpu,
+    default_workspace_requested_disk_mb,
+    default_workspace_requested_memory_mb,
+    default_workspace_requested_slots,
 )
 from app.services.placement_service.models import (
     ExecutionNode,
@@ -82,17 +84,48 @@ _ACTIVE_EC2_NODE_STATUSES = frozenset(
 def _capacity_insufficient_for_one_workspace(cap: FleetCapacitySnapshot) -> list[str]:
     """Return resource reasons that prevent placing one default workspace anywhere in the fleet."""
     reasons: list[str] = []
-    if int(cap.free_slots) < 1:
-        reasons.append("free_slots < required_slots 1")
-    if float(cap.free_cpu) < float(DEFAULT_WORKSPACE_REQUEST_CPU):
-        reasons.append(f"free_cpu {cap.free_cpu} < required_cpu {DEFAULT_WORKSPACE_REQUEST_CPU}")
-    if int(cap.free_memory_mb) < int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB):
+    req_slots = default_workspace_requested_slots()
+    req_cpu = default_workspace_requested_cpu()
+    req_mem = default_workspace_requested_memory_mb()
+    req_disk = default_workspace_requested_disk_mb()
+    if int(cap.free_slots) < req_slots:
+        reasons.append(f"free_slots < required_slots {req_slots}")
+    if float(cap.free_cpu) < float(req_cpu):
+        reasons.append(f"free_cpu {cap.free_cpu} < required_cpu {req_cpu}")
+    if int(cap.free_memory_mb) < int(req_mem):
         reasons.append(
-            f"free_memory_mb {cap.free_memory_mb} < required_memory_mb {DEFAULT_WORKSPACE_REQUEST_MEMORY_MB}",
+            f"free_memory_mb {cap.free_memory_mb} < required_memory_mb {req_mem}",
         )
-    if int(cap.free_disk_mb) < int(DEFAULT_WORKSPACE_REQUEST_DISK_MB):
-        reasons.append(f"free_disk_mb {cap.free_disk_mb} < required_disk_mb {DEFAULT_WORKSPACE_REQUEST_DISK_MB}")
+    if int(cap.free_disk_mb) < int(req_disk):
+        reasons.append(f"free_disk_mb {cap.free_disk_mb} < required_disk_mb {req_disk}")
     return reasons
+
+
+def _any_ready_schedulable_node_can_fit_default_workspace(session: Session) -> bool:
+    req_slots = default_workspace_requested_slots()
+    req_cpu = default_workspace_requested_cpu()
+    req_mem = default_workspace_requested_memory_mb()
+    req_disk = default_workspace_requested_disk_mb()
+    nodes = list(session.exec(select(ExecutionNode).where(and_(*schedulable_placement_predicates()))).all())
+    for node in nodes:
+        key = (node.node_key or "").strip()
+        if not key:
+            continue
+        used_cpu, used_mem = total_reserved_on_node_key(session, key)
+        used_disk = total_reserved_disk_mb_on_node_key(session, key)
+        active = count_active_workloads_on_node_key(session, key)
+        slot_claims = count_workspace_slot_claims_on_node_id(session, node.id)
+        free_slots = max(0, int(node.max_workspaces or 0) - max(active, slot_claims))
+        if free_slots < req_slots:
+            continue
+        if max(0.0, float(node.allocatable_cpu or 0.0) - used_cpu) < req_cpu:
+            continue
+        if max(0, int(node.allocatable_memory_mb or 0) - used_mem) < req_mem:
+            continue
+        if max(0, int(node.allocatable_disk_mb or 0) - used_disk) < req_disk:
+            continue
+        return True
+    return False
 
 
 _WORKSPACE_PENDING_COMPUTE_STATUSES = frozenset(
@@ -116,9 +149,9 @@ def _workspace_slots_from_free_resources(
     fs = max(0, int(free_slots))
     if fs <= 0:
         return 0
-    req_c = float(DEFAULT_WORKSPACE_REQUEST_CPU)
-    req_m = int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
-    req_d = int(DEFAULT_WORKSPACE_REQUEST_DISK_MB)
+    req_c = float(default_workspace_requested_cpu())
+    req_m = int(default_workspace_requested_memory_mb())
+    req_d = int(default_workspace_requested_disk_mb())
     by_cpu = int(float(free_cpu) // req_c) if req_c > 0 else fs
     by_mem = int(free_memory_mb // req_m) if req_m > 0 else fs
     by_disk = int(free_disk_mb // req_d) if req_d > 0 else fs
@@ -131,9 +164,9 @@ def _estimated_empty_workspace_capacity_on_node(node: ExecutionNode) -> int:
     cpu = max(0.0, float(node.allocatable_cpu or 0.0))
     mem = max(0, int(node.allocatable_memory_mb or 0))
     disk = max(0, int(node.allocatable_disk_mb or 0))
-    req_c = float(DEFAULT_WORKSPACE_REQUEST_CPU)
-    req_m = int(DEFAULT_WORKSPACE_REQUEST_MEMORY_MB)
-    req_d = int(DEFAULT_WORKSPACE_REQUEST_DISK_MB)
+    req_c = float(default_workspace_requested_cpu())
+    req_m = int(default_workspace_requested_memory_mb())
+    req_d = int(default_workspace_requested_disk_mb())
     by_cpu = int(cpu // req_c) if req_c > 0 else max_ws
     by_mem = int(mem // req_m) if req_m > 0 else max_ws
     by_disk = int(disk // req_d) if req_d > 0 else max_ws
@@ -708,7 +741,7 @@ def build_fleet_capacity_snapshot(session: Session) -> FleetCapacitySnapshot:
             continue
         used_cpu, used_mem = total_reserved_on_node_key(session, key)
         used_disk = total_reserved_disk_mb_on_node_key(session, key)
-        slots = count_active_workloads_on_node_key(session, key)
+        slots = max(count_active_workloads_on_node_key(session, key), count_workspace_slot_claims_on_node_id(session, node.id))
         max_slots = max(0, int(node.max_workspaces or 0))
         alloc_cpu = max(0.0, float(node.allocatable_cpu or 0.0))
         alloc_mem = max(0, int(node.allocatable_memory_mb or 0))
@@ -812,6 +845,7 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
 
     capacity_insufficiency_reasons = _capacity_insufficient_for_one_workspace(cap)
     capacity_insufficient = bool(capacity_insufficiency_reasons)
+    existing_node_can_fit = _any_ready_schedulable_node_can_fit_default_workspace(session)
     # Do not treat "no ready rows in the rollup" as exhaustion when PROVISIONING EC2 is
     # already incoming capacity (that case is covered by pending_demand vs total_available).
     schedulable_pool_exhausted_or_missing = capacity_insufficient and (
@@ -843,7 +877,11 @@ def evaluate_fleet_autoscaler_tick(session: Session) -> FleetAutoscalerDecision:
     )
     # Ready pool cannot accept another default-shaped workspace (misleading free_slots, host gate,
     # or resource-bound schedulable nodes). This may apply even when no workspace job is queued.
-    scale_out_recommended = demand_driven_scale_out or schedulable_pool_exhausted_or_missing
+    scale_out_recommended = (
+        live_demand
+        and not existing_node_can_fit
+        and (demand_driven_scale_out or schedulable_pool_exhausted_or_missing)
+    )
     scale_in_recommended = bool(scale_down.node_key)
 
     logger.info(
