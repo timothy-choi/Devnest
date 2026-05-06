@@ -334,6 +334,8 @@ def test_project_bind_mount_persists_host_and_container_writes(
     docker_client: docker.DockerClient,
 ) -> None:
     ws = isolated_runtime.workspace_host_path
+    # Default stub image (nginx unprivileged) runs as non-root; host dir is pytest-owned 0755.
+    os.chmod(ws, 0o777)
     with open(os.path.join(ws, "seed.txt"), "w", encoding="utf-8") as f:
         f.write("from-host\n")
 
@@ -367,6 +369,8 @@ def test_extra_bind_code_server_paths_persist_on_host(
     try:
         os.makedirs(cfg_h, mode=0o755, exist_ok=False)
         os.makedirs(data_h, mode=0o755, exist_ok=False)
+        os.chmod(cfg_h, 0o777)
+        os.chmod(data_h, 0o777)
 
         ensured = isolated_runtime.adapter.ensure_container(
             name=isolated_runtime.name,
