@@ -54,7 +54,8 @@ def test_run_instances_params_structure() -> None:
         security_group_ids=["sg-1"],
         iam_instance_profile_name="profile-a",
         key_name="my-key",
-        extra_tags={"Project": "devnest"},
+        node_key="node-a",
+        extra_tags={"Owner": "team-a"},
     )
     settings = get_settings()
     params = _run_instances_params(req, settings)
@@ -64,9 +65,17 @@ def test_run_instances_params_structure() -> None:
     assert params["SecurityGroupIds"] == ["sg-1"]
     assert params["IamInstanceProfile"] == {"Name": "profile-a"}
     assert params["KeyName"] == "my-key"
-    tag_specs = params["TagSpecifications"][0]["Tags"]
-    keys = {t["Key"]: t["Value"] for t in tag_specs}
-    assert keys["Project"] == "devnest"
+    tag_specs = params["TagSpecifications"]
+    assert len(tag_specs) == 2
+    assert {s["ResourceType"] for s in tag_specs} == {"instance", "volume"}
+    tag_keys = {t["Key"] for t in tag_specs[0]["Tags"]}
+    assert "ManagedBy" in tag_keys
+    assert "Project" in tag_keys
+    assert "AutoCleanup" in tag_keys
+    assert "ExecutionNode" in tag_keys
+    keys = {t["Key"]: t["Value"] for t in tag_specs[0]["Tags"]}
+    assert keys["ExecutionNode"] == "node-a"
+    assert keys["Owner"] == "team-a"
     prefix = (settings.devnest_ec2_tag_prefix or "devnest").strip() or "devnest"
     assert keys[f"{prefix}:managed"] == "true"
 

@@ -719,9 +719,14 @@ def test_terminate_ec2_retry_when_already_terminating_calls_aws_once(
         session.add(row)
         session.commit()
         session.refresh(row)
-        with patch(
-            "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
-            return_value=SimpleNamespace(state="terminated"),
+        with (
+            patch(
+                "app.services.infrastructure_service.lifecycle.describe_ec2_instance",
+                return_value=SimpleNamespace(state="terminated"),
+            ),
+            patch(
+                "app.services.infrastructure_service.lifecycle.cleanup_after_instance_terminated",
+            ) as mock_cleanup,
         ):
             terminate_ec2_node(
                 session,
@@ -731,6 +736,7 @@ def test_terminate_ec2_retry_when_already_terminating_calls_aws_once(
             )
         session.commit()
     mock_ec2.terminate_instances.assert_called_once()
+    mock_cleanup.assert_called_once()
 
 
 def test_terminate_ec2_already_terminated_skips_aws_call(infrastructure_unit_engine) -> None:

@@ -6,10 +6,12 @@ Creates instances via ``run_instances``, tracks ``ExecutionNode`` rows through `
 
 **Worker IAM (least-privilege sketch — tighten Resource/Condition in production):**
 
-- **EC2:** ``ec2:RunInstances``, ``ec2:CreateTags`` (on instances created by the principal), ``ec2:DescribeInstances``,
-  ``ec2:DescribeInstanceTypes``, ``ec2:TerminateInstances`` — scope ``Resource`` to tagged instances (e.g.
-  ``aws:ResourceTag/devnest:managed=true``) where your org supports it; ``RunInstances`` often needs broader
-  ``subnet``, ``security-group``, ``image``, ``iam:PassRole`` on the instance profile.
+- **EC2:** ``ec2:RunInstances``, ``ec2:CreateTags``, ``ec2:DescribeInstances``, ``ec2:DescribeVolumes``,
+  ``ec2:DeleteVolume``, ``ec2:DescribeNetworkInterfaces``, ``ec2:DeleteNetworkInterface``,
+  ``ec2:DescribeAddresses``, ``ec2:ReleaseAddress``, ``ec2:DescribeSecurityGroups``, ``ec2:DeleteSecurityGroup``,
+  ``ec2:DescribeInstanceTypes``, ``ec2:TerminateInstances`` — scope ``Resource`` to tagged DevNest resources
+  where your org supports it; ``RunInstances`` often needs broader ``subnet``, ``security-group``, ``image``,
+  ``iam:PassRole`` on the instance profile.
 - **SSM (readiness only):** ``ssm:DescribeInstanceInformation`` for :func:`~app.services.infrastructure_service.ssm_readiness.is_instance_ssm_online`.
 - **Secrets:** Prefer instance role / IRSA / OIDC over long-lived keys; never commit ``AWS_SECRET_ACCESS_KEY``.
 
@@ -56,6 +58,11 @@ from app.services.providers.errors import Ec2InstanceNotFoundError, Ec2ProviderE
 from app.services.node_execution_service.errors import SsmExecutionError
 from app.services.node_execution_service.ssm_send_command import build_ssm_client, send_run_shell_script
 
+from .ec2_cleanup import (
+    apply_devnest_tags_to_instance_bundle,
+    cleanup_after_instance_terminated,
+    launch_tag_specifications_for_run_instances,
+)
 from .errors import Ec2ProvisionConfigurationError, NodeLifecycleError
 from .models import Ec2ProvisionRequest
 
@@ -152,12 +159,13 @@ def provision_ec2_node(
     instances = resp.get("Instances") or []
     if not instances:
         raise Ec2ProvisionConfigurationError("run_instances returned no Instances")
-    iid = (instances[0].get("InstanceId") or "").strip()
+    inst0 = instances[0]
+    iid = (inst0.get("InstanceId") or "").strip()
     if not iid:
         raise Ec2ProvisionConfigurationError("run_instances returned empty InstanceId")
-    initial_private_ip = (instances[0].get("PrivateIpAddress") or "").strip() or None
-    initial_public_ip = (instances[0].get("PublicIpAddress") or "").strip() or None
-    initial_az = ((instances[0].get("Placement") or {}).get("AvailabilityZone") or "").strip() or None
+    initial_private_ip = (inst0.get("PrivateIpAddress") or "").strip() or None
+    initial_public_ip = (inst0.get("PublicIpAddress") or "").strip() or None
+    initial_az = ((inst0.get("Placement") or {}).get("AvailabilityZone") or "").strip() or None
 
     if wait_until_running:
         try:
@@ -207,21 +215,18 @@ def provision_ec2_node(
     if not explicit_key:
         _require_free_node_key(session, node_key)
 
-    prefix = (settings.devnest_ec2_tag_prefix or "devnest").strip() or "devnest"
-    post_tags = [{"Key": f"{prefix}:node_key"[:127], "Value": node_key[:256]}]
-    if not (req.name_tag or "").strip():
-        post_tags.append({"Key": "Name", "Value": node_key[:256]})
+    display_name = (req.name_tag or "").strip() or node_key
     try:
-        client_call_with_throttle_retry(
-            "ec2.CreateTags",
-            lambda: client.create_tags(Resources=[iid], Tags=post_tags),
+        apply_devnest_tags_to_instance_bundle(
+            client,
+            settings,
+            node_key=node_key,
+            display_name=display_name,
+            instance_dict=inst0,
+            extra_tags=dict(req.extra_tags or {}),
         )
-    except ClientError as e:
-        code = (e.response.get("Error") or {}).get("Code", "")
-        logger.warning(
-            "ec2_create_tags_failed",
-            extra={"instance_id": iid, "error_code": code, "error": str(e)},
-        )
+    except Exception:
+        logger.warning("devnest_ec2_apply_autoscale_tags_failed", exc_info=True)
 
     default_em = settings.devnest_ec2_default_execution_mode.strip().lower()
     raw_em = (req.execution_mode or default_em).strip().lower()
@@ -299,21 +304,14 @@ def provision_ec2_node(
 
 
 def _run_instances_params(req: Ec2ProvisionRequest, settings: Any) -> dict[str, Any]:
-    prefix = (settings.devnest_ec2_tag_prefix or "devnest").strip() or "devnest"
     explicit_key = (req.node_key or "").strip()
     name = (req.name_tag or "").strip() or (explicit_key if explicit_key else "devnest-node")
-    tags: list[dict[str, str]] = [
-        {"Key": f"{prefix}:managed"[:127], "Value": "true"},
-        {"Key": "Name", "Value": name[:256]},
-    ]
-    if explicit_key:
-        tags.append({"Key": f"{prefix}:node_key"[:127], "Value": explicit_key[:256]})
-    # EC2 tag limits: key max 127 chars, value max 256 (UTF-8).
-    for tk, tv in (req.extra_tags or {}).items():
-        k = str(tk).strip()
-        v = str(tv).strip()
-        if k and v:
-            tags.append({"Key": k[:127], "Value": v[:256]})
+    tag_specs = launch_tag_specifications_for_run_instances(
+        settings,
+        explicit_key or None,
+        name,
+        dict(req.extra_tags or {}),
+    )
 
     params: dict[str, Any] = {
         "ImageId": req.ami_id.strip(),
@@ -322,7 +320,7 @@ def _run_instances_params(req: Ec2ProvisionRequest, settings: Any) -> dict[str, 
         "InstanceType": req.instance_type.strip(),
         "SubnetId": req.subnet_id.strip(),
         "SecurityGroupIds": list(req.security_group_ids),
-        "TagSpecifications": [{"ResourceType": "instance", "Tags": tags}],
+        "TagSpecifications": tag_specs,
     }
     prof = (req.iam_instance_profile_name or "").strip()
     if prof:
@@ -663,6 +661,7 @@ def terminate_ec2_node(
     """
     row = get_node(session, node_id=node_id, node_key=node_key)
     _assert_ec2_node(row, op="terminate_ec2_node")
+    settings = get_settings()
     if row.status == ExecutionNodeStatus.TERMINATED.value:
         logger.info(
             "ec2_terminate_noop_already_terminated",
@@ -740,6 +739,25 @@ def terminate_ec2_node(
     )
     session.add(row)
     session.flush()
+
+    if (
+        state in ("terminated", "shutting-down")
+        and getattr(settings, "devnest_ec2_post_terminate_cleanup_enabled", True)
+    ):
+        try:
+            cleanup_after_instance_terminated(
+                client,
+                settings,
+                instance_id=iid,
+                node_key=str(row.node_key or ""),
+            )
+        except Exception:
+            logger.warning(
+                "ec2.cleanup.failed",
+                extra={"phase": "post_terminate_sweep", "instance_id": iid, "node_key": row.node_key},
+                exc_info=True,
+            )
+
     log_event(
         logger,
         LogEvent.EC2_NODE_TERMINATED,
