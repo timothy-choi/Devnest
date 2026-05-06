@@ -56,6 +56,7 @@ class WorkspaceRuntimeSpecSchema(BaseModel):
     image: str | None = Field(default=None, max_length=512)
     cpu_limit_cores: float | None = Field(default=None, gt=0)
     memory_limit_mib: int | None = Field(default=None, gt=0)
+    pids_limit: int | None = Field(default=None, gt=0)
     env: dict[str, str] = Field(default_factory=dict)
     ports: list[PortMappingSchema] = Field(default_factory=list)
     topology_id: int | None = None
@@ -73,6 +74,7 @@ class WorkspaceRuntimeSpecSchema(BaseModel):
             "image": self.image,
             "cpu_limit_cores": self.cpu_limit_cores,
             "memory_limit_mib": self.memory_limit_mib,
+            "pids_limit": self.pids_limit,
             "env": self.env,
             "ports": [p.model_dump() for p in self.ports],
             "topology_id": self.topology_id,
@@ -150,6 +152,15 @@ class PatchWorkspaceUpdateRequest(BaseModel):
     )
 
 
+class WorkspaceRuntimeQuotasResponse(BaseModel):
+    """Effective cgroup limits applied to the workspace container (running snapshot)."""
+
+    cpu_limit_cores: float = Field(..., gt=0)
+    memory_limit_mib: int = Field(..., gt=0)
+    pids_limit: int = Field(..., gt=0)
+    security_options: dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkspaceSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -158,6 +169,10 @@ class WorkspaceSummaryResponse(BaseModel):
     status: str
     is_private: bool
     created_at: datetime
+    runtime_quotas: WorkspaceRuntimeQuotasResponse | None = Field(
+        default=None,
+        description="Effective cgroup limits when RUNNING (from WorkspaceRuntime snapshot).",
+    )
 
 
 class WorkspaceListResponse(BaseModel):
@@ -250,4 +265,8 @@ class WorkspaceDetailResponse(BaseModel):
     project_data_user_message: str | None = Field(
         default=None,
         description="Short, user-facing hint for missing project data (no host paths).",
+    )
+    runtime_quotas: WorkspaceRuntimeQuotasResponse | None = Field(
+        default=None,
+        description="Effective cgroup limits when RUNNING (from WorkspaceRuntime snapshot).",
     )

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 from app.services.workspace_service.api.schemas import (
     CreateWorkspaceRequest,
     WorkspaceDetailResponse,
+    WorkspaceRuntimeQuotasResponse,
     WorkspaceRuntimeSpecSchema,
     WorkspaceSummaryResponse,
 )
@@ -411,6 +412,21 @@ def _intent_config_version(session: Session, workspace_id: int) -> int:
 def _get_workspace_runtime(session: Session, workspace_id: int) -> WorkspaceRuntime | None:
     stmt = select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == workspace_id)
     return session.exec(stmt).first()
+
+
+def _runtime_quotas_from_row(rt: WorkspaceRuntime | None) -> WorkspaceRuntimeQuotasResponse | None:
+    if rt is None or rt.applied_cpu_limit_cores is None:
+        return None
+    if rt.applied_memory_limit_mb is None or rt.applied_pids_limit is None:
+        return None
+    raw_sec = rt.applied_security_options
+    sec: dict = dict(raw_sec) if isinstance(raw_sec, dict) else {}
+    return WorkspaceRuntimeQuotasResponse(
+        cpu_limit_cores=float(rt.applied_cpu_limit_cores),
+        memory_limit_mib=int(rt.applied_memory_limit_mb),
+        pids_limit=int(rt.applied_pids_limit),
+        security_options=sec,
+    )
 
 
 def _runtime_ready_for_access(ws: Workspace, rt: WorkspaceRuntime | None) -> bool:
@@ -1746,7 +1762,23 @@ def list_workspaces(
         .limit(min(limit, 500))
     )
     rows = list(session.exec(page_stmt).all())
-    items = [WorkspaceSummaryResponse.model_validate(r) for r in rows]
+    running_ids = [
+        int(w.workspace_id)
+        for w in rows
+        if w.workspace_id is not None and w.status == WorkspaceStatus.RUNNING.value
+    ]
+    rt_map: dict[int, WorkspaceRuntime] = {}
+    if running_ids:
+        rt_rows = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id.in_(running_ids))).all()
+        rt_map = {int(r.workspace_id): r for r in rt_rows if r.workspace_id is not None}
+
+    items: list[WorkspaceSummaryResponse] = []
+    for w in rows:
+        base = WorkspaceSummaryResponse.model_validate(w)
+        rq = None
+        if w.workspace_id is not None and w.status == WorkspaceStatus.RUNNING.value:
+            rq = _runtime_quotas_from_row(rt_map.get(int(w.workspace_id)))
+        items.append(base.model_copy(update={"runtime_quotas": rq}))
     return items, int(total)
 
 
@@ -1794,5 +1826,6 @@ def get_workspace(
             "restorable_snapshot_count": snaps,
             "project_data_lifecycle": lifecycle,
             "project_data_user_message": user_msg,
+            "runtime_quotas": _runtime_quotas_from_row(rt),
         },
     )

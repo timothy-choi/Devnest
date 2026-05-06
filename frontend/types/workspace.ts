@@ -29,4 +29,11 @@ export type Workspace = {
   projectDataLifecycle?: ProjectDataLifecycle;
   /** Short hint from the API; avoid showing raw reopen_issues on cards. */
   projectDataUserMessage?: string | null;
+  /** Applied cgroup quotas when RUNNING (from control-plane runtime snapshot). */
+  runtimeQuotas?: {
+    cpuLimitCores: number;
+    memoryLimitMib: number;
+    pidsLimit: number;
+    securityOptions: Record<string, unknown>;
+  };
 };

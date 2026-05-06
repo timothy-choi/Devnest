@@ -111,6 +111,16 @@ export function WorkspaceCard({
         <div className="space-y-3">
           <div className="space-y-2">
             <DetailedStatusBadge workspace={workspace} />
+            {workspace.rawStatus === "RUNNING" && workspace.runtimeQuotas ? (
+              <p className="text-xs text-slate-600">
+                Resources: {workspace.runtimeQuotas.cpuLimitCores} CPU · {workspace.runtimeQuotas.memoryLimitMib}{" "}
+                MiB RAM · {workspace.runtimeQuotas.pidsLimit} process limit
+                {Array.isArray(workspace.runtimeQuotas.securityOptions?.security_opt) &&
+                (workspace.runtimeQuotas.securityOptions.security_opt as unknown[]).length > 0
+                  ? " · security hardening"
+                  : null}
+              </p>
+            ) : null}
             {isRestore ? (
               <p className="text-xs font-medium uppercase tracking-wide text-amber-800">Restore required</p>
             ) : null}

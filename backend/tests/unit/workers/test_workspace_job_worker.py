@@ -168,6 +168,14 @@ def _bringup_ok(workspace_id: str) -> WorkspaceBringUpResult:
         internal_endpoint=INTERNAL_ENDPOINT,
         probe_healthy=True,
         issues=None,
+        applied_cpu_limit_cores=2.0,
+        applied_memory_limit_mib=1536,
+        applied_pids_limit=777,
+        applied_security_options={
+            "security_opt": ["no-new-privileges:true"],
+            "cap_drop": ["NET_RAW"],
+            "read_only_rootfs": False,
+        },
     )
 
 
@@ -446,6 +454,10 @@ class TestDispatchCreate:
             assert rt.reserved_cpu > 0
             assert rt.reserved_memory_mb > 0
             assert rt.reserved_disk_mb > 0
+            assert rt.applied_cpu_limit_cores == 2.0
+            assert rt.applied_memory_limit_mb == 1536
+            assert rt.applied_pids_limit == 777
+            assert isinstance(rt.applied_security_options, dict)
 
             evs = list(
                 session.exec(

@@ -13,6 +13,7 @@ from .models import (
     WorkspaceExtraBindMountSpec,
     WorkspaceProjectMountSpec,
 )
+from .workspace_container_policy import WorkspaceContainerSecuritySpec
 
 
 class RuntimeAdapter(ABC):
@@ -32,6 +33,8 @@ class RuntimeAdapter(ABC):
         image: str | None = None,
         cpu_limit: float | None = None,
         memory_limit_bytes: int | None = None,
+        pids_limit: int | None = None,
+        security_spec: WorkspaceContainerSecuritySpec | None = None,
         env: Mapping[str, str] | None = None,
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,

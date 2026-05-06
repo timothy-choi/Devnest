@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Float, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, Column, DateTime, Float, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from .enums import WorkspaceRuntimeHealthStatus
@@ -38,6 +38,11 @@ class WorkspaceRuntime(SQLModel, table=True):
     reserved_cpu: float = Field(default=0.0, sa_column=Column(Float, nullable=False))
     reserved_memory_mb: int = Field(default=0, ge=0)
     reserved_disk_mb: int = Field(default=0, ge=0)
+    # Effective Docker quotas / security snapshot from last successful running runtime (cleared on stop).
+    applied_cpu_limit_cores: float | None = Field(default=None, sa_column=Column(Float, nullable=True))
+    applied_memory_limit_mb: int | None = Field(default=None)
+    applied_pids_limit: int | None = Field(default=None)
+    applied_security_options: dict | None = Field(default=None, sa_column=Column(JSON, nullable=True))
     last_heartbeat_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),

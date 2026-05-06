@@ -24,7 +24,7 @@ rollback to ``WorkspaceRuntime.health_status=CLEANUP_REQUIRED`` for deterministi
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 @dataclass
@@ -45,6 +45,11 @@ class WorkspaceBringUpResult:
     rollback_attempted: bool = False
     rollback_succeeded: Optional[bool] = None
     rollback_issues: Optional[List[str]] = None
+    # Effective cgroup quotas / security snapshot applied at container create (defaults merged).
+    applied_cpu_limit_cores: Optional[float] = None
+    applied_memory_limit_mib: Optional[int] = None
+    applied_pids_limit: Optional[int] = None
+    applied_security_options: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -83,6 +88,10 @@ class WorkspaceRestartResult:
     gateway_route_target: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
+    applied_cpu_limit_cores: Optional[float] = None
+    applied_memory_limit_mib: Optional[int] = None
+    applied_pids_limit: Optional[int] = None
+    applied_security_options: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -104,6 +113,10 @@ class WorkspaceUpdateResult:
     gateway_route_target: Optional[str] = None
     probe_healthy: Optional[bool] = None
     issues: Optional[List[str]] = None
+    applied_cpu_limit_cores: Optional[float] = None
+    applied_memory_limit_mib: Optional[int] = None
+    applied_pids_limit: Optional[int] = None
+    applied_security_options: Optional[dict[str, Any]] = None
 
 
 @dataclass

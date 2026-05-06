@@ -209,8 +209,14 @@ class TestBringUpHappyPath:
         ensure_kwargs = ensure_call[2]
         assert ensure_kwargs["name"] == f"devnest-ws-{WORKSPACE_ID}"
         assert ensure_kwargs["image"] is None
-        assert ensure_kwargs["cpu_limit"] is None
-        assert ensure_kwargs["memory_limit_bytes"] is None
+        assert ensure_kwargs["cpu_limit"] == 1.0
+        assert ensure_kwargs["memory_limit_bytes"] == 1024 * 1024 * 1024
+        assert ensure_kwargs["pids_limit"] == 512
+        assert ensure_kwargs["security_spec"] is not None
+        assert out.applied_cpu_limit_cores == 1.0
+        assert out.applied_memory_limit_mib == 1024
+        assert out.applied_pids_limit == 512
+        assert out.applied_security_options is not None
         # Code-server env is injected automatically.
         assert isinstance(ensure_kwargs["env"], dict)
         assert ensure_kwargs["env"].get("CODE_SERVER_AUTH") == "none"
@@ -757,3 +763,35 @@ class TestBringUpProbeUnhealthy:
         assert out.rollback_issues
         assert any("rollback:stop_incomplete" in x for x in (out.rollback_issues or []))
         assert mock_runtime.stop_container.call_count >= 2
+
+
+class TestBringUpRuntimeLimitsValidation:
+    def test_negative_cpu_raises_before_runtime(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with pytest.raises(WorkspaceBringUpError, match="cpu_limit"):
+            svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID, cpu_limit_cores=-0.1)
+        mock_runtime.ensure_container.assert_not_called()
+
+    def test_non_positive_pids_raises_before_runtime(
+        self,
+        mock_runtime: MagicMock,
+        mock_topology: MagicMock,
+        mock_probe: MagicMock,
+        ws_root: Path,
+    ) -> None:
+        _runtime_ok(mock_runtime)
+        _topology_ok(mock_topology)
+        _probe_ok(mock_probe)
+        svc = _make_service(mock_runtime, mock_topology, mock_probe, ws_root)
+        with pytest.raises(WorkspaceBringUpError, match="pids_limit"):
+            svc.bring_up_workspace_runtime(workspace_id=WORKSPACE_ID, pids_limit=0)
+        mock_runtime.ensure_container.assert_not_called()
