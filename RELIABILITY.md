@@ -228,7 +228,9 @@ Snapshot export/import cannot complete (`PutObject` denied, wrong bucket, expire
 ## Automated guardrails
 
 - **`backend/tests/chaos/`** — lightweight tests that `RELIABILITY.md` and chaos scripts stay present (does **not** execute destructive drills in CI).
-- Run manually: `pytest backend/tests/chaos -m chaos`
+- **Merge CI:** `.github/workflows/tests.yml` **Unit Tests** job runs `pytest tests/chaos -m chaos` after `tests/unit` (see workflow).
+- **Nightly:** `pytest tests` in `nightly.yml` already collects `tests/chaos`.
+- Run locally: `pytest backend/tests/chaos -m chaos`
 
 ---
 
