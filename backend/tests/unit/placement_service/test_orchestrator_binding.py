@@ -115,11 +115,11 @@ def _add_node(session: Session, *, key: str, alloc_cpu: float = 4.0, alloc_mem: 
     session.commit()
 
 
-def test_create_selects_highest_capacity_node(
+def test_create_selects_tightest_fitting_node(
     bind_engine: Engine,
     enable_multi_node_scheduling: None,
 ) -> None:
-    """Capacity-first ranking requires ``DEVNEST_ENABLE_MULTI_NODE_SCHEDULING=true`` (default app is primary-only)."""
+    """Multi-node scheduling packs onto the tightest fitting node before using larger capacity."""
     with Session(bind_engine) as session:
         uid = _seed_user(session)
         _seed_topology(session, 1)
@@ -127,7 +127,7 @@ def test_create_selects_highest_capacity_node(
         _add_node(session, key="big", alloc_cpu=8.0)
         ws, job = _seed_workspace_and_job(session, owner_id=uid, job_type=WorkspaceJobType.CREATE.value)
         node_key, tid = resolve_orchestrator_placement(session, ws, job)
-        assert node_key == "big"
+        assert node_key == "small"
         assert tid == 1
 
 

@@ -20,6 +20,24 @@ def test_devnest_autoscaler_min_ec2_nodes_before_reclaim_reads_env_zero(monkeypa
     assert s.devnest_autoscaler_min_ec2_nodes_before_reclaim == 0
 
 
+def test_workspace_required_resource_defaults_and_env(monkeypatch) -> None:
+    s = Settings(database_url="sqlite://")
+    assert s.devnest_workspace_required_cpu == 1.0
+    assert s.devnest_workspace_required_memory_mb == 512
+    assert s.devnest_workspace_required_disk_mb == 4096
+    assert s.devnest_workspace_required_slots == 1
+
+    monkeypatch.setenv("DEVNEST_WORKSPACE_REQUIRED_CPU", "2.5")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_REQUIRED_MEMORY_MB", "2048")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_REQUIRED_DISK_MB", "8192")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_REQUIRED_SLOTS", "2")
+    s = Settings(database_url="sqlite://")
+    assert s.devnest_workspace_required_cpu == 2.5
+    assert s.devnest_workspace_required_memory_mb == 2048
+    assert s.devnest_workspace_required_disk_mb == 8192
+    assert s.devnest_workspace_required_slots == 2
+
+
 def test_phase2_scale_out_autoscaler_defaults() -> None:
     s = Settings(database_url="sqlite://")
     assert s.devnest_autoscaler_enabled is True

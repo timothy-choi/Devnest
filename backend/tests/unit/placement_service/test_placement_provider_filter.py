@@ -73,7 +73,7 @@ def test_placement_all_selects_either_provider(placement_engine, monkeypatch) ->
         _add_node(session, key="local-a", provider=ExecutionNodeProviderType.LOCAL.value, cpu=8.0)
         _add_node(session, key="ec2-b", provider=ExecutionNodeProviderType.EC2.value, cpu=6.0)
         picked = select_node_for_workspace(session, workspace_id=1)
-        assert picked.node_key == "local-a"
+        assert picked.node_key == "ec2-b"
 
 
 def test_placement_local_excludes_ec2(placement_engine, monkeypatch) -> None:

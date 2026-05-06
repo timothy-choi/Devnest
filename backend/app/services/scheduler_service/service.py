@@ -12,6 +12,9 @@ from app.services.placement_service.constants import (
     DEFAULT_WORKSPACE_REQUEST_CPU,
     DEFAULT_WORKSPACE_REQUEST_DISK_MB,
     DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    default_workspace_requested_cpu,
+    default_workspace_requested_disk_mb,
+    default_workspace_requested_memory_mb,
 )
 from app.services.placement_service.capacity import (
     count_active_workloads_on_node_key,
@@ -36,7 +39,7 @@ def _placement_telemetry() -> dict[str, bool | str]:
     reason = (
         "primary_only:min_execution_node_id_among_ready_schedulable_after_provider_filter"
         if gate
-        else "multi_node:rank_by_effective_free_resources_then_spread_then_node_key_stable_tiebreak"
+        else "multi_node:packing_best_fit_by_effective_free_resources_then_node_key_stable_tiebreak"
     )
     return {
         "multi_node_scheduling_enabled": mns,
@@ -49,22 +52,25 @@ def schedule_workspace(
     session: Session,
     *,
     workspace_id: int,
-    requested_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
-    requested_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
-    requested_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    requested_cpu: float | None = None,
+    requested_memory_mb: int | None = None,
+    requested_disk_mb: int | None = None,
 ) -> WorkspaceScheduleResult:
     """
     Reserve an execution node for a workspace-shaped workload (bring-up class jobs).
 
     Delegates row locking and selection to :func:`~app.services.placement_service.node_placement.reserve_node_for_workspace`.
     """
+    req_cpu = float(default_workspace_requested_cpu() if requested_cpu is None else requested_cpu)
+    req_mem = int(default_workspace_requested_memory_mb() if requested_memory_mb is None else requested_memory_mb)
+    req_disk = int(default_workspace_requested_disk_mb() if requested_disk_mb is None else requested_disk_mb)
     try:
         node = reserve_node_for_workspace(
             session,
             workspace_id=workspace_id,
-            requested_cpu=requested_cpu,
-            requested_memory_mb=requested_memory_mb,
-            requested_disk_mb=requested_disk_mb,
+            requested_cpu=req_cpu,
+            requested_memory_mb=req_mem,
+            requested_disk_mb=req_disk,
         )
         log_event(
             logger,
@@ -72,9 +78,9 @@ def schedule_workspace(
             workspace_id=workspace_id,
             execution_node_id=node.id,
             node_key=node.node_key,
-            requested_cpu=requested_cpu,
-            requested_memory_mb=requested_memory_mb,
-            requested_disk_mb=requested_disk_mb,
+            requested_cpu=req_cpu,
+            requested_memory_mb=req_mem,
+            requested_disk_mb=req_disk,
             target_node_heartbeat_age_seconds=execution_node_heartbeat_age_seconds(node),
             **_placement_telemetry(),
         )
@@ -83,9 +89,9 @@ def schedule_workspace(
                 session,
                 chosen=node,
                 workspace_id=workspace_id,
-                requested_cpu=requested_cpu,
-                requested_memory_mb=requested_memory_mb,
-                requested_disk_mb=requested_disk_mb,
+                requested_cpu=req_cpu,
+                requested_memory_mb=req_mem,
+                requested_disk_mb=req_disk,
             )
             digest = (explain or "").replace("\n", " | ").replace("\r", "")[:900]
             if digest:
@@ -120,9 +126,9 @@ def schedule_workspace(
             LogEvent.PLACEMENT_NO_SCHEDULABLE_NODE,
             level=logging.WARNING,
             workspace_id=workspace_id,
-            requested_cpu=requested_cpu,
-            requested_memory_mb=requested_memory_mb,
-            requested_disk_mb=requested_disk_mb,
+            requested_cpu=req_cpu,
+            requested_memory_mb=req_mem,
+            requested_disk_mb=req_disk,
             **_placement_telemetry(),
             heartbeat_gate_enabled=bool(getattr(settings, "devnest_require_fresh_node_heartbeat", False)),
             node_heartbeat_max_age_seconds=int(getattr(settings, "devnest_node_heartbeat_max_age_seconds", 300) or 300),
@@ -178,8 +184,8 @@ def explain_placement_decision(
         f"effective_free_cpu={free_c:.4f} effective_free_memory_mb={free_m} "
         f"effective_free_disk_mb={free_d} active_workload_count={wcount} "
         f"(reservations from workspace_runtime; STOPPED/DELETED/ERROR workspaces excluded)",
-        f"sort_policy: capacity-first (effective_free_cpu desc, effective_free_memory_mb desc), "
-        f"then active_workload_count asc (spread/anti-concentration), then node_key asc (stable tiebreak)",
+        f"sort_policy: packing best-fit (least remaining free CPU, memory, disk after placement), "
+        f"then active_workload_count desc, then node_key asc (stable tiebreak)",
         f"{pool_note}: {len(pool)} node(s)",
         f"pool nodes satisfying effective capacity for "
         f"cpu>={req.requested_cpu}, memory_mb>={req.requested_memory_mb}, "

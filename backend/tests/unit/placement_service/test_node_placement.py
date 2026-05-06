@@ -43,19 +43,23 @@ def _add_node(
     session: Session,
     *,
     key: str,
+    provider_type: str = ExecutionNodeProviderType.LOCAL.value,
     schedulable: bool = True,
     status: str = ExecutionNodeStatus.READY.value,
     alloc_cpu: float = 4.0,
     alloc_mem: int = 8192,
     alloc_disk: int = 102_400,
     max_workspaces: int = 32,
+    disk_free_mb: int | None = None,
+    memory_free_mb: int | None = None,
+    last_resource_check_at=None,
 ) -> ExecutionNode:
     total_cpu = max(4.0, float(alloc_cpu))
     total_memory_mb = max(8192, int(alloc_mem))
     n = ExecutionNode(
         node_key=key,
         name=key,
-        provider_type=ExecutionNodeProviderType.LOCAL.value,
+        provider_type=provider_type,
         status=status,
         schedulable=schedulable,
         total_cpu=total_cpu,
@@ -64,6 +68,9 @@ def _add_node(
         allocatable_memory_mb=alloc_mem,
         allocatable_disk_mb=alloc_disk,
         max_workspaces=max_workspaces,
+        disk_free_mb=disk_free_mb,
+        memory_free_mb=memory_free_mb,
+        last_resource_check_at=last_resource_check_at,
     )
     session.add(n)
     session.commit()
@@ -134,10 +141,10 @@ def test_step7_multi_node_on_can_select_secondary_when_it_ranks_first(
         _add_node(session, key="node-1", alloc_cpu=4.0)
         _add_node(session, key="node-2", alloc_cpu=16.0)
         picked = select_node_for_workspace(session, workspace_id=1)
-        assert picked.node_key == "node-2"
+        assert picked.node_key == "node-1"
 
 
-def test_select_node_deterministic_highest_allocatable_cpu(
+def test_select_node_deterministic_tightest_fit_cpu(
     placement_engine: Engine,
     enable_multi_node_scheduling: None,
 ) -> None:
@@ -146,7 +153,7 @@ def test_select_node_deterministic_highest_allocatable_cpu(
         _add_node(session, key="high", alloc_cpu=8.0, alloc_mem=4096)
         _add_node(session, key="mid", alloc_cpu=6.0, alloc_mem=4096)
         picked = select_node_for_workspace(session, workspace_id=1)
-        assert picked.node_key == "high"
+        assert picked.node_key == "low"
 
 
 def test_select_node_tie_breaker_node_key(
@@ -160,11 +167,11 @@ def test_select_node_tie_breaker_node_key(
         assert picked.node_key == "a-node"
 
 
-def test_select_prefers_node_with_fewer_active_workloads_when_capacity_equal(
+def test_select_prefers_packing_over_spread_when_capacity_differs(
     placement_engine: Engine,
     enable_multi_node_scheduling: None,
 ) -> None:
-    """Equal allocatable CPU/memory → active_workload_count asc prefers the less-loaded node."""
+    """Packing prefers the node that leaves less remaining capacity after placement."""
     from app.services.auth_service.models.user_auth import UserAuth
     from app.services.workspace_service.models import Workspace, WorkspaceRuntime
     from app.services.workspace_service.models.enums import WorkspaceStatus
@@ -196,7 +203,7 @@ def test_select_prefers_node_with_fewer_active_workloads_when_capacity_equal(
         )
         session.commit()
         picked = select_node_for_workspace(session, workspace_id=777)
-        assert picked.node_key == "node-z-spread"
+        assert picked.node_key == "node-a-spread"
 
 
 def test_select_node_no_node_raises(placement_engine: Engine) -> None:
@@ -377,6 +384,77 @@ def test_select_skips_node_when_effective_capacity_exhausted(placement_engine: E
         assert picked.node_key == "only"
 
 
+def test_two_cpu_node_accepts_two_one_cpu_workspaces_before_exhaustion(placement_engine: Engine) -> None:
+    from app.services.auth_service.models.user_auth import UserAuth
+    from app.services.workspace_service.models import Workspace, WorkspaceRuntime
+    from app.services.workspace_service.models.enums import WorkspaceStatus
+
+    with Session(placement_engine) as session:
+        node = _add_node(session, key="pack-two", alloc_cpu=2.0, alloc_mem=4096, max_workspaces=4)
+        u = UserAuth(username="pack2", password_hash="x", email="pack2@e.com")
+        session.add(u)
+        session.commit()
+        session.refresh(u)
+
+        ws1 = Workspace(
+            name="packed-1",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(node.id),
+        )
+        session.add(ws1)
+        session.commit()
+        session.refresh(ws1)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=ws1.workspace_id,
+                node_id="pack-two",
+                reserved_cpu=1.0,
+                reserved_memory_mb=512,
+                reserved_disk_mb=4096,
+            ),
+        )
+        session.commit()
+
+        second = select_node_for_workspace(
+            session,
+            workspace_id=2,
+            requested_cpu=1.0,
+            requested_memory_mb=512,
+            requested_disk_mb=4096,
+        )
+        assert second.node_key == "pack-two"
+
+        ws2 = Workspace(
+            name="packed-2",
+            owner_user_id=u.user_auth_id,
+            status=WorkspaceStatus.RUNNING.value,
+            execution_node_id=int(node.id),
+        )
+        session.add(ws2)
+        session.commit()
+        session.refresh(ws2)
+        session.add(
+            WorkspaceRuntime(
+                workspace_id=ws2.workspace_id,
+                node_id="pack-two",
+                reserved_cpu=1.0,
+                reserved_memory_mb=512,
+                reserved_disk_mb=4096,
+            ),
+        )
+        session.commit()
+
+        with pytest.raises(NoSchedulableNodeError):
+            select_node_for_workspace(
+                session,
+                workspace_id=3,
+                requested_cpu=1.0,
+                requested_memory_mb=512,
+                requested_disk_mb=4096,
+            )
+
+
 def test_select_allows_placement_when_only_error_workloads_have_ledger(placement_engine: Engine) -> None:
     """ERROR workspaces do not consume effective capacity; stale ledger must not block others."""
     from app.services.auth_service.models.user_auth import UserAuth
@@ -529,6 +607,58 @@ def test_drained_node_not_in_pool_remaining_node_receives_placement(
         _add_node(session, key="zeta", alloc_cpu=16.0, schedulable=False)
         picked = select_node_for_workspace(session, workspace_id=1)
         assert picked.node_key == "alpha"
+
+
+def test_low_disk_ec2_node_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("DEVNEST_NODE_RESOURCE_MONITOR_ENABLED", "true")
+    monkeypatch.setenv("DEVNEST_NODE_MIN_FREE_DISK_MB", "10000")
+    monkeypatch.setenv("DEVNEST_NODE_MIN_FREE_MEMORY_MB", "512")
+    get_settings.cache_clear()
+    with Session(placement_engine) as session:
+        now = datetime.now(timezone.utc)
+        _add_node(
+            session,
+            key="ec2-low-disk",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            alloc_cpu=2.0,
+            alloc_mem=4096,
+            disk_free_mb=100,
+            memory_free_mb=4096,
+            last_resource_check_at=now,
+        )
+        _add_node(
+            session,
+            key="ec2-healthy",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            alloc_cpu=2.0,
+            alloc_mem=4096,
+            disk_free_mb=50_000,
+            memory_free_mb=4096,
+            last_resource_check_at=now,
+        )
+
+        picked = select_node_for_workspace(session, workspace_id=1)
+
+    assert picked.node_key == "ec2-healthy"
+
+
+def test_unschedulable_node_is_skipped_for_packing(
+    placement_engine: Engine,
+    enable_multi_node_scheduling: None,
+) -> None:
+    with Session(placement_engine) as session:
+        _add_node(session, key="tight-unschedulable", alloc_cpu=1.0, schedulable=False)
+        _add_node(session, key="roomy-schedulable", alloc_cpu=4.0)
+
+        picked = select_node_for_workspace(session, workspace_id=1)
+
+    assert picked.node_key == "roomy-schedulable"
 
 
 def test_select_node_reports_no_capacity_when_all_nodes_ineligible(

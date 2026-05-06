@@ -521,6 +521,23 @@ def test_evaluate_tick_recommends_scale_out_when_required_resource_is_exhausted(
                 reserved_disk_mb=reserved_disk_mb,
             ),
         )
+        pending = Workspace(
+            name="pending-resource-bound",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(pending)
+        session.commit()
+        session.refresh(pending)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(pending.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
+            ),
+        )
         session.commit()
 
         with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
@@ -574,6 +591,23 @@ def test_evaluate_tick_free_slots_high_but_cpu_zero_triggers_scale_out(autoscale
                     reserved_disk_mb=4096,
                 ),
             )
+        pending = Workspace(
+            name="pending-cpu-zero",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(pending)
+        session.commit()
+        session.refresh(pending)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(pending.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
+            ),
+        )
         session.commit()
 
         with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
@@ -586,6 +620,77 @@ def test_evaluate_tick_free_slots_high_but_cpu_zero_triggers_scale_out(autoscale
     assert decision.scale_out_recommended is True
     assert decision.action == "scale_out_recommended"
     assert any("free_cpu 0.0 < required_cpu 1.0" in reason for reason in decision.reasons)
+
+
+def test_third_workspace_triggers_scale_out_when_two_cpu_node_is_packed_full(
+    autoscaler_unit_engine,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="packed-auto", email="packed-auto@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        node = ExecutionNode(
+            node_key="ec2-packed-full",
+            name="ec2-packed-full",
+            provider_type=ExecutionNodeProviderType.EC2.value,
+            status=ExecutionNodeStatus.READY.value,
+            schedulable=True,
+            total_cpu=2.0,
+            total_memory_mb=4096,
+            allocatable_cpu=2.0,
+            allocatable_memory_mb=4096,
+            allocatable_disk_mb=102400,
+            max_workspaces=4,
+        )
+        session.add(node)
+        session.commit()
+        session.refresh(node)
+        for idx in range(2):
+            ws = Workspace(
+                name=f"packed-{idx}",
+                owner_user_id=int(user.user_auth_id),
+                status=WorkspaceStatus.RUNNING.value,
+                execution_node_id=int(node.id),
+            )
+            session.add(ws)
+            session.commit()
+            session.refresh(ws)
+            session.add(
+                WorkspaceRuntime(
+                    workspace_id=int(ws.workspace_id),
+                    node_id="ec2-packed-full",
+                    reserved_cpu=1.0,
+                    reserved_memory_mb=512,
+                    reserved_disk_mb=4096,
+                ),
+            )
+        pending = Workspace(
+            name="packed-third",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(pending)
+        session.commit()
+        session.refresh(pending)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(pending.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
+            ),
+        )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.free_cpu == 0.0
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
 
 
 def test_single_placement_failure_does_not_trigger_scale_out_when_capacity_exists(
@@ -739,6 +844,60 @@ def test_provisioning_node_incoming_capacity_suppresses_extra_scale_out(
     assert decision.capacity.provisioning_workspace_capacity >= 1
     assert decision.capacity.total_available_workspace_capacity >= decision.capacity.pending_placement_jobs
     assert decision.scale_out_recommended is False
+
+
+def test_pending_jobs_exceed_single_ready_slot_triggers_scale_out_even_when_one_fits(
+    autoscaler_unit_engine,
+) -> None:
+    with Session(autoscaler_unit_engine) as session:
+        user = UserAuth(username="ready-slot-short", email="ready-slot-short@example.com", password_hash="x")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        session.add(
+            ExecutionNode(
+                node_key="local-one-slot",
+                name="local-one-slot",
+                provider_type=ExecutionNodeProviderType.LOCAL.value,
+                status=ExecutionNodeStatus.READY.value,
+                schedulable=True,
+                total_cpu=4.0,
+                total_memory_mb=8192,
+                allocatable_cpu=4.0,
+                allocatable_memory_mb=8192,
+                allocatable_disk_mb=102400,
+                max_workspaces=1,
+            ),
+        )
+        for i in range(2):
+            ws = Workspace(
+                name=f"pending-ready-short-{i}",
+                owner_user_id=int(user.user_auth_id),
+                status=WorkspaceStatus.PENDING.value,
+            )
+            session.add(ws)
+            session.commit()
+            session.refresh(ws)
+            session.add(
+                WorkspaceJob(
+                    workspace_id=int(ws.workspace_id),
+                    job_type=WorkspaceJobType.CREATE.value,
+                    status=WorkspaceJobStatus.QUEUED.value,
+                    requested_by_user_id=int(user.user_auth_id),
+                    requested_config_version=1,
+                ),
+            )
+        session.commit()
+
+        with patch("app.services.autoscaler_service.service.get_settings") as mock_settings:
+            mock_settings.return_value = _scale_out_settings()
+            decision = evaluate_fleet_autoscaler_tick(session)
+
+    assert decision.capacity.ready_workspace_capacity == 1
+    assert decision.capacity.pending_placement_jobs == 2
+    assert decision.capacity.total_available_workspace_capacity == 1
+    assert decision.scale_out_recommended is True
+    assert decision.action == "scale_out_recommended"
 
 
 def test_multiple_pending_placement_jobs_exceed_incoming_capacity_triggers_scale_out(
@@ -1650,6 +1809,24 @@ def test_evaluate_recommends_scale_out_when_all_ec2_fail_host_resource_gate(
                 owner_user_id=int(user.user_auth_id),
                 status=WorkspaceStatus.RUNNING.value,
                 execution_node_id=int(node.id),
+            ),
+        )
+        session.commit()
+        pending = Workspace(
+            name="hr-pending",
+            owner_user_id=int(user.user_auth_id),
+            status=WorkspaceStatus.PENDING.value,
+        )
+        session.add(pending)
+        session.commit()
+        session.refresh(pending)
+        session.add(
+            WorkspaceJob(
+                workspace_id=int(pending.workspace_id),
+                job_type=WorkspaceJobType.CREATE.value,
+                status=WorkspaceJobStatus.QUEUED.value,
+                requested_by_user_id=int(user.user_auth_id),
+                requested_config_version=1,
             ),
         )
         session.commit()

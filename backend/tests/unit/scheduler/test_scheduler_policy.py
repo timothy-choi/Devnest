@@ -77,9 +77,9 @@ def test_rank_candidate_nodes_best_fit_then_lexicographic(policy_session: Sessio
     n_small = _node(key="a", alloc_cpu=4.0, alloc_mem=4096)
     n_tiny_cpu = _node(key="m", alloc_cpu=8.0, alloc_mem=512)
     out = rank_candidate_nodes(policy_session, [n_small, n_big, n_tiny_cpu], req)
-    assert out[0].node_key == "m"
+    assert out[0].node_key == "a"
     assert out[1].node_key == "z"
-    assert out[2].node_key == "a"
+    assert out[2].node_key == "m"
 
 
 def test_scheduling_sort_key_matches_rank_order(policy_session: Session) -> None:
@@ -232,8 +232,8 @@ def _seed_stopped_workload(session: Session, *, node_key: str) -> None:
     session.commit()
 
 
-def test_equal_capacity_fewer_workloads_wins(policy_session: Session) -> None:
-    """With equal free capacity, the node with fewer active workloads ranks first (anti-concentration)."""
+def test_packing_prefers_partially_used_node(policy_session: Session) -> None:
+    """Packing ranks the node that leaves less free capacity after placement first."""
     n_busy = _node(key="busy", alloc_cpu=4.0, alloc_mem=4096)
     n_idle = _node(key="idle", alloc_cpu=4.0, alloc_mem=4096)
     policy_session.add(n_busy)
@@ -248,12 +248,12 @@ def test_equal_capacity_fewer_workloads_wins(policy_session: Session) -> None:
     ranked = rank_candidate_nodes(policy_session, [n_busy, n_idle], req)
 
     assert len(ranked) == 2
-    assert ranked[0].node_key == "idle", "idle node (fewer workloads) should rank first"
-    assert ranked[1].node_key == "busy"
+    assert ranked[0].node_key == "busy"
+    assert ranked[1].node_key == "idle"
 
 
-def test_capacity_primary_over_workload_spread(policy_session: Session) -> None:
-    """Capacity-first: a node with much more free CPU beats one with fewer workloads."""
+def test_packing_uses_smaller_fitting_node_before_larger_node(policy_session: Session) -> None:
+    """Best-fit packing preserves larger nodes when a smaller node can satisfy the request."""
     n_large = _node(key="large", alloc_cpu=8.0, alloc_mem=8192)
     n_small = _node(key="small", alloc_cpu=4.0, alloc_mem=4096)
     policy_session.add(n_large)
@@ -268,8 +268,7 @@ def test_capacity_primary_over_workload_spread(policy_session: Session) -> None:
     ranked = rank_candidate_nodes(policy_session, [n_large, n_small], req)
 
     assert len(ranked) == 2
-    # large has 6.5 CPU free vs small's 4.0 — capacity wins even though large has more workloads
-    assert ranked[0].node_key == "large"
+    assert ranked[0].node_key == "small"
 
 
 def test_stopped_workloads_not_counted_for_spread(policy_session: Session) -> None:

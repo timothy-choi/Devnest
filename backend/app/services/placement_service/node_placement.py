@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.libs.observability.log_events import log_event
 
 from .bootstrap import ensure_execution_node_default_topology
 from .capacity import (
@@ -20,12 +22,15 @@ from .capacity import (
 )
 from .node_heartbeat import heartbeat_fresh_sql_predicates
 from .constants import (
-    DEFAULT_WORKSPACE_REQUEST_CPU,
-    DEFAULT_WORKSPACE_REQUEST_DISK_MB,
-    DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
+    default_workspace_requested_cpu,
+    default_workspace_requested_disk_mb,
+    default_workspace_requested_memory_mb,
+    default_workspace_requested_slots,
 )
 from .errors import ExecutionNodeNotFoundError, InvalidPlacementParametersError, NoSchedulableNodeError
 from .models import ExecutionNode, ExecutionNodeProviderType, ExecutionNodeStatus
+
+logger = logging.getLogger(__name__)
 
 
 def _provider_type_clause():
@@ -142,9 +147,10 @@ def select_node_for_workspace(
     session: Session,
     *,
     workspace_id: int,
-    requested_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
-    requested_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
-    requested_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    requested_cpu: float | None = None,
+    requested_memory_mb: int | None = None,
+    requested_disk_mb: int | None = None,
+    requested_slots: int | None = None,
     for_update: bool = False,
 ) -> ExecutionNode:
     """
@@ -159,16 +165,15 @@ def select_node_for_workspace(
     ``active_workload_count_subquery()`` (runtime ``node_key`` ledger) must be ``< max_workspaces``,
     so CREATE cannot overbook and legacy rows without an FK still respect the cap.
 
-    **Sort policy (4 levels, descending priority):**
+    **Sort policy (packing best-fit):**
 
-    1. ``effective_free_cpu DESC`` — capacity-first; prevents fragmentation on large requests.
-    2. ``effective_free_memory_mb DESC`` — secondary capacity dimension.
-    3. ``active_workload_count ASC`` — spread/anti-concentration; fewer active workloads preferred
-       when capacity is similar across candidates.
-    4. ``node_key ASC`` — stable tiebreak.
+    1. Lowest remaining CPU after placement.
+    2. Lowest remaining memory after placement.
+    3. Lowest remaining disk after placement.
+    4. Highest active workload count, then ``node_key ASC`` — stable tiebreak.
 
     Must stay aligned with :func:`app.services.scheduler_service.policy.rank_candidate_nodes`
-    and :func:`app.services.scheduler_service.policy.scheduling_sort_key_spread`.
+    and :func:`app.services.scheduler_service.policy.scheduling_sort_key_packing`.
 
     ``workspace_id`` is accepted for future affinity / anti-affinity; unused in V1.
 
@@ -191,13 +196,15 @@ def select_node_for_workspace(
     """
     _ = workspace_id  # reserved for affinity (V2+)
     _assign_missing_default_topology_for_ready_nodes(session)
-    req_cpu = float(requested_cpu)
-    req_mem = int(requested_memory_mb)
-    req_disk = int(requested_disk_mb)
-    if req_cpu <= 0 or req_mem <= 0 or req_disk <= 0:
+    req_cpu = float(default_workspace_requested_cpu() if requested_cpu is None else requested_cpu)
+    req_mem = int(default_workspace_requested_memory_mb() if requested_memory_mb is None else requested_memory_mb)
+    req_disk = int(default_workspace_requested_disk_mb() if requested_disk_mb is None else requested_disk_mb)
+    req_slots = int(default_workspace_requested_slots() if requested_slots is None else requested_slots)
+    if req_cpu <= 0 or req_mem <= 0 or req_disk <= 0 or req_slots <= 0:
         raise InvalidPlacementParametersError(
-            "placement requires positive requested_cpu, requested_memory_mb, and requested_disk_mb "
-            f"(got cpu={requested_cpu!r}, memory_mb={requested_memory_mb!r}, disk_mb={requested_disk_mb!r})",
+            "placement requires positive requested_cpu, requested_memory_mb, requested_disk_mb, and requested_slots "
+            f"(got cpu={requested_cpu!r}, memory_mb={requested_memory_mb!r}, disk_mb={requested_disk_mb!r}, "
+            f"slots={requested_slots!r})",
         )
 
     free_cpu_e = effective_free_cpu_expr()
@@ -213,20 +220,19 @@ def select_node_for_workspace(
         free_disk_e >= req_disk,
         # FK-based slots (CREATING before runtime) and runtime-pinned cohort (legacy rows) must both
         # stay under max_workspaces so neither path overbooks.
-        slot_claim_e < ExecutionNode.max_workspaces,
-        active_wl_e < ExecutionNode.max_workspaces,
+        slot_claim_e <= (ExecutionNode.max_workspaces - req_slots),
+        active_wl_e <= (ExecutionNode.max_workspaces - req_slots),
     ]
     stmt = (
         select(ExecutionNode)
         .where(and_(*preds))
         .order_by(
-            # Primary: most effective free CPU (capacity-first to avoid fragmentation).
-            free_cpu_e.desc(),
-            # Secondary: most effective free memory.
-            free_mem_e.desc(),
-            # Tertiary: fewer active workloads (spread / anti-concentration fairness).
-            active_wl_e.asc(),
-            # Stable tiebreak.
+            # Best-fit packing: prefer the node that leaves the least capacity after placement.
+            (free_cpu_e - req_cpu).asc(),
+            (free_mem_e - req_mem).asc(),
+            (free_disk_e - req_disk).asc(),
+            # Prefer packing onto already-used nodes when residual capacity ties.
+            active_wl_e.desc(),
             ExecutionNode.node_key.asc(),
         )
     )
@@ -265,13 +271,24 @@ def select_node_for_workspace(
             f"(need status=READY, schedulable=true, effective_free_cpu>={req_cpu}, "
             f"effective_free_memory_mb>={req_mem}, effective_free_disk_mb>={req_disk}, "
             "and both workspace slot claims (execution_node_id) and active runtime-pinned workloads "
-            "< max_workspaces; "
+            f"have at least requested_slots={req_slots} available under max_workspaces; "
             f"{n_gate} node(s) are READY+schedulable (after provider filter) but none have enough "
             f"effective capacity — check execution_node, workspace_runtime reservations, and bootstrap; "
             f"diagnostic max_effective_free_cpu≈{max_cpu:.4f}, "
             f"max_effective_free_memory_mb≈{max_mem} in that pool)"
             f"{pool_hint}{hb_hint}{single_hint}",
         )
+    log_event(
+        logger,
+        "scheduler.node.selected_packing",
+        workspace_id=workspace_id,
+        execution_node_id=row.id,
+        node_key=row.node_key,
+        requested_cpu=req_cpu,
+        requested_memory_mb=req_mem,
+        requested_disk_mb=req_disk,
+        requested_slots=req_slots,
+    )
     return row
 
 
@@ -292,9 +309,10 @@ def reserve_node_for_workspace(
     session: Session,
     *,
     workspace_id: int,
-    requested_cpu: float = DEFAULT_WORKSPACE_REQUEST_CPU,
-    requested_memory_mb: int = DEFAULT_WORKSPACE_REQUEST_MEMORY_MB,
-    requested_disk_mb: int = DEFAULT_WORKSPACE_REQUEST_DISK_MB,
+    requested_cpu: float | None = None,
+    requested_memory_mb: int | None = None,
+    requested_disk_mb: int | None = None,
+    requested_slots: int | None = None,
 ) -> ExecutionNode:
     """
     Same as :func:`select_node_for_workspace` but locks the chosen row (``FOR UPDATE``).
@@ -308,6 +326,7 @@ def reserve_node_for_workspace(
         requested_cpu=requested_cpu,
         requested_memory_mb=requested_memory_mb,
         requested_disk_mb=requested_disk_mb,
+        requested_slots=requested_slots,
         for_update=True,
     )
 

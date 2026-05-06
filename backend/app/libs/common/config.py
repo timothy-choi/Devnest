@@ -846,6 +846,13 @@ class Settings(BaseSettings):
     # checks run on the execution node.
     devnest_probe_assume_colocated_engine: bool = True
 
+    # Default per-workspace placement request. Runtime-specific config can override these values
+    # before scheduling; otherwise placement and runtime reservation use this workspace-shaped request.
+    devnest_workspace_required_cpu: float = 1.0
+    devnest_workspace_required_memory_mb: int = 512
+    devnest_workspace_required_disk_mb: int = 4096
+    devnest_workspace_required_slots: int = 1
+
     # Authoritative placement: allow legacy DEVNEST_NODE_ID / DEVNEST_TOPOLOGY_ID resolution in
     # development only. Must remain false in staging/production.
     devnest_allow_runtime_env_fallback: bool = False
@@ -1096,6 +1103,42 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 1
         return max(0, min(n, 10_000))
+
+    @field_validator("devnest_workspace_required_cpu", mode="before")
+    @classmethod
+    def _workspace_required_cpu(cls, v):  # noqa: ANN001
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            return 1.0
+        return max(0.001, min(n, 1024.0))
+
+    @field_validator("devnest_workspace_required_memory_mb", mode="before")
+    @classmethod
+    def _workspace_required_memory_mb(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 512
+        return max(1, min(n, 10_000_000))
+
+    @field_validator("devnest_workspace_required_disk_mb", mode="before")
+    @classmethod
+    def _workspace_required_disk_mb(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 4096
+        return max(1, min(n, 10_000_000))
+
+    @field_validator("devnest_workspace_required_slots", mode="before")
+    @classmethod
+    def _workspace_required_slots(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 1
+        return max(1, min(n, 10_000_000))
 
     @field_validator("devnest_autoscaler_loop_enabled", mode="before")
     @classmethod
