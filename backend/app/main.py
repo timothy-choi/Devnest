@@ -20,6 +20,10 @@ from app.libs.security.rate_limit import RateLimitMiddleware
 from app.services.storage.factory import get_snapshot_storage_provider, snapshot_storage_log_fields
 from app.workers.lifespan_worker import start_background_worker, stop_background_worker
 from app.workers.lifespan_reconcile import start_reconcile_loop, stop_reconcile_loop
+from app.workers.lifespan_ec2_orphan_janitor import (
+    start_ec2_orphan_janitor_loop,
+    stop_ec2_orphan_janitor_loop,
+)
 from app.libs.observability.routes import router as observability_router
 from app.libs.observability.system_status_routes import router as system_status_router
 from app.services.audit_service.api.routers import router as audit_router
@@ -30,6 +34,7 @@ from app.services.autoscaler_service.api.routers import internal_autoscaler_rout
 from app.services.infrastructure_service.api.routers.internal_execution_nodes import (
     router as internal_execution_nodes_router,
 )
+from app.services.infrastructure_service.api.routers.internal_aws import router as internal_aws_router
 from app.services.policy_service.api.routers import router as policy_router
 from app.services.policy_service.errors import PolicyViolationError
 from app.services.quota_service.api.routers import router as quota_router
@@ -130,9 +135,11 @@ async def lifespan(_app: FastAPI):
     get_event_bus().attach_event_loop(asyncio.get_event_loop())
     start_background_worker()
     start_reconcile_loop()
+    start_ec2_orphan_janitor_loop()
     try:
         yield
     finally:
+        await stop_ec2_orphan_janitor_loop()
         await stop_reconcile_loop()
         await stop_background_worker()
 
@@ -182,6 +189,7 @@ app.include_router(internal_workspace_jobs_router)
 app.include_router(internal_workspace_reconcile_router)
 # Infrastructure execution-node admin (``internal_execution_nodes.router``: list, heartbeat, EC2 lifecycle).
 app.include_router(internal_execution_nodes_router)
+app.include_router(internal_aws_router)
 # Phase 3b Step 8: operator pinned test workspace (same internal API scope as execution nodes).
 app.include_router(internal_operator_test_workspaces_router)
 app.include_router(internal_autoscaler_router)

@@ -741,6 +741,16 @@ class Settings(BaseSettings):
     devnest_ec2_heartbeat_internal_api_base_url: str = ""
     # Set true only when the AMI already installs Docker and starts the DevNest heartbeat agent.
     devnest_ec2_bootstrap_prebaked: bool = False
+    # Comma-separated EC2 instance IDs that must never be cleaned up (control plane / operator nodes).
+    devnest_aws_control_plane_instance_ids: str = ""
+    # After an execution node is fully terminated in AWS, delete DevNest-tagged EBS/ENI/EIP/SG leftovers.
+    devnest_ec2_post_terminate_cleanup_enabled: bool = True
+    # Background sweep for DevNest-tagged orphan resources (API process; opt-in).
+    devnest_ec2_orphan_janitor_enabled: bool = False
+    # Minimum 60 seconds between janitor ticks.
+    devnest_ec2_orphan_janitor_interval_seconds: int = 3600
+    # Describe/release unattached DevNest-tagged Elastic IPs during orphan sweeps (full-account paginated scan).
+    devnest_ec2_orphan_scan_elastic_ips: bool = True
 
     # ── Built-in background job worker ──────────────────────────────────────────
     # When true, the FastAPI process runs the job poll loop in an asyncio background
@@ -1027,6 +1037,9 @@ class Settings(BaseSettings):
         "devnest_autoscaler_evaluate_only",
         "devnest_autoscaler_provision_on_no_capacity",
         "devnest_ec2_bootstrap_prebaked",
+        "devnest_ec2_post_terminate_cleanup_enabled",
+        "devnest_ec2_orphan_janitor_enabled",
+        "devnest_ec2_orphan_scan_elastic_ips",
         "devnest_require_distributed_rate_limiting",
         mode="before",
     )
@@ -1055,6 +1068,15 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 300
         return max(0, min(n, 86400))
+
+    @field_validator("devnest_ec2_orphan_janitor_interval_seconds", mode="before")
+    @classmethod
+    def _coerce_ec2_orphan_janitor_interval(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 3600
+        return max(60, min(n, 604_800))
 
     @field_validator("devnest_rate_limit_backend", mode="before")
     @classmethod
