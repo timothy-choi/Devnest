@@ -10,6 +10,7 @@ from sqlmodel import Session
 
 from app.services.policy_service.enums import ScopeType
 from app.services.quota_service.models import Quota
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 INTERNAL_KEY = "integration-test-internal-key"
 
@@ -32,7 +33,7 @@ def _register_and_login(client: TestClient, email: str, password: str = "securep
 def _create_workspace(client: TestClient, token: str, name: str = "ws") -> dict:
     return client.post(
         "/workspaces",
-        json={"name": name, "description": "", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+        json={"name": name, "description": "", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
         headers={"Authorization": f"Bearer {token}"},
     )
 

@@ -20,6 +20,7 @@ from app.services.policy_service.service import (
     evaluate_workspace_start,
 )
 from app.services.workspace_service.models import Workspace
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 
 @pytest.fixture()
@@ -107,15 +108,18 @@ class TestEvaluateWorkspaceCreation:
 
     def test_allowed_images_blocks_unlisted_image(self, policy_session: Session) -> None:
         uid = _seed_user(policy_session)
-        _add_policy(policy_session, rules={"allowed_runtime_images": ["nginx:alpine"]})
+        _add_policy(policy_session, rules={"allowed_runtime_images": [WORKSPACE_STUB_HTTP_IMAGE]})
         with pytest.raises(PolicyViolationError) as exc_info:
             evaluate_workspace_creation(policy_session, owner_user_id=uid, image="ubuntu:22.04")
         assert "not in the allowed list" in exc_info.value.reason
 
     def test_allowed_images_permits_listed_image(self, policy_session: Session) -> None:
         uid = _seed_user(policy_session)
-        _add_policy(policy_session, rules={"allowed_runtime_images": ["nginx:alpine", "ubuntu:22.04"]})
-        evaluate_workspace_creation(policy_session, owner_user_id=uid, image="nginx:alpine")
+        _add_policy(
+            policy_session,
+            rules={"allowed_runtime_images": [WORKSPACE_STUB_HTTP_IMAGE, "ubuntu:22.04"]},
+        )
+        evaluate_workspace_creation(policy_session, owner_user_id=uid, image=WORKSPACE_STUB_HTTP_IMAGE)
 
     def test_null_allowed_images_permits_any_image(self, policy_session: Session) -> None:
         uid = _seed_user(policy_session)

@@ -18,6 +18,7 @@ from app.services.auth_service.services.auth_token import create_access_token
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.models import WorkspaceUsageRecord
 from app.services.workspace_service.models import Workspace, WorkspaceConfig
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 pytestmark = pytest.mark.integration
 
@@ -62,7 +63,7 @@ class TestWorkspaceCreateAudit:
 
         r = client.post(
             "/workspaces",
-            json={"name": "audit-test-ws", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            json={"name": "audit-test-ws", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
             headers=_auth(token),
         )
         assert r.status_code == status.HTTP_202_ACCEPTED, r.text
@@ -82,7 +83,7 @@ class TestWorkspaceCreateAudit:
 
         r = client.post(
             "/workspaces",
-            json={"name": "usage-test-ws", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            json={"name": "usage-test-ws", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
             headers=_auth(token),
         )
         assert r.status_code == status.HTTP_202_ACCEPTED, r.text
@@ -191,7 +192,7 @@ class TestAdminAuditApi:
         uid, token = _register_and_token(client, username="aud_admin", email="aud_admin@test.dev")
         r = client.post(
             "/workspaces",
-            json={"name": "admin-api-ws", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            json={"name": "admin-api-ws", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
             headers=_auth(token),
         )
         wid = r.json()["workspace_id"]
@@ -210,7 +211,7 @@ class TestAdminAuditApi:
         uid, token = _register_and_token(client, username="aud_admin2", email="aud_admin2@test.dev")
         client.post(
             "/workspaces",
-            json={"name": "admin-api-ws2", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            json={"name": "admin-api-ws2", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
             headers=_auth(token),
         )
 
@@ -232,7 +233,7 @@ class TestAdminUsageApi:
         uid, token = _register_and_token(client, username="usg_admin", email="usg_admin@test.dev")
         r = client.post(
             "/workspaces",
-            json={"name": "usg-api-ws", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            json={"name": "usg-api-ws", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
             headers=_auth(token),
         )
         wid = r.json()["workspace_id"]
@@ -251,7 +252,7 @@ class TestAdminUsageApi:
         uid, token = _register_and_token(client, username="usg_admin2", email="usg_admin2@test.dev")
         client.post(
             "/workspaces",
-            json={"name": "usg-api-ws2", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            json={"name": "usg-api-ws2", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
             headers=_auth(token),
         )
 
@@ -333,7 +334,7 @@ class TestAuditApiFilters:
         uid, token = _register_and_token(client, username="pgn_user", email="pgn@test.dev")
         r = client.post(
             "/workspaces",
-            json={"name": "pgn-ws", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+            json={"name": "pgn-ws", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
             headers=_auth(token),
         )
         wid = r.json()["workspace_id"]

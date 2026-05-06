@@ -1,7 +1,7 @@
 """System tests: control-plane actions → persisted workspace events (same path as GET /workspaces/{id}/events SSE).
 
 Exercises real API routes, ``POST /internal/workspace-jobs/process``, worker, orchestrator, Docker
-runtime (``nginx:alpine``), topology DB row, and stubbed TCP probes — matching
+runtime (stub HTTP image from ``tests.workspace_stub_image``), topology DB row, and stubbed TCP probes — matching
 ``tests/integration/workspace/test_workspace_control_plane_system.py``.
 
 **Observability:** The live SSE endpoint streams rows from ``list_workspace_events`` formatted with
@@ -49,6 +49,7 @@ from app.services.workspace_service.services.workspace_event_service import (
     format_sse_data_line,
     list_workspace_events,
 )
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 pytestmark = [
     pytest.mark.system,
@@ -259,7 +260,7 @@ def test_update_workspace_events_end_to_end(client: TestClient, db_session: Sess
 
     r_patch = client.patch(
         f"/workspaces/{wid}",
-        json={"runtime": {"image": "nginx:alpine", "env": {"SYS_EV_MARKER": "1"}}},
+        json={"runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE, "env": {"SYS_EV_MARKER": "1"}}},
         headers=_auth_header(token),
     )
     assert r_patch.status_code == status.HTTP_202_ACCEPTED, r_patch.text

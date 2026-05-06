@@ -2,7 +2,7 @@
 System tests: ``DockerRuntimeAdapter`` against the real built workspace image (code-server stack).
 
 Uses the same ``built_workspace_image`` session fixture as other workspace system tests.
-Slower than ``nginx:alpine`` lifecycle tests in ``tests/system/runtime/``; run with the
+Slower than lightweight stub lifecycle tests in ``tests/system/runtime/``; run with the
 ``workspace_image`` marker. Validates ephemeral host publish (inspected), mounts, and **code-server
 HTTP** from inside the container on ``WORKSPACE_IDE_CONTAINER_PORT`` (avoids flaky host→published-port
 access in some CI networks).

@@ -11,6 +11,7 @@ from sqlmodel import Session
 from app.services.auth_service.models import UserAuth
 from app.services.policy_service.enums import PolicyType, ScopeType
 from app.services.policy_service.models import Policy
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 INTERNAL_KEY = "integration-test-internal-key"
 
@@ -30,7 +31,7 @@ def _register_and_login(client: TestClient, email: str, password: str = "securep
 def _create_workspace(client: TestClient, token: str) -> dict:
     resp = client.post(
         "/workspaces",
-        json={"name": "test-ws", "description": "", "runtime": {"image": "nginx:alpine"}, "is_private": True},
+        json={"name": "test-ws", "description": "", "runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE}, "is_private": True},
         headers={"Authorization": f"Bearer {token}"},
     )
     return resp
@@ -193,7 +194,7 @@ class TestWorkspaceCreationPolicyEnforcement:
 
     def test_allowed_image_returns_202(self, client: TestClient, db_session: Session) -> None:
         token = _register_and_login(client, "ok_img@test.dev")
-        _seed_policy(db_session, rules={"allowed_runtime_images": ["nginx:alpine"]})
+        _seed_policy(db_session, rules={"allowed_runtime_images": [WORKSPACE_STUB_HTTP_IMAGE]})
         resp = _create_workspace(client, token)
         assert resp.status_code == 202
 

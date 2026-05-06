@@ -17,8 +17,9 @@ Or by path (skips collection of unrelated modules)::
 
     pytest tests/system/runtime/test_docker_runtime_system.py -v
 
-Image: set ``DEVNEST_RUNTIME_SYSTEM_IMAGE`` to override the default ``nginx:alpine``
-(see ``tests/system/conftest.py``). Tests pass ``ports=((0, WORKSPACE_IDE_CONTAINER_PORT),)``
+Image: set ``DEVNEST_RUNTIME_SYSTEM_IMAGE`` to override the default in ``tests/workspace_stub_image.py``
+(``nginxinc/nginx-unprivileged`` listens on 8080 under default ``cap_drop``; plain ``nginx:alpine`` binds port 80 and exits).
+See ``tests/system/conftest.py``. Tests pass ``ports=((0, WORKSPACE_IDE_CONTAINER_PORT),)``
 so the engine assigns an ephemeral **host** port for the IDE container port (no fixed host 8080).
 
 Coverage checklist: ``ensure_container``, ``start_container``, ``stop_container``, ``restart_container``,

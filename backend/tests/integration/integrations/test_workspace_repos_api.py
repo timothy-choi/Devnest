@@ -6,6 +6,8 @@ import pytest
 from fastapi import status
 from sqlmodel import select
 
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
+
 
 def _register_and_login(client, *, username, email, password="pass12345"):
     client.post("/auth/register", json={"username": username, "email": email, "password": password})
@@ -17,7 +19,7 @@ def _register_and_login(client, *, username, email, password="pass12345"):
 def _create_workspace(client, token, *, name="ws1"):
     resp = client.post(
         "/workspaces",
-        json={"name": name, "description": "test", "config": {"image": "nginx:alpine"}},
+        json={"name": name, "description": "test", "config": {"image": WORKSPACE_STUB_HTTP_IMAGE}},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code in (201, 202)
