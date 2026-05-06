@@ -25,6 +25,20 @@ def test_invalid_cpu_raises() -> None:
         _workspace_job_runtime_overrides_from_config({"cpu_limit_cores": "not-a-float"})
 
 
-def test_invalid_pids_raises() -> None:
+def test_non_positive_limits_coerce_to_none() -> None:
+    assert _workspace_job_runtime_overrides_from_config({"cpu_limit_cores": 0}) == (None, None, None)
+    assert _workspace_job_runtime_overrides_from_config({"memory_limit_mib": -1}) == (None, None, None)
+    assert _workspace_job_runtime_overrides_from_config({"pids_limit": -3}) == (None, None, None)
+
+
+def test_explicit_null_limit_yields_none_for_that_axis() -> None:
+    assert _workspace_job_runtime_overrides_from_config({"cpu_limit_cores": None, "memory_limit_mib": 128}) == (
+        None,
+        128,
+        None,
+    )
+
+
+def test_invalid_pids_type_raises() -> None:
     with pytest.raises(ValueError, match="pids_limit"):
-        _workspace_job_runtime_overrides_from_config({"pids_limit": -3})
+        _workspace_job_runtime_overrides_from_config({"pids_limit": "not-an-int"})

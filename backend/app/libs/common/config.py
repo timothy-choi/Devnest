@@ -899,6 +899,10 @@ class Settings(BaseSettings):
     )
     devnest_workspace_security_seccomp_default: bool = Field(
         default=True,
+        description=(
+            "When True, omit an explicit Docker ``seccomp=`` security-opt so the engine applies its "
+            "default profile. When False, add ``seccomp=unconfined`` (Docker rejects ``seccomp=default``)."
+        ),
         validation_alias=AliasChoices(
             "DEVNEST_WORKSPACE_SECURITY_SECCOMP_DEFAULT",
             "devnest_workspace_security_seccomp_default",

@@ -22,9 +22,22 @@ def test_build_spec_respects_settings_flags() -> None:
     )
     spec = build_workspace_container_security_spec(s)
     assert "no-new-privileges:true" in spec.security_opt
-    assert "seccomp=default" in spec.security_opt
+    assert not any(o.startswith("seccomp=") for o in spec.security_opt)
+    assert spec.seccomp_mode == "engine_default"
     assert spec.cap_drop == ("NET_RAW",)
     assert spec.read_only_rootfs is False
+
+
+def test_build_spec_seccomp_off_adds_unconfined() -> None:
+    s = Settings(
+        devnest_workspace_security_no_new_privileges=False,
+        devnest_workspace_security_seccomp_default=False,
+        devnest_workspace_security_read_only_rootfs=False,
+        devnest_workspace_security_cap_drop="",
+    )
+    spec = build_workspace_container_security_spec(s)
+    assert "seccomp=unconfined" in spec.security_opt
+    assert spec.seccomp_mode == "unconfined"
 
 
 def test_empty_cap_drop_string_means_no_caps() -> None:

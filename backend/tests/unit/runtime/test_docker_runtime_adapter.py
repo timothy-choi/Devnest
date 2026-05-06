@@ -826,7 +826,7 @@ class TestEnsureContainer:
         mock_client.api.create_container.return_value = {"Id": "pqfull"}
 
         sec = WorkspaceContainerSecuritySpec(
-            security_opt=("no-new-privileges:true", "seccomp=default"),
+            security_opt=("no-new-privileges:true",),
             cap_drop=("NET_RAW", "SYS_ADMIN"),
             read_only_rootfs=False,
         )
@@ -843,7 +843,7 @@ class TestEnsureContainer:
         assert hc["nano_cpus"] == 1_000_000_000
         assert hc["mem_limit"] == 512 * 1024 * 1024
         assert hc["pids_limit"] == 256
-        assert hc["security_opt"] == ["no-new-privileges:true", "seccomp=default"]
+        assert hc["security_opt"] == ["no-new-privileges:true"]
         assert hc["cap_drop"] == ["NET_RAW", "SYS_ADMIN"]
         assert hc.get("read_only") is not True
 

@@ -588,7 +588,8 @@ def _health_from_probe(probe: bool | None) -> str:
 def _workspace_job_runtime_overrides_from_config(config_json: dict) -> tuple[float | None, int | None, int | None]:
     """Parse optional cgroup overrides from ``config_json``; missing keys → ``None`` (orchestrator defaults).
 
-    Raises ``ValueError`` when a key is present but not a finite positive scalar.
+    A key present with ``null``, zero, or non-positive values yields ``None`` for that dimension (no override).
+    Raises ``ValueError`` only when a key is present with an unparseable type.
     """
     cfg = config_json or {}
     cpu_out: float | None = None
@@ -596,28 +597,40 @@ def _workspace_job_runtime_overrides_from_config(config_json: dict) -> tuple[flo
     pids_out: int | None = None
 
     if "cpu_limit_cores" in cfg:
-        try:
-            cpu_out = float(cfg.get("cpu_limit_cores"))
-        except (TypeError, ValueError) as e:
-            raise ValueError("cpu_limit_cores must be a positive number") from e
-        if not math.isfinite(cpu_out) or cpu_out <= 0:
-            raise ValueError("cpu_limit_cores must be a positive number")
+        raw = cfg.get("cpu_limit_cores")
+        if raw is None:
+            cpu_out = None
+        else:
+            try:
+                cpu_out = float(raw)
+            except (TypeError, ValueError) as e:
+                raise ValueError("cpu_limit_cores must be a positive number") from e
+            if not math.isfinite(cpu_out) or cpu_out <= 0:
+                cpu_out = None
 
     if "memory_limit_mib" in cfg:
-        try:
-            mem_out = int(cfg.get("memory_limit_mib"))
-        except (TypeError, ValueError) as e:
-            raise ValueError("memory_limit_mib must be a positive integer") from e
-        if mem_out <= 0:
-            raise ValueError("memory_limit_mib must be a positive integer")
+        raw = cfg.get("memory_limit_mib")
+        if raw is None:
+            mem_out = None
+        else:
+            try:
+                mem_out = int(raw)
+            except (TypeError, ValueError) as e:
+                raise ValueError("memory_limit_mib must be a positive integer") from e
+            if mem_out <= 0:
+                mem_out = None
 
     if "pids_limit" in cfg:
-        try:
-            pids_out = int(cfg.get("pids_limit"))
-        except (TypeError, ValueError) as e:
-            raise ValueError("pids_limit must be a positive integer") from e
-        if pids_out <= 0:
-            raise ValueError("pids_limit must be a positive integer")
+        raw = cfg.get("pids_limit")
+        if raw is None:
+            pids_out = None
+        else:
+            try:
+                pids_out = int(raw)
+            except (TypeError, ValueError) as e:
+                raise ValueError("pids_limit must be a positive integer") from e
+            if pids_out <= 0:
+                pids_out = None
 
     return cpu_out, mem_out, pids_out
 
