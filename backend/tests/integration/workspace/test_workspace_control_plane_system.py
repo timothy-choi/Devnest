@@ -37,6 +37,7 @@ from app.services.workspace_service.models import (
     WorkspaceRuntimeHealthStatus,
     WorkspaceStatus,
 )
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 pytestmark = [
     pytest.mark.integration,
@@ -266,7 +267,7 @@ def test_update_workspace_config_end_to_end(client, db_session: Session) -> None
 
     r_patch = client.patch(
         f"/workspaces/{wid}",
-        json={"runtime": {"image": "nginx:alpine", "env": {"E2E_MARKER": "1"}}},
+        json={"runtime": {"image": WORKSPACE_STUB_HTTP_IMAGE, "env": {"E2E_MARKER": "1"}}},
         headers=_auth_header(token),
     )
     assert r_patch.status_code == status.HTTP_202_ACCEPTED, r_patch.text

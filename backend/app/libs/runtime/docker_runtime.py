@@ -21,6 +21,7 @@ from .errors import (
     NetnsRefError,
 )
 from .interfaces import RuntimeAdapter
+from .workspace_container_policy import WorkspaceContainerSecuritySpec
 from .models import (
     BindMountInfo,
     ContainerInspectionResult,
@@ -447,6 +448,8 @@ class DockerRuntimeAdapter(RuntimeAdapter):
         image: str | None = None,
         cpu_limit: float | None = None,
         memory_limit_bytes: int | None = None,
+        pids_limit: int | None = None,
+        security_spec: WorkspaceContainerSecuritySpec | None = None,
         env: Mapping[str, str] | None = None,
         ports: Sequence[tuple[int, int]] | None = None,
         labels: Mapping[str, str] | None = None,
@@ -534,6 +537,8 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             raise ContainerCreateError("cpu_limit must be positive when set")
         if memory_limit_bytes is not None and memory_limit_bytes <= 0:
             raise ContainerCreateError("memory_limit_bytes must be positive when set")
+        if pids_limit is not None and pids_limit <= 0:
+            raise ContainerCreateError("pids_limit must be positive when set")
 
         resolved_image = _resolve_image(image)
         port_bindings = _port_bindings_from_spec(ports)
@@ -547,6 +552,45 @@ class DockerRuntimeAdapter(RuntimeAdapter):
             hc_kwargs["nano_cpus"] = int(cpu_limit * 1_000_000_000)
         if memory_limit_bytes is not None:
             hc_kwargs["mem_limit"] = int(memory_limit_bytes)
+        if pids_limit is not None:
+            hc_kwargs["pids_limit"] = int(pids_limit)
+        if security_spec is not None:
+            if security_spec.security_opt:
+                hc_kwargs["security_opt"] = list(security_spec.security_opt)
+            if security_spec.cap_drop:
+                hc_kwargs["cap_drop"] = list(security_spec.cap_drop)
+            if security_spec.read_only_rootfs:
+                hc_kwargs["read_only"] = True
+                tmp_existing = hc_kwargs.get("tmpfs")
+                tmp_merged: dict[str, str] = dict(tmp_existing) if isinstance(tmp_existing, dict) else {}
+                tmp_merged.setdefault("/tmp", "rw,nosuid,noexec,size=256m")
+                tmp_merged.setdefault("/run", "rw,nosuid,size=64m")
+                hc_kwargs["tmpfs"] = tmp_merged
+
+        wid_for_log = ""
+        if labels:
+            wid_for_log = str(dict(labels).get("devnest.workspace_id") or "").strip()
+
+        logger.info(
+            "workspace.runtime.limits.applied",
+            extra={
+                "workspace_id": wid_for_log or None,
+                "cpu_limit_cores": cpu_limit,
+                "memory_limit_bytes": memory_limit_bytes,
+                "pids_limit": pids_limit,
+            },
+        )
+        sec_extra: dict[str, object | None] = {
+            "workspace_id": wid_for_log or None,
+            "security_opt": None,
+            "cap_drop": None,
+            "read_only_rootfs": None,
+        }
+        if security_spec is not None:
+            sec_extra["security_opt"] = list(security_spec.security_opt)
+            sec_extra["cap_drop"] = list(security_spec.cap_drop)
+            sec_extra["read_only_rootfs"] = security_spec.read_only_rootfs
+        logger.info("workspace.runtime.security_options.applied", extra=sec_extra)
 
         host_config = self._client.api.create_host_config(**hc_kwargs)
         env_dict = dict(env) if env else {}

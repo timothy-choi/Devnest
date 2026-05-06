@@ -5,7 +5,7 @@ These tests exercise `DockerRuntimeAdapter` against a **real** local Docker engi
 ## Prerequisites
 
 - Docker daemon running and reachable (`docker info` works).
-- Pull access for the test image (default: `nginx:alpine`), or use a locally available image via `DEVNEST_RUNTIME_SYSTEM_IMAGE`.
+- Pull access for the test image (default: `nginxinc/nginx-unprivileged` via `tests/workspace_stub_image.py`), or override with `DEVNEST_RUNTIME_SYSTEM_IMAGE`.
 
 ## Run only runtime system tests
 
@@ -25,7 +25,7 @@ pytest tests/system/runtime/test_docker_runtime_system.py -v
 
 | Variable | Purpose |
 |----------|---------|
-| `DEVNEST_RUNTIME_SYSTEM_IMAGE` | Image used for create/start (default `nginx:alpine`). Must stay up with its default `CMD` when started; the adapter bind-mounts a temp directory to `/home/coder/project`. Tests request host publish via explicit `ports=((0, 8080),)` (ephemeral host port for in-container 8080). |
+| `DEVNEST_RUNTIME_SYSTEM_IMAGE` | Image used for create/start (default from `tests/workspace_stub_image.py`). Must stay up with its default `CMD` when started; the adapter bind-mounts a temp directory to `/home/coder/project`. Tests request host publish via explicit `ports=((0, 8080),)` (ephemeral host port for in-container 8080). |
 
 ## Isolation and cleanup
 

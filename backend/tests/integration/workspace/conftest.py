@@ -17,6 +17,7 @@ import pytest
 from sqlmodel import Session
 
 from app.libs.topology.models import Topology
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 
 @pytest.fixture(scope="session")
@@ -41,7 +42,7 @@ def _workspace_control_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Orchestrator-friendly defaults: no host bridge/veth, lightweight workspace image."""
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE", "1")
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "1")
-    monkeypatch.setenv("WORKSPACE_CONTAINER_IMAGE", "nginx:alpine")
+    monkeypatch.setenv("WORKSPACE_CONTAINER_IMAGE", WORKSPACE_STUB_HTTP_IMAGE)
     # Hermetic placement / execution for parallel CI (xdist): avoid stale env forcing ec2-only or SSM.
     monkeypatch.setenv("DEVNEST_NODE_PROVIDER", "all")
     monkeypatch.delenv("DEVNEST_EXECUTION_MODE", raising=False)

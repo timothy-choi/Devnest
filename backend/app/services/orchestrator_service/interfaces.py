@@ -30,13 +30,15 @@ class OrchestratorService(ABC):
         requested_config_version: int | None = None,
         cpu_limit_cores: float | None = None,
         memory_limit_mib: int | None = None,
+        pids_limit: int | None = None,
         env: dict | None = None,
         features: dict | None = None,
         launch_mode: str | None = None,
     ) -> WorkspaceBringUpResult:
         """Provision or start a workspace runtime.
 
-        ``cpu_limit_cores`` and ``memory_limit_mib`` enforce container resource quotas when set.
+        ``cpu_limit_cores``, ``memory_limit_mib``, and ``pids_limit`` enforce Docker cgroup quotas when set;
+        omitted keys use ``DEVNEST_WORKSPACE_*`` defaults from settings.
         ``env`` injects additional environment variables from ``config_json``.
         ``features`` passes optional feature flags (e.g. ``terminal_enabled``) so the orchestrator
         can configure the runtime accordingly.

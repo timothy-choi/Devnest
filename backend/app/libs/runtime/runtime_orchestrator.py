@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 
 from .errors import ContainerCreateError, ContainerStartError
 from .interfaces import RuntimeAdapter
+from .workspace_container_policy import WorkspaceContainerSecuritySpec
 from .models import (
     ContainerInspectionResult,
     EnsureRunningRuntimeResult,
@@ -119,6 +120,8 @@ def ensure_running_runtime_only(
     image: str | None = None,
     cpu_limit: float | None = None,
     memory_limit_bytes: int | None = None,
+    pids_limit: int | None = None,
+    security_spec: WorkspaceContainerSecuritySpec | None = None,
     env: Mapping[str, str] | None = None,
     ports: Sequence[tuple[int, int]] | None = None,
     labels: Mapping[str, str] | None = None,
@@ -146,6 +149,8 @@ def ensure_running_runtime_only(
         image=image,
         cpu_limit=cpu_limit,
         memory_limit_bytes=memory_limit_bytes,
+        pids_limit=pids_limit,
+        security_spec=security_spec,
         env=env,
         ports=ports,
         labels=labels,

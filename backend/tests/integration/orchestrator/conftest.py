@@ -10,6 +10,7 @@ from sqlmodel import Session
 
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.topology import DbTopologyAdapter
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 
 @pytest.fixture(autouse=True)
@@ -43,9 +44,9 @@ def orchestrator_docker_client():
 @pytest.fixture(scope="session")
 def orchestrator_integration_image(orchestrator_docker_client) -> str:
     """Image for workspace containers; default is lightweight and commonly cached in CI."""
-    image = os.environ.get("DEVNEST_ORCHESTRATOR_INTEGRATION_IMAGE", "nginx:alpine").strip()
+    image = os.environ.get("DEVNEST_ORCHESTRATOR_INTEGRATION_IMAGE", WORKSPACE_STUB_HTTP_IMAGE).strip()
     if not image:
-        image = "nginx:alpine"
+        image = WORKSPACE_STUB_HTTP_IMAGE
     orchestrator_docker_client.images.pull(image)
     return image
 

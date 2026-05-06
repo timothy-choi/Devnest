@@ -29,6 +29,7 @@ capacity appears or the capacity wait timeout is reached.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections.abc import Callable
@@ -584,6 +585,56 @@ def _health_from_probe(probe: bool | None) -> str:
     return WorkspaceRuntimeHealthStatus.UNKNOWN.value
 
 
+def _workspace_job_runtime_overrides_from_config(config_json: dict) -> tuple[float | None, int | None, int | None]:
+    """Parse optional cgroup overrides from ``config_json``; missing keys → ``None`` (orchestrator defaults).
+
+    A key present with ``null``, zero, or non-positive values yields ``None`` for that dimension (no override).
+    Raises ``ValueError`` only when a key is present with an unparseable type.
+    """
+    cfg = config_json or {}
+    cpu_out: float | None = None
+    mem_out: int | None = None
+    pids_out: int | None = None
+
+    if "cpu_limit_cores" in cfg:
+        raw = cfg.get("cpu_limit_cores")
+        if raw is None:
+            cpu_out = None
+        else:
+            try:
+                cpu_out = float(raw)
+            except (TypeError, ValueError) as e:
+                raise ValueError("cpu_limit_cores must be a positive number") from e
+            if not math.isfinite(cpu_out) or cpu_out <= 0:
+                cpu_out = None
+
+    if "memory_limit_mib" in cfg:
+        raw = cfg.get("memory_limit_mib")
+        if raw is None:
+            mem_out = None
+        else:
+            try:
+                mem_out = int(raw)
+            except (TypeError, ValueError) as e:
+                raise ValueError("memory_limit_mib must be a positive integer") from e
+            if mem_out <= 0:
+                mem_out = None
+
+    if "pids_limit" in cfg:
+        raw = cfg.get("pids_limit")
+        if raw is None:
+            pids_out = None
+        else:
+            try:
+                pids_out = int(raw)
+            except (TypeError, ValueError) as e:
+                raise ValueError("pids_limit must be a positive integer") from e
+            if pids_out <= 0:
+                pids_out = None
+
+    return cpu_out, mem_out, pids_out
+
+
 def _get_persisted_container_id(session: Session, workspace_id: int) -> str | None:
     """Return ``WorkspaceRuntime.container_id`` for the given workspace if available."""
     rt = session.exec(
@@ -620,6 +671,10 @@ def _apply_runtime_bringup_like(
     reserved_cpu: float | None = None,
     reserved_memory_mb: int | None = None,
     reserved_disk_mb: int | None = None,
+    applied_cpu_limit_cores: float | None = None,
+    applied_memory_limit_mb: int | None = None,
+    applied_pids_limit: int | None = None,
+    applied_security_options: dict | None = None,
 ) -> None:
     """Persist placement + health snapshot after a successful bring-up / restart / update (running)."""
     rt = _get_or_create_runtime(session, workspace_id)
@@ -638,10 +693,18 @@ def _apply_runtime_bringup_like(
             default_workspace_requested_memory_mb() if reserved_memory_mb is None else reserved_memory_mb
         )
         rt.reserved_disk_mb = int(default_workspace_requested_disk_mb() if reserved_disk_mb is None else reserved_disk_mb)
+        rt.applied_cpu_limit_cores = applied_cpu_limit_cores
+        rt.applied_memory_limit_mb = applied_memory_limit_mb
+        rt.applied_pids_limit = applied_pids_limit
+        rt.applied_security_options = applied_security_options
     else:
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
         rt.reserved_disk_mb = 0
+        rt.applied_cpu_limit_cores = None
+        rt.applied_memory_limit_mb = None
+        rt.applied_pids_limit = None
+        rt.applied_security_options = None
     rt.health_status = _health_from_probe(probe_healthy)
     if probe_healthy is True:
         rt.last_heartbeat_at = ts
@@ -669,6 +732,10 @@ def _sync_runtime_after_failed_bringup(session: Session, workspace_id: int, resu
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
         rt.reserved_disk_mb = 0
+        rt.applied_cpu_limit_cores = None
+        rt.applied_memory_limit_mb = None
+        rt.applied_pids_limit = None
+        rt.applied_security_options = None
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     else:
         rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
@@ -702,6 +769,10 @@ def _sync_runtime_after_bringup_exception(session: Session, workspace_id: int, e
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
         rt.reserved_disk_mb = 0
+        rt.applied_cpu_limit_cores = None
+        rt.applied_memory_limit_mb = None
+        rt.applied_pids_limit = None
+        rt.applied_security_options = None
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     else:
         rt.health_status = WorkspaceRuntimeHealthStatus.CLEANUP_REQUIRED.value
@@ -730,6 +801,10 @@ def _apply_runtime_stop(session: Session, workspace_id: int, result: WorkspaceSt
     rt.reserved_cpu = 0.0
     rt.reserved_memory_mb = 0
     rt.reserved_disk_mb = 0
+    rt.applied_cpu_limit_cores = None
+    rt.applied_memory_limit_mb = None
+    rt.applied_pids_limit = None
+    rt.applied_security_options = None
     rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
     rt.last_heartbeat_at = None
     rt.updated_at = ts
@@ -1159,6 +1234,10 @@ def _finalize_runtime_running_success(
     reserved_cpu: float | None = None,
     reserved_memory_mb: int | None = None,
     reserved_disk_mb: int | None = None,
+    applied_cpu_limit_cores: float | None = None,
+    applied_memory_limit_mb: int | None = None,
+    applied_pids_limit: int | None = None,
+    applied_security_options: dict | None = None,
 ) -> None:
     """
     Shared success path for CREATE/START, RESTART, and UPDATE (restart path): persist runtime,
@@ -1188,6 +1267,10 @@ def _finalize_runtime_running_success(
         reserved_cpu=reserved_cpu,
         reserved_memory_mb=reserved_memory_mb,
         reserved_disk_mb=reserved_disk_mb,
+        applied_cpu_limit_cores=applied_cpu_limit_cores,
+        applied_memory_limit_mb=applied_memory_limit_mb,
+        applied_pids_limit=applied_pids_limit,
+        applied_security_options=applied_security_options,
     )
     _sync_workspace_execution_node_id(session, ws, node_id)
     if job.failure_code == "node_readiness":
@@ -1262,6 +1345,12 @@ def _finalize_bringup_result(
             internal_endpoint=result.internal_endpoint,
             probe_healthy=result.probe_healthy,
             gateway_route_target=result.gateway_route_target,
+            applied_cpu_limit_cores=result.applied_cpu_limit_cores,
+            applied_memory_limit_mb=result.applied_memory_limit_mib,
+            applied_pids_limit=result.applied_pids_limit,
+            applied_security_options=(
+                dict(result.applied_security_options) if result.applied_security_options is not None else None
+            ),
         )
         return
 
@@ -1497,6 +1586,12 @@ def _finalize_restart_result(
             internal_endpoint=result.internal_endpoint,
             probe_healthy=result.probe_healthy,
             gateway_route_target=result.gateway_route_target,
+            applied_cpu_limit_cores=result.applied_cpu_limit_cores,
+            applied_memory_limit_mb=result.applied_memory_limit_mib,
+            applied_pids_limit=result.applied_pids_limit,
+            applied_security_options=(
+                dict(result.applied_security_options) if result.applied_security_options is not None else None
+            ),
         )
         return
 
@@ -1533,6 +1628,12 @@ def _finalize_update_result(
             internal_endpoint=result.internal_endpoint,
             probe_healthy=result.probe_healthy,
             gateway_route_target=result.gateway_route_target,
+            applied_cpu_limit_cores=result.applied_cpu_limit_cores,
+            applied_memory_limit_mb=result.applied_memory_limit_mib,
+            applied_pids_limit=result.applied_pids_limit,
+            applied_security_options=(
+                dict(result.applied_security_options) if result.applied_security_options is not None else None
+            ),
         )
         return
 
@@ -1551,6 +1652,10 @@ def _finalize_update_result(
         rt.reserved_cpu = 0.0
         rt.reserved_memory_mb = 0
         rt.reserved_disk_mb = 0
+        rt.applied_cpu_limit_cores = None
+        rt.applied_memory_limit_mb = None
+        rt.applied_pids_limit = None
+        rt.applied_security_options = None
         rt.health_status = WorkspaceRuntimeHealthStatus.UNKNOWN.value
         rt.last_heartbeat_at = None
         rt.updated_at = ts
@@ -2132,8 +2237,21 @@ def _execute_job_body(
             .order_by(WorkspaceConfig.version.desc())
         ).first()
         _config_json: dict = (_cfg_row.config_json if _cfg_row else None) or {}
-        _cpu_limit = _config_json.get("cpu_limit_cores")
-        _mem_limit = _config_json.get("memory_limit_mib")
+        try:
+            cpu_o, mem_o, pids_o = _workspace_job_runtime_overrides_from_config(_config_json)
+        except ValueError as ve:
+            msg = str(ve)
+            _mark_job_failed(
+                session,
+                job,
+                msg,
+                failure_stage=FailureStage.UNKNOWN.value,
+                failure_code="INVALID_RUNTIME_LIMITS",
+            )
+            ws.status = WorkspaceStatus.ERROR.value
+            _workspace_set_error(ws, "INVALID_RUNTIME_LIMITS", msg)
+            _touch_workspace(session, ws)
+            return
         _env = _config_json.get("env") or {}
         _secret_env = resolve_workspace_runtime_secret_env(session, workspace_id=wid)
         if isinstance(_env, dict):
@@ -2149,8 +2267,9 @@ def _execute_job_body(
                 workspace_id=wid_str,
                 project_storage_key=ws.project_storage_key,
                 requested_config_version=cfg_v,
-                cpu_limit_cores=float(_cpu_limit) if _cpu_limit else None,
-                memory_limit_mib=int(_mem_limit) if _mem_limit else None,
+                cpu_limit_cores=cpu_o,
+                memory_limit_mib=mem_o,
+                pids_limit=pids_o,
                 env=_env,
                 features=_features,
                 launch_mode="new" if jt == WorkspaceJobType.CREATE.value else "resume",

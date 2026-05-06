@@ -21,7 +21,7 @@ import time
 import tarfile
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from app.libs.observability import metrics as devnest_metrics
@@ -64,6 +64,10 @@ from app.services.node_execution_service.workspace_project_dir import (
 )
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.runtime.ssm_docker_runtime import SsmDockerRuntimeAdapter
+from app.libs.runtime.workspace_container_policy import (
+    WorkspaceContainerSecuritySpec,
+    build_workspace_container_security_spec,
+)
 from app.services.gateway_client.workspace_route_upstream import compose_traefik_upstream_target
 from app.services.node_execution_service.ssh_command_runner import SshRemoteCommandRunner
 from app.services.placement_service.runtime_policy import authoritative_container_ref_required
@@ -123,11 +127,68 @@ class _BringUpContext:
     labels: dict[str, str]
 
 
+@dataclass(frozen=True)
+class _AppliedWorkspaceRuntimePolicy:
+    """Effective quotas + security snapshot forwarded to API persistence."""
+
+    cpu_limit_cores: float
+    memory_limit_mib: int
+    pids_limit: int
+    security_spec: WorkspaceContainerSecuritySpec
+
+
 def _sanitize_container_name(workspace_id: str) -> str:
     raw = _CONTAINER_NAME_RE.sub("-", workspace_id.strip())
     if not raw or not (raw[0].isalnum()):
         raw = f"w{raw}" if raw else "workspace"
     return f"devnest-ws-{raw}"[:120]
+
+
+def _resolve_bringup_runtime_limits_triplet(
+    *,
+    cpu_limit_cores: float | None,
+    memory_limit_mib: int | None,
+    pids_limit: int | None,
+) -> tuple[float, int, int]:
+    """Merge caller overrides with ``DEVNEST_WORKSPACE_*`` defaults; validate finite positive numbers."""
+    from app.libs.common.config import get_settings  # noqa: PLC0415
+
+    s = get_settings()
+    try:
+        cpu = float(s.devnest_workspace_cpu_limit if cpu_limit_cores is None else cpu_limit_cores)
+    except (TypeError, ValueError):
+        raise WorkspaceBringUpError("runtime:cpu_limit_cores:invalid") from None
+    try:
+        mem = int(s.devnest_workspace_memory_limit_mb if memory_limit_mib is None else memory_limit_mib)
+    except (TypeError, ValueError):
+        raise WorkspaceBringUpError("runtime:memory_limit_mib:invalid") from None
+    try:
+        pids = int(s.devnest_workspace_pids_limit if pids_limit is None else pids_limit)
+    except (TypeError, ValueError):
+        raise WorkspaceBringUpError("runtime:pids_limit:invalid") from None
+
+    if not math.isfinite(cpu) or cpu <= 0:
+        raise WorkspaceBringUpError("runtime:cpu_limit_cores:must_be_positive_finite")
+    if mem <= 0:
+        raise WorkspaceBringUpError("runtime:memory_limit_mib:must_be_positive")
+    if pids <= 0:
+        raise WorkspaceBringUpError("runtime:pids_limit:must_be_positive")
+    return cpu, mem, pids
+
+
+def _bringup_result_with_applied(
+    r: WorkspaceBringUpResult,
+    applied: _AppliedWorkspaceRuntimePolicy | None,
+) -> WorkspaceBringUpResult:
+    if applied is None:
+        return r
+    return replace(
+        r,
+        applied_cpu_limit_cores=applied.cpu_limit_cores,
+        applied_memory_limit_mib=applied.memory_limit_mib,
+        applied_pids_limit=applied.pids_limit,
+        applied_security_options=dict(applied.security_spec.to_applied_dict()),
+    )
 
 
 def _parse_topology_workspace_id(workspace_id: str) -> int:
@@ -583,6 +644,8 @@ class DefaultOrchestratorService(OrchestratorService):
         *,
         cpu_limit_cores: float | None = None,
         memory_limit_mib: int | None = None,
+        pids_limit: int | None = None,
+        security_spec: WorkspaceContainerSecuritySpec | None = None,
         env: dict | None = None,
     ) -> EnsureRunningRuntimeResult:
         """Run ``ensure_running_runtime_only`` (ensure → start → inspect → netns unless skip-linux-attach).
@@ -704,6 +767,8 @@ class DefaultOrchestratorService(OrchestratorService):
                 ),
                 cpu_limit=cpu_limit_cores,
                 memory_limit_bytes=memory_limit_bytes,
+                pids_limit=pids_limit,
+                security_spec=security_spec,
                 env=merged_env,
                 extra_bind_mounts=cs_extra_mounts if cs_extra_mounts else None,
             )
@@ -1232,6 +1297,7 @@ class DefaultOrchestratorService(OrchestratorService):
         requested_config_version: int | None = None,
         cpu_limit_cores: float | None = None,
         memory_limit_mib: int | None = None,
+        pids_limit: int | None = None,
         env: dict | None = None,
         features: dict | None = None,
         launch_mode: str | None = None,
@@ -1239,7 +1305,8 @@ class DefaultOrchestratorService(OrchestratorService):
         """
         Start workspace container, wire topology attachment, run service probe.
 
-        ``cpu_limit_cores`` and ``memory_limit_mib`` are applied to the container when non-None.
+        ``cpu_limit_cores``, ``memory_limit_mib``, and ``pids_limit`` set Docker cgroup quotas; omitted
+        values use ``DEVNEST_WORKSPACE_*`` defaults from settings.
         ``env`` is merged into the container environment.
         ``features`` carries optional feature flags (reserved; currently informational).
 
@@ -1251,6 +1318,20 @@ class DefaultOrchestratorService(OrchestratorService):
             requested_config_version,
             launch_mode,
         )
+        cpu_eff, mem_eff, pids_eff = _resolve_bringup_runtime_limits_triplet(
+            cpu_limit_cores=cpu_limit_cores,
+            memory_limit_mib=memory_limit_mib,
+            pids_limit=pids_limit,
+        )
+        from app.libs.common.config import get_settings  # noqa: PLC0415
+
+        sec_spec = build_workspace_container_security_spec(get_settings())
+        applied_policy = _AppliedWorkspaceRuntimePolicy(
+            cpu_limit_cores=cpu_eff,
+            memory_limit_mib=mem_eff,
+            pids_limit=pids_eff,
+            security_spec=sec_spec,
+        )
         log_event(
             logger,
             LogEvent.ORCHESTRATOR_BRINGUP_STARTED,
@@ -1258,15 +1339,18 @@ class DefaultOrchestratorService(OrchestratorService):
             requested_config_version=requested_config_version,
             topology_id=self._topology_id,
             node_id=self._node_id,
-            cpu_limit_cores=cpu_limit_cores,
-            memory_limit_mib=memory_limit_mib,
+            cpu_limit_cores=cpu_eff,
+            memory_limit_mib=mem_eff,
+            pids_limit=pids_eff,
         )
         running: EnsureRunningRuntimeResult | None = None
         try:
             running = self._bring_up_start_container(
                 ctx,
-                cpu_limit_cores=cpu_limit_cores,
-                memory_limit_mib=memory_limit_mib,
+                cpu_limit_cores=cpu_eff,
+                memory_limit_mib=mem_eff,
+                pids_limit=pids_eff,
+                security_spec=sec_spec,
                 env=env,
             )
             logger.info(
@@ -1381,7 +1465,7 @@ class DefaultOrchestratorService(OrchestratorService):
                 rollback_succeeded=rb_ok,
                 rollback_issues=_issues_or_none(rb_issues),
             )
-        return result
+        return _bringup_result_with_applied(result, applied_policy)
 
     def _stop_load_inspection(
         self,
@@ -1805,6 +1889,12 @@ class DefaultOrchestratorService(OrchestratorService):
             gateway_route_target=up_res.gateway_route_target,
             probe_healthy=up_res.probe_healthy,
             issues=_issues_or_none(issues),
+            applied_cpu_limit_cores=up_res.applied_cpu_limit_cores,
+            applied_memory_limit_mib=up_res.applied_memory_limit_mib,
+            applied_pids_limit=up_res.applied_pids_limit,
+            applied_security_options=(
+                dict(up_res.applied_security_options) if up_res.applied_security_options is not None else None
+            ),
         )
         logger.info(
             "orchestrator_restart_complete",
@@ -1931,6 +2021,12 @@ class DefaultOrchestratorService(OrchestratorService):
             gateway_route_target=r.gateway_route_target,
             probe_healthy=r.probe_healthy,
             issues=_issues_or_none(issues),
+            applied_cpu_limit_cores=r.applied_cpu_limit_cores,
+            applied_memory_limit_mib=r.applied_memory_limit_mib,
+            applied_pids_limit=r.applied_pids_limit,
+            applied_security_options=(
+                dict(r.applied_security_options) if r.applied_security_options is not None else None
+            ),
         )
         logger.info(
             "orchestrator_update_complete",

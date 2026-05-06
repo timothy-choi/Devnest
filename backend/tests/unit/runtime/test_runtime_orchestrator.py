@@ -64,6 +64,8 @@ def test_skip_netns_resolution_omits_get_container_netns_ref() -> None:
                 image=None,
                 cpu_limit=None,
                 memory_limit_bytes=None,
+                pids_limit=None,
+                security_spec=None,
                 env=None,
                 ports=None,
                 labels=None,

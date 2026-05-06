@@ -16,6 +16,7 @@ from app.services.placement_service.models import (
     ExecutionNodeProviderType,
     ExecutionNodeStatus,
 )
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
 
 
 @pytest.fixture
@@ -55,7 +56,7 @@ def test_orchestrator_factory_ssm_docker_end_to_end(mock_runner_cls, ne_engine) 
         settings = MagicMock()
         settings.devnest_execution_mode = ""
         settings.aws_region = ""
-        settings.workspace_container_image = "nginx:alpine"
+        settings.workspace_container_image = WORKSPACE_STUB_HTTP_IMAGE
         settings.workspace_projects_base = "/var/devnest"
         with patch("app.services.orchestrator_service.app_factory.get_settings", return_value=settings):
             with patch(

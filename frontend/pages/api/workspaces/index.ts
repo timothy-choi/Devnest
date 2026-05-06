@@ -32,6 +32,12 @@ type BackendWorkspaceDetail = {
   restorable_snapshot_count?: number;
   project_data_lifecycle?: "ok" | "unknown" | "restore_required" | "unrecoverable";
   project_data_user_message?: string | null;
+  runtime_quotas?: {
+    cpu_limit_cores: number;
+    memory_limit_mib: number;
+    pids_limit: number;
+    security_options?: Record<string, unknown>;
+  };
 };
 
 function mapDetail(detail: BackendWorkspaceDetail) {
@@ -53,6 +59,14 @@ function mapDetail(detail: BackendWorkspaceDetail) {
     restorableSnapshotCount: detail.restorable_snapshot_count ?? 0,
     projectDataLifecycle: detail.project_data_lifecycle ?? "ok",
     projectDataUserMessage: detail.project_data_user_message ?? null,
+    runtimeQuotas: detail.runtime_quotas
+      ? {
+          cpuLimitCores: detail.runtime_quotas.cpu_limit_cores,
+          memoryLimitMib: detail.runtime_quotas.memory_limit_mib,
+          pidsLimit: detail.runtime_quotas.pids_limit,
+          securityOptions: detail.runtime_quotas.security_options ?? {},
+        }
+      : undefined,
   };
 }
 

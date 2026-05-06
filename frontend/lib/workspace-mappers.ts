@@ -204,5 +204,6 @@ export function toWorkspace(record: WorkspaceRecord): Workspace {
     projectDataLifecycle:
       lifecycle === "restore_required" || lifecycle === "unrecoverable" ? lifecycle : undefined,
     projectDataUserMessage: record.projectDataUserMessage ?? null,
+    runtimeQuotas: record.runtimeQuotas,
   };
 }

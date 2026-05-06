@@ -41,7 +41,15 @@ export type WorkspaceRecord = {
   reopenIssues?: string[];
   restorableSnapshotCount?: number;
   projectDataLifecycle?: "ok" | "unknown" | "restore_required" | "unrecoverable";
+  /** User-facing message when project data / reopen checks require attention. */
   projectDataUserMessage?: string | null;
+  /** Present when the workspace is RUNNING and the control plane recorded applied cgroup quotas. */
+  runtimeQuotas?: {
+    cpuLimitCores: number;
+    memoryLimitMib: number;
+    pidsLimit: number;
+    securityOptions: Record<string, unknown>;
+  };
 };
 
 export type WorkspaceDetail = {

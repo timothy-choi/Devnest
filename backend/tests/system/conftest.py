@@ -18,11 +18,16 @@ from sqlmodel import Session
 from app.libs.runtime.docker_runtime import DockerRuntimeAdapter
 from app.libs.topology.models import Topology
 
+from tests.workspace_stub_image import WORKSPACE_STUB_HTTP_IMAGE
+
 from .isolated_context import IsolatedRuntimeContext
 
 
 def _default_system_image() -> str:
-    return os.environ.get("DEVNEST_RUNTIME_SYSTEM_IMAGE", "nginx:alpine").strip() or "nginx:alpine"
+    return (
+        os.environ.get("DEVNEST_RUNTIME_SYSTEM_IMAGE", WORKSPACE_STUB_HTTP_IMAGE).strip()
+        or WORKSPACE_STUB_HTTP_IMAGE
+    )
 
 
 def _remove_container_force(client: docker.DockerClient, name: str) -> None:
@@ -144,7 +149,7 @@ def _workspace_control_plane_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Orchestrator-friendly defaults: no host bridge/veth, lightweight workspace image."""
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_BRIDGE", "1")
     monkeypatch.setenv("DEVNEST_TOPOLOGY_SKIP_LINUX_ATTACHMENT", "1")
-    monkeypatch.setenv("WORKSPACE_CONTAINER_IMAGE", "nginx:alpine")
+    monkeypatch.setenv("WORKSPACE_CONTAINER_IMAGE", WORKSPACE_STUB_HTTP_IMAGE)
     # Internal workspace IPs are not HTTP-reachable from the API host in this stack (probes are stubbed).
     monkeypatch.setenv("DEVNEST_WORKSPACE_HTTP_PROBE_ENABLED", "false")
     from app.libs.common.config import get_settings

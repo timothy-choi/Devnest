@@ -797,6 +797,80 @@ class TestEnsureContainer:
         hc = mock_client.api.create_host_config.call_args.kwargs
         assert hc["nano_cpus"] == 500_000_000
 
+    def test_create_rejects_non_positive_pids_limit(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+
+        with pytest.raises(ContainerCreateError, match="pids_limit"):
+            adapter.ensure_container(name="ws", workspace_host_path="/w", pids_limit=0)
+
+        mock_client.api.create_container.assert_not_called()
+
+    def test_create_passes_pids_limit_mem_security_host_config(
+        self,
+        adapter: DockerRuntimeAdapter,
+        mock_client: MagicMock,
+    ) -> None:
+        from app.libs.runtime.workspace_container_policy import WorkspaceContainerSecuritySpec
+
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="pq", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-pq":
+                raise docker.errors.NotFound("nope")
+            if container_id == "pqfull":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "pqfull"}
+
+        sec = WorkspaceContainerSecuritySpec(
+            security_opt=("no-new-privileges:true",),
+            cap_drop=("NET_RAW", "SYS_ADMIN"),
+            read_only_rootfs=False,
+        )
+        adapter.ensure_container(
+            name="ws-pq",
+            workspace_host_path="/w",
+            cpu_limit=1.0,
+            memory_limit_bytes=512 * 1024 * 1024,
+            pids_limit=256,
+            security_spec=sec,
+        )
+
+        hc = mock_client.api.create_host_config.call_args.kwargs
+        assert hc["nano_cpus"] == 1_000_000_000
+        assert hc["mem_limit"] == 512 * 1024 * 1024
+        assert hc["pids_limit"] == 256
+        assert hc["security_opt"] == ["no-new-privileges:true"]
+        assert hc["cap_drop"] == ["NET_RAW", "SYS_ADMIN"]
+        assert hc.get("read_only") is not True
+
+    def test_create_read_only_rootfs_adds_tmpfs(self, adapter: DockerRuntimeAdapter, mock_client: MagicMock) -> None:
+        from app.libs.runtime.workspace_container_policy import WorkspaceContainerSecuritySpec
+
+        new_ctr = MagicMock()
+        new_ctr.attrs = _sample_attrs(cid="ro2", status="created", pid=0, ports={})
+
+        def get_side_effect(container_id: str, *a, **kw):
+            if container_id == "ws-ro2":
+                raise docker.errors.NotFound("nope")
+            if container_id == "ro2full":
+                return new_ctr
+            raise AssertionError(container_id)
+
+        mock_client.containers.get.side_effect = get_side_effect
+        mock_client.api.create_container.return_value = {"Id": "ro2full"}
+
+        sec = WorkspaceContainerSecuritySpec(security_opt=(), cap_drop=(), read_only_rootfs=True)
+        adapter.ensure_container(name="ws-ro2", workspace_host_path="/w", security_spec=sec)
+
+        hc = mock_client.api.create_host_config.call_args.kwargs
+        assert hc["read_only"] is True
+        assert "/tmp" in hc["tmpfs"]
+        assert "/run" in hc["tmpfs"]
+
     def test_create_pulls_image_on_image_not_found(
         self,
         adapter: DockerRuntimeAdapter,

@@ -17,8 +17,9 @@ Or by path (skips collection of unrelated modules)::
 
     pytest tests/system/runtime/test_docker_runtime_system.py -v
 
-Image: set ``DEVNEST_RUNTIME_SYSTEM_IMAGE`` to override the default ``nginx:alpine``
-(see ``tests/system/conftest.py``). Tests pass ``ports=((0, WORKSPACE_IDE_CONTAINER_PORT),)``
+Image: set ``DEVNEST_RUNTIME_SYSTEM_IMAGE`` to override the default in ``tests/workspace_stub_image.py``
+(``nginxinc/nginx-unprivileged`` listens on 8080 under default ``cap_drop``; plain ``nginx:alpine`` binds port 80 and exits).
+See ``tests/system/conftest.py``. Tests pass ``ports=((0, WORKSPACE_IDE_CONTAINER_PORT),)``
 so the engine assigns an ephemeral **host** port for the IDE container port (no fixed host 8080).
 
 Coverage checklist: ``ensure_container``, ``start_container``, ``stop_container``, ``restart_container``,
@@ -333,6 +334,8 @@ def test_project_bind_mount_persists_host_and_container_writes(
     docker_client: docker.DockerClient,
 ) -> None:
     ws = isolated_runtime.workspace_host_path
+    # Default stub image (nginx unprivileged) runs as non-root; host dir is pytest-owned 0755.
+    os.chmod(ws, 0o777)
     with open(os.path.join(ws, "seed.txt"), "w", encoding="utf-8") as f:
         f.write("from-host\n")
 
@@ -366,6 +369,8 @@ def test_extra_bind_code_server_paths_persist_on_host(
     try:
         os.makedirs(cfg_h, mode=0o755, exist_ok=False)
         os.makedirs(data_h, mode=0o755, exist_ok=False)
+        os.chmod(cfg_h, 0o777)
+        os.chmod(data_h, 0o777)
 
         ensured = isolated_runtime.adapter.ensure_container(
             name=isolated_runtime.name,

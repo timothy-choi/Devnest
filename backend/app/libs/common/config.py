@@ -863,6 +863,63 @@ class Settings(BaseSettings):
     devnest_workspace_required_disk_mb: int = 4096
     devnest_workspace_required_slots: int = 1
 
+    # Per-workspace Docker cgroup-style limits (defaults apply when config omits overrides).
+    devnest_workspace_cpu_limit: float = Field(
+        default=1.0,
+        gt=0,
+        validation_alias=AliasChoices("DEVNEST_WORKSPACE_CPU_LIMIT", "devnest_workspace_cpu_limit"),
+    )
+    devnest_workspace_memory_limit_mb: int = Field(
+        default=1024,
+        gt=0,
+        validation_alias=AliasChoices(
+            "DEVNEST_WORKSPACE_MEMORY_LIMIT_MB",
+            "devnest_workspace_memory_limit_mb",
+        ),
+    )
+    devnest_workspace_pids_limit: int = Field(
+        default=512,
+        gt=0,
+        validation_alias=AliasChoices("DEVNEST_WORKSPACE_PIDS_LIMIT", "devnest_workspace_pids_limit"),
+    )
+    # Optional container hardening (workspace image must tolerate read-only root when enabled).
+    devnest_workspace_security_no_new_privileges: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "DEVNEST_WORKSPACE_SECURITY_NO_NEW_PRIVILEGES",
+            "devnest_workspace_security_no_new_privileges",
+        ),
+    )
+    devnest_workspace_security_read_only_rootfs: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_WORKSPACE_SECURITY_READ_ONLY_ROOTFS",
+            "devnest_workspace_security_read_only_rootfs",
+        ),
+    )
+    devnest_workspace_security_seccomp_default: bool = Field(
+        default=True,
+        description=(
+            "When True, omit an explicit Docker ``seccomp=`` security-opt so the engine applies its "
+            "default profile. When False, add ``seccomp=unconfined`` (Docker rejects ``seccomp=default``)."
+        ),
+        validation_alias=AliasChoices(
+            "DEVNEST_WORKSPACE_SECURITY_SECCOMP_DEFAULT",
+            "devnest_workspace_security_seccomp_default",
+        ),
+    )
+    # Comma- or whitespace-separated Linux capability names to drop (empty string = none).
+    devnest_workspace_security_cap_drop: str = Field(
+        default=(
+            "AUDIT_WRITE,CHOWN,DAC_OVERRIDE,FOWNER,FSETID,MKNOD,NET_RAW,"
+            "SETFCAP,SETPCAP,NET_BIND_SERVICE,SYS_CHROOT"
+        ),
+        validation_alias=AliasChoices(
+            "DEVNEST_WORKSPACE_SECURITY_CAP_DROP",
+            "devnest_workspace_security_cap_drop",
+        ),
+    )
+
     # Authoritative placement: allow legacy DEVNEST_NODE_ID / DEVNEST_TOPOLOGY_ID resolution in
     # development only. Must remain false in staging/production.
     devnest_allow_runtime_env_fallback: bool = False
