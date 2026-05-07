@@ -168,6 +168,7 @@ jobs:
         run: alembic upgrade head
 
       # Privileged topology tests run under sudo next (topology_linux suite + topology_linux_core).
+      # Includes ``tests/chaos`` (RELIABILITY.md / scripts/chaos guard tests) via ``pytest tests``.
       - name: Run all tests (merge-time + heavy markers; privileged topology in next step)
         env:
           DEVNEST_ENFORCE_TEST_TIMEOUTS: "1"
