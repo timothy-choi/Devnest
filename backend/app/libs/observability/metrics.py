@@ -1,7 +1,14 @@
 """
-Prometheus metrics (MVP). Gauges are refreshed from the DB on each ``/metrics`` scrape.
+Prometheus metrics for DevNest autoscaling, scheduling, and reliability.
 
-TODO: Grafana dashboards, alert rules, histograms for job duration, RED/USE SLOs.
+Gauges are refreshed from the DB on each ``GET /metrics`` scrape (see
+:func:`refresh_gauges_from_db`). Counters and histograms are updated from worker,
+autoscaler, orchestrator, and infrastructure paths.
+
+``devnest_autoscaler_scale_up_total`` / ``devnest_autoscaler_scale_down_total`` are produced by
+the Python client from counter names ``devnest_autoscaler_scale_up`` and
+``devnest_autoscaler_scale_down``; both use the ``provider_type`` label (default ``ec2`` in
+callers).
 """
 
 from __future__ import annotations
@@ -17,6 +24,11 @@ from app.services.workspace_service.models.enums import WorkspaceJobStatus, Work
 
 if TYPE_CHECKING:
     from sqlmodel import Session
+
+
+def _norm_label(value: str | None, *, max_len: int = 64, default: str = "unknown") -> str:
+    s = (value or "").strip() or default
+    return s[:max_len]
 
 JOBS_TOTAL = Counter(
     "devnest_jobs",
@@ -38,7 +50,8 @@ PLACEMENT_FAILURES_TOTAL = Counter(
 
 AUTOSCALER_SCALE_UP_TOTAL = Counter(
     "devnest_autoscaler_scale_up",
-    "EC2 scale-up provisions started by autoscaler",
+    "Autoscaler scale-up provisions started",
+    ["provider_type"],
 )
 
 AUTOSCALER_DECISIONS_TOTAL = Counter(
@@ -55,7 +68,8 @@ AUTOSCALER_PROVISIONS_TOTAL = Counter(
 
 AUTOSCALER_SCALE_DOWN_TOTAL = Counter(
     "devnest_autoscaler_scale_down",
-    "EC2 scale-down operations that invoked terminate",
+    "Autoscaler scale-down operations that invoked EC2 terminate",
+    ["provider_type"],
 )
 
 WORKSPACE_LIFECYCLE_FAILURES_TOTAL = Counter(
@@ -169,6 +183,103 @@ EC2_NODE_STATES = Gauge(
     ["status"],
 )
 
+# --- Production-style names (dashboards / alerts) -------------------------------------------
+
+WORKSPACE_CREATED_TOTAL = Counter(
+    "devnest_workspace_created_total",
+    "Workspace create intents accepted (CREATE job queued)",
+    ["workspace_status", "provider_type"],
+)
+
+WORKSPACE_FAILED_TOTAL = Counter(
+    "devnest_workspace_failed_total",
+    "Workspace jobs that reached terminal FAILED",
+    ["workspace_status", "failure_reason", "node_key", "provider_type"],
+)
+
+WORKSPACE_RETRIED_TOTAL = Counter(
+    "devnest_workspace_retried_total",
+    "Workspace jobs scheduled for retry (backoff / requeue)",
+    ["workspace_status", "failure_reason", "node_key", "provider_type"],
+)
+
+NODE_CLEANUP_TOTAL = Counter(
+    "devnest_node_cleanup_total",
+    "Cleanup / janitor / reconcile actions on execution topology or runtime debt",
+    ["action"],
+)
+
+CHAOS_RECOVERY_TOTAL = Counter(
+    "devnest_chaos_recovery_total",
+    "Successful workspace job completions after at least one prior run attempt (retry recovery)",
+    ["recovery_type", "job_type"],
+)
+
+ACTIVE_WORKSPACES = Gauge(
+    "devnest_active_workspaces",
+    "Workspaces in RUNNING status",
+)
+
+READY_NODES_COUNT = Gauge(
+    "devnest_ready_nodes",
+    "Execution nodes in READY status (all provider types)",
+)
+
+PROVISIONING_NODES_COUNT = Gauge(
+    "devnest_provisioning_nodes",
+    "Execution nodes in PROVISIONING status",
+)
+
+DRAINING_NODES_COUNT = Gauge(
+    "devnest_draining_nodes",
+    "Execution nodes in DRAINING status",
+)
+
+PENDING_WORKSPACE_JOBS = Gauge(
+    "devnest_pending_workspace_jobs",
+    "Workspace jobs waiting in QUEUED status",
+)
+
+NODE_DISK_FREE_MB = Gauge(
+    "devnest_node_disk_free_mb",
+    "Last reported disk free MiB per execution node (heartbeat)",
+    ["node_key", "provider_type"],
+)
+
+NODE_MEMORY_FREE_MB = Gauge(
+    "devnest_node_memory_free_mb",
+    "Last reported memory free MiB per execution node (heartbeat)",
+    ["node_key", "provider_type"],
+)
+
+WORKSPACE_PROVISION_SECONDS = Histogram(
+    "devnest_workspace_provision_seconds",
+    "Wall clock seconds for workspace runtime bring-up in CREATE/START worker paths",
+    ["job_type", "workspace_status", "failure_reason"],
+    buckets=(0.5, 1, 2.5, 5, 10, 20, 40, 60, 120, 300, 600),
+)
+
+NODE_BOOTSTRAP_SECONDS = Histogram(
+    "devnest_node_bootstrap_seconds",
+    "Seconds from EC2 provision timestamp metadata to READY promotion when observed",
+    ["node_key", "provider_type", "readiness"],
+    buckets=(5, 15, 30, 60, 120, 300, 600, 1200, 2400, 3600, 7200),
+)
+
+SCALE_DOWN_SECONDS = Histogram(
+    "devnest_scale_down_seconds",
+    "Wall clock seconds for autoscaler drain + EC2 terminate path",
+    ["node_key", "provider_type"],
+    buckets=(1, 2, 5, 10, 20, 30, 60, 120, 300, 600),
+)
+
+SSM_COMMAND_SECONDS = Histogram(
+    "devnest_ssm_command_seconds",
+    "Latency of SSM RunShellScript commands issued by DevNest",
+    ["command_family"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120),
+)
+
 
 def record_job_queued(job_type: str) -> None:
     JOBS_QUEUED_TOTAL.labels(job_type=job_type or "unknown").inc()
@@ -186,8 +297,9 @@ def record_placement_failure(*, reason: str) -> None:
     PLACEMENT_FAILURES_TOTAL.labels(reason=reason or "unknown").inc()
 
 
-def record_autoscaler_scale_up() -> None:
-    AUTOSCALER_SCALE_UP_TOTAL.inc()
+def record_autoscaler_scale_up(*, provider_type: str | None = None) -> None:
+    pt = _norm_label(provider_type, default="ec2")
+    AUTOSCALER_SCALE_UP_TOTAL.labels(provider_type=pt).inc()
     record_autoscaler_provision(result="success")
 
 
@@ -202,8 +314,9 @@ def record_autoscaler_provision(*, result: str) -> None:
     AUTOSCALER_PROVISIONS_TOTAL.labels(result=(result or "unknown")).inc()
 
 
-def record_autoscaler_scale_down() -> None:
-    AUTOSCALER_SCALE_DOWN_TOTAL.inc()
+def record_autoscaler_scale_down(*, provider_type: str | None = None) -> None:
+    pt = _norm_label(provider_type, default="ec2")
+    AUTOSCALER_SCALE_DOWN_TOTAL.labels(provider_type=pt).inc()
 
 
 def record_gateway_operation(*, operation: str, success: bool) -> None:
@@ -239,7 +352,9 @@ def record_reconcile_lock_acquired() -> None:
 
 
 def record_topology_janitor_action(*, kind: str) -> None:
-    TOPOLOGY_JANITOR_ACTIONS_TOTAL.labels(kind=kind or "unknown").inc()
+    k = kind or "unknown"
+    TOPOLOGY_JANITOR_ACTIONS_TOTAL.labels(kind=k).inc()
+    NODE_CLEANUP_TOTAL.labels(action=f"topology_janitor:{k}").inc()
 
 
 def record_cleanup_task_enqueued(*, scope: str) -> None:
@@ -247,7 +362,11 @@ def record_cleanup_task_enqueued(*, scope: str) -> None:
 
 
 def record_cleanup_task_attempt(*, scope: str, result: str) -> None:
-    CLEANUP_TASK_ATTEMPT_TOTAL.labels(scope=scope or "unknown", result=result or "unknown").inc()
+    sc = scope or "unknown"
+    res = result or "unknown"
+    CLEANUP_TASK_ATTEMPT_TOTAL.labels(scope=sc, result=res).inc()
+    if res == "succeeded":
+        NODE_CLEANUP_TOTAL.labels(action=f"cleanup_task:{sc}").inc()
 
 
 def record_internal_auth_failure(*, scope: str) -> None:
@@ -268,11 +387,114 @@ def record_workspace_snapshot_operation(*, operation: str, result: str) -> None:
     ).inc()
 
 
-def observe_workspace_provisioning_duration(*, job_type: str, result: str, duration_seconds: float) -> None:
+def observe_workspace_provisioning_duration(
+    *,
+    job_type: str,
+    result: str,
+    duration_seconds: float,
+    workspace_status: str | None = None,
+    failure_reason: str | None = None,
+) -> None:
+    jt = job_type or "unknown"
+    res = result or "unknown"
+    ws_st = _norm_label(workspace_status)
+    fr = _norm_label(failure_reason, default="none") if res != "success" else "none"
     WORKSPACE_PROVISIONING_DURATION_SECONDS.labels(
-        job_type=job_type or "unknown",
-        result=result or "unknown",
+        job_type=jt,
+        result=res,
     ).observe(max(0.0, float(duration_seconds)))
+    WORKSPACE_PROVISION_SECONDS.labels(
+        job_type=jt,
+        workspace_status=ws_st,
+        failure_reason=fr,
+    ).observe(max(0.0, float(duration_seconds)))
+
+
+def record_workspace_created(
+    *,
+    workspace_status: str | None = None,
+    provider_type: str | None = None,
+) -> None:
+    WORKSPACE_CREATED_TOTAL.labels(
+        workspace_status=_norm_label(workspace_status, default="pending"),
+        provider_type=_norm_label(provider_type, default="unknown"),
+    ).inc()
+
+
+def record_workspace_failed(
+    *,
+    workspace_status: str | None = None,
+    failure_reason: str | None = None,
+    node_key: str | None = None,
+    provider_type: str | None = None,
+) -> None:
+    WORKSPACE_FAILED_TOTAL.labels(
+        workspace_status=_norm_label(workspace_status),
+        failure_reason=_norm_label(failure_reason),
+        node_key=_norm_label(node_key),
+        provider_type=_norm_label(provider_type),
+    ).inc()
+
+
+def record_workspace_retried(
+    *,
+    workspace_status: str | None = None,
+    failure_reason: str | None = None,
+    node_key: str | None = None,
+    provider_type: str | None = None,
+) -> None:
+    WORKSPACE_RETRIED_TOTAL.labels(
+        workspace_status=_norm_label(workspace_status),
+        failure_reason=_norm_label(failure_reason),
+        node_key=_norm_label(node_key),
+        provider_type=_norm_label(provider_type),
+    ).inc()
+
+
+def record_chaos_recovery(*, job_type: str | None = None, recovery_type: str | None = None) -> None:
+    CHAOS_RECOVERY_TOTAL.labels(
+        recovery_type=_norm_label(recovery_type, default="retry_success"),
+        job_type=_norm_label(job_type),
+    ).inc()
+
+
+def observe_node_bootstrap_seconds(
+    *,
+    duration_seconds: float,
+    node_key: str | None = None,
+    provider_type: str | None = None,
+    readiness: str | None = None,
+) -> None:
+    NODE_BOOTSTRAP_SECONDS.labels(
+        node_key=_norm_label(node_key),
+        provider_type=_norm_label(provider_type, default="ec2"),
+        readiness=_norm_label(readiness, default="ready"),
+    ).observe(max(0.0, float(duration_seconds)))
+
+
+def observe_scale_down_seconds(
+    *,
+    duration_seconds: float,
+    node_key: str | None = None,
+    provider_type: str | None = None,
+) -> None:
+    SCALE_DOWN_SECONDS.labels(
+        node_key=_norm_label(node_key),
+        provider_type=_norm_label(provider_type, default="ec2"),
+    ).observe(max(0.0, float(duration_seconds)))
+
+
+def observe_ssm_command_seconds(*, duration_seconds: float, command_family: str | None = None) -> None:
+    SSM_COMMAND_SECONDS.labels(command_family=_norm_label(command_family, default="shell")).observe(
+        max(0.0, float(duration_seconds))
+    )
+
+
+def record_node_cleanup(*, action: str, amount: float = 1.0) -> None:
+    amt = max(0.0, float(amount))
+    if amt <= 0:
+        return
+    NODE_CLEANUP_TOTAL.labels(action=_norm_label(action)).inc(amt)
 
 
 def refresh_gauges_from_db(session: Session) -> None:
@@ -287,6 +509,39 @@ def refresh_gauges_from_db(session: Session) -> None:
     raw = session.exec(q_stmt).one()
     qn = int(raw[0] if isinstance(raw, tuple) else raw)
     QUEUE_DEPTH.set(qn)
+    PENDING_WORKSPACE_JOBS.set(qn)
+
+    active_stmt = (
+        select(func.count())
+        .select_from(Workspace)
+        .where(Workspace.status == WorkspaceStatus.RUNNING.value)
+    )
+    aw_raw = session.exec(active_stmt).one()
+    ACTIVE_WORKSPACES.set(int(aw_raw[0] if isinstance(aw_raw, tuple) else aw_raw))
+
+    ready_stmt = (
+        select(func.count())
+        .select_from(ExecutionNode)
+        .where(ExecutionNode.status == ExecutionNodeStatus.READY.value)
+    )
+    r_raw = session.exec(ready_stmt).one()
+    READY_NODES_COUNT.set(int(r_raw[0] if isinstance(r_raw, tuple) else r_raw))
+
+    prov_stmt = (
+        select(func.count())
+        .select_from(ExecutionNode)
+        .where(ExecutionNode.status == ExecutionNodeStatus.PROVISIONING.value)
+    )
+    p_raw = session.exec(prov_stmt).one()
+    PROVISIONING_NODES_COUNT.set(int(p_raw[0] if isinstance(p_raw, tuple) else p_raw))
+
+    drain_stmt = (
+        select(func.count())
+        .select_from(ExecutionNode)
+        .where(ExecutionNode.status == ExecutionNodeStatus.DRAINING.value)
+    )
+    d_raw = session.exec(drain_stmt).one()
+    DRAINING_NODES_COUNT.set(int(d_raw[0] if isinstance(d_raw, tuple) else d_raw))
 
     for s in WorkspaceStatus:
         WORKSPACE_STATES.labels(status=s.value).set(0)
@@ -328,6 +583,20 @@ def refresh_gauges_from_db(session: Session) -> None:
         st, cnt = row[0], row[1]
         if st:
             EC2_NODE_STATES.labels(status=str(st)).set(int(cnt))
+
+    nodes_stmt = select(ExecutionNode)
+    for node in session.exec(nodes_stmt).all():
+        nk = _norm_label(getattr(node, "node_key", None), default="unknown")
+        pt = _norm_label(
+            getattr(node, "provider_type", None),
+            default="unknown",
+        )
+        disk_mb = getattr(node, "disk_free_mb", None)
+        mem_mb = getattr(node, "memory_free_mb", None)
+        if disk_mb is not None:
+            NODE_DISK_FREE_MB.labels(node_key=nk, provider_type=pt).set(float(disk_mb))
+        if mem_mb is not None:
+            NODE_MEMORY_FREE_MB.labels(node_key=nk, provider_type=pt).set(float(mem_mb))
 
 
 def metrics_response_body() -> tuple[bytes, str]:

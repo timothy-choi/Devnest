@@ -10,6 +10,7 @@ TODO: provisioning jobs / SQS, cooldown windows, predictive signals, per-tenant 
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -18,7 +19,11 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 from app.libs.observability.log_events import LogEvent, log_event
-from app.libs.observability.metrics import record_autoscaler_scale_down, record_autoscaler_scale_up
+from app.libs.observability.metrics import (
+    observe_scale_down_seconds,
+    record_autoscaler_scale_down,
+    record_autoscaler_scale_up,
+)
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.models import AuditLog
 from app.services.audit_service.service import record_audit
@@ -1643,6 +1648,7 @@ def execute_scale_down(
         )
         return None
 
+    scale_down_started = time.monotonic()
     mark_node_draining(session, node_key=nk)
     session.commit()
 
@@ -1696,7 +1702,12 @@ def execute_scale_down(
         session.commit()
         return None
 
-    record_autoscaler_scale_down()
+    record_autoscaler_scale_down(provider_type=ExecutionNodeProviderType.EC2.value)
+    observe_scale_down_seconds(
+        duration_seconds=time.monotonic() - scale_down_started,
+        node_key=nk,
+        provider_type=ExecutionNodeProviderType.EC2.value,
+    )
     log_event(
         logger,
         LogEvent.AUTOSCALER_SCALE_DOWN_TERMINATED,

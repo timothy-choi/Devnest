@@ -38,6 +38,10 @@ def test_metrics_exposes_devnest_series(client: TestClient) -> None:
     assert "devnest_execution_nodes" in body
     assert "devnest_autoscaler_decisions" in body
     assert "devnest_workspace_provisioning_duration_seconds" in body
+    assert "devnest_workspace_created_total" in body
+    assert "devnest_workspace_failed_total" in body
+    assert "devnest_active_workspaces" in body
+    assert "devnest_ready_nodes" in body
 
 
 def test_correlation_id_round_trip_on_response(client: TestClient) -> None:

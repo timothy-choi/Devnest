@@ -22,6 +22,8 @@ def _run_ec2_orphan_janitor_tick_sync() -> dict:
     )
     from app.services.providers.ec2_provider import build_ec2_client  # noqa: PLC0415
 
+    from app.libs.observability.metrics import record_node_cleanup  # noqa: PLC0415
+
     settings = get_settings()
     engine = get_engine()
     reconciled = 0
@@ -29,8 +31,19 @@ def _run_ec2_orphan_janitor_tick_sync() -> dict:
         with Session(engine) as session:
             reconciled = reconcile_stale_ec2_execution_nodes(session)
             session.commit()
+            if reconciled:
+                record_node_cleanup(action="ec2_stale_execution_node_reconcile", amount=float(reconciled))
     client = build_ec2_client()
     stats = cleanup_devnest_autocleanup_orphans(client, settings)
+    for key, action in (
+        ("volumes_deleted", "ec2_orphan_volume_deleted"),
+        ("enis_deleted", "ec2_orphan_eni_deleted"),
+        ("eips_released", "ec2_orphan_eip_released"),
+        ("security_groups_deleted", "ec2_orphan_security_group_deleted"),
+    ):
+        n = int(stats.get(key) or 0)
+        if n > 0:
+            record_node_cleanup(action=action, amount=float(n))
     return {"reconciled_nodes": reconciled, **stats}
 
 

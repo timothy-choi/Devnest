@@ -862,6 +862,11 @@ def _mark_job_succeeded(session: Session, job: WorkspaceJob) -> None:
     job.failure_code = None
     job.next_attempt_after = None
     session.add(job)
+    if int(job.attempt or 0) >= 2:
+        devnest_metrics.record_chaos_recovery(
+            job_type=job.job_type or "unknown",
+            recovery_type="retry_success",
+        )
     devnest_metrics.record_job_terminal(
         job_type=job.job_type or "unknown",
         status=WorkspaceJobStatus.SUCCEEDED.value,
@@ -907,6 +912,23 @@ def _mark_job_failed(
         devnest_metrics.record_workspace_snapshot_operation(operation="restore", result="failed")
     if job.job_type == WorkspaceJobType.RECONCILE_RUNTIME.value:
         devnest_metrics.record_reconcile_terminal(succeeded=False)
+
+    ws_row = session.get(Workspace, job.workspace_id)
+    ws_st = ws_row.status if ws_row else None
+    nk = "unknown"
+    pt = "unknown"
+    rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == job.workspace_id)).first()
+    if rt and (rt.node_id or "").strip():
+        nk = (rt.node_id or "").strip()
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+        if node and (node.provider_type or "").strip():
+            pt = node.provider_type.strip()
+    devnest_metrics.record_workspace_failed(
+        workspace_status=ws_st,
+        failure_reason=failure_code or failure_stage or "unknown",
+        node_key=nk,
+        provider_type=pt,
+    )
 
 
 def _workspace_clear_errors(ws: Workspace) -> None:
@@ -2279,12 +2301,20 @@ def _execute_job_body(
                 job_type=jt or "unknown",
                 result="exception",
                 duration_seconds=time.monotonic() - _started,
+                workspace_status=ws.status,
+                failure_reason="exception",
             )
             raise
+        prov_fr = None
+        if not result.success:
+            issues = result.issues or []
+            prov_fr = ((issues[0] if issues else None) or "bring_up_failed")[:128]
         devnest_metrics.observe_workspace_provisioning_duration(
             job_type=jt or "unknown",
             result="succeeded" if result.success else "failed",
             duration_seconds=time.monotonic() - _started,
+            workspace_status=ws.status,
+            failure_reason=prov_fr,
         )
         _finalize_bringup_result(session, ws, job, result, config_version=cfg_v)
         return

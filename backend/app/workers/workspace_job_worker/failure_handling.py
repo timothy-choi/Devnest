@@ -6,22 +6,45 @@ import logging
 import random
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
 
 from sqlalchemy import and_, or_
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.libs.observability.metrics import record_workspace_retried
 from app.services.placement_service.errors import NoSchedulableNodeError
+from app.services.placement_service.models import ExecutionNode
+from app.services.workspace_service.models import Workspace, WorkspaceJob, WorkspaceRuntime
 from app.services.workspace_service.models.enums import FailureStage, WorkspaceJobStatus, WorkspaceJobType
-
-if TYPE_CHECKING:
-    from app.services.workspace_service.models import WorkspaceJob
 
 logger = logging.getLogger(__name__)
 
 # User-facing / operator-facing text for capacity wait (API + worker retry); not a terminal error.
 WORKSPACE_CAPACITY_PENDING_LAST_ERROR = "Waiting for execution capacity"
+
+
+def _emit_workspace_retried_metric(
+    session: Session,
+    job: WorkspaceJob,
+    *,
+    failure_reason: str | None,
+) -> None:
+    ws_row = session.get(Workspace, job.workspace_id)
+    ws_st = ws_row.status if ws_row else None
+    nk = "unknown"
+    pt = "unknown"
+    rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == job.workspace_id)).first()
+    if rt and (rt.node_id or "").strip():
+        nk = (rt.node_id or "").strip()
+        node = session.exec(select(ExecutionNode).where(ExecutionNode.node_key == nk)).first()
+        if node and (node.provider_type or "").strip():
+            pt = node.provider_type.strip()
+    record_workspace_retried(
+        workspace_status=ws_st,
+        failure_reason=failure_reason or job.failure_code,
+        node_key=nk,
+        provider_type=pt,
+    )
 
 
 def utc_now() -> datetime:
@@ -129,6 +152,7 @@ def try_schedule_workspace_job_retry(
             "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
         },
     )
+    _emit_workspace_retried_metric(session, job, failure_reason=failure_code or stage.value)
     return True
 
 
@@ -204,6 +228,7 @@ def try_schedule_capacity_retry(
             "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
         },
     )
+    _emit_workspace_retried_metric(session, job, failure_reason="no_schedulable_node")
     return True
 
 
@@ -237,6 +262,7 @@ def try_schedule_node_readiness_retry(
             "next_attempt_after": job.next_attempt_after.isoformat() if job.next_attempt_after else None,
         },
     )
+    _emit_workspace_retried_metric(session, job, failure_reason="node_readiness")
     return True
 
 
