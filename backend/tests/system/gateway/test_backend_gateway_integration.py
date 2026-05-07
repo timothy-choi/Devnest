@@ -15,6 +15,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, select
 
+from app.libs.common.config import get_settings
+from app.libs.routing.workspace_routing import build_workspace_url
+from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.models import (
     Workspace,
     WorkspaceJob,
@@ -104,14 +107,17 @@ def test_access_and_attach_return_public_host_and_gateway_url(
     helpers.process_job(client, jid)
     ws = db_session.get(Workspace, wid)
     assert ws is not None
+    owner = db_session.get(UserAuth, uid)
+    assert owner is not None
     expected_host = ws.public_host
     assert expected_host
+    expected_gateway_url = build_workspace_url(user=owner, workspace=ws, settings=get_settings())
 
     r_att = client.post(f"/workspaces/attach/{wid}", headers=helpers.auth_header(token))
     assert r_att.status_code == status.HTTP_200_OK, r_att.text
     att = r_att.json()
     assert att["public_host"] == expected_host
-    assert att["gateway_url"] == f"http://{expected_host}/"
+    assert att["gateway_url"] == expected_gateway_url
     ws_tok = att["session_token"]
 
     r_acc = client.get(
@@ -121,7 +127,7 @@ def test_access_and_attach_return_public_host_and_gateway_url(
     assert r_acc.status_code == status.HTTP_200_OK, r_acc.text
     acc = r_acc.json()
     assert acc["public_host"] == expected_host
-    assert acc["gateway_url"] == f"http://{expected_host}/"
+    assert acc["gateway_url"] == expected_gateway_url
 
 
 def test_workspace_job_events_persist_after_running_with_gateway(
