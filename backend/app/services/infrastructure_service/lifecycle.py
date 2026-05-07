@@ -33,6 +33,7 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.observability.metrics import observe_node_bootstrap_seconds
 from app.services.placement_service import get_node
 from app.services.placement_service.bootstrap import system_default_topology_id
 from app.services.placement_service.constants import (
@@ -999,6 +1000,25 @@ def promote_ec2_node_if_heartbeat_ready(
     )
     session.add(row)
     session.flush()
+
+    ec2_meta = dict(row.metadata_json or {}).get("ec2") or {}
+    prov_raw = ec2_meta.get("provisioned_at")
+    if prov_raw:
+        try:
+            s = str(prov_raw).strip().replace("Z", "+00:00")
+            prov_dt = datetime.fromisoformat(s)
+            if prov_dt.tzinfo is None:
+                prov_dt = prov_dt.replace(tzinfo=timezone.utc)
+            delta_s = max(0.0, (now - prov_dt.astimezone(timezone.utc)).total_seconds())
+            observe_node_bootstrap_seconds(
+                duration_seconds=delta_s,
+                node_key=row.node_key,
+                provider_type=ExecutionNodeProviderType.EC2.value,
+                readiness=readiness,
+            )
+        except (TypeError, ValueError):
+            pass
+
     log_event(
         logger,
         LogEvent.EC2_NODE_READY,

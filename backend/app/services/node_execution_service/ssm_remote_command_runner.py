@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import shlex
+import time
 
 from botocore.client import BaseClient
 
+from app.libs.observability.metrics import observe_ssm_command_seconds
 from app.libs.topology.system.command_runner import CommandRunner
 
 from .errors import SsmExecutionError
@@ -36,6 +38,9 @@ class SsmRemoteCommandRunner(CommandRunner):
             raise ValueError("cmd must be a non-empty list of strings")
         inner = shlex.join(str(x) for x in cmd)
         script = f"set -euo pipefail && {inner}"
+        joined = " ".join(str(x).lower() for x in cmd)
+        fam = "docker" if "docker" in joined else "shell"
+        t0 = time.monotonic()
         try:
             stdout, _stderr = send_run_shell_script(
                 self._ssm,
@@ -44,6 +49,8 @@ class SsmRemoteCommandRunner(CommandRunner):
                 comment="DevNest-runner",
             )
         except SsmExecutionError as e:
+            observe_ssm_command_seconds(duration_seconds=time.monotonic() - t0, command_family=fam)
             pretty = shlex.join(str(x) for x in cmd)
             raise RuntimeError(f"ssm remote command failed: {pretty}\n{e}") from e
+        observe_ssm_command_seconds(duration_seconds=time.monotonic() - t0, command_family=fam)
         return stdout or ""

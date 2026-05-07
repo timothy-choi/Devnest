@@ -16,7 +16,7 @@ from sqlmodel import Session, select
 
 from app.libs.observability.correlation import generate_correlation_id
 from app.libs.observability.log_events import LogEvent, log_event
-from app.libs.observability.metrics import record_job_queued
+from app.libs.observability.metrics import record_job_queued, record_workspace_created
 
 logger = logging.getLogger(__name__)
 
@@ -1448,6 +1448,7 @@ def create_workspace(
     session.flush()
 
     record_job_queued(job_type=WorkspaceJobType.CREATE.value)
+    record_workspace_created(workspace_status=ws.status, provider_type="unknown")
     assert job.workspace_job_id is not None
     assert ws.workspace_id is not None
     log_event(
@@ -1659,6 +1660,10 @@ def create_operator_pinned_test_workspace(
     session.flush()
 
     record_job_queued(job_type=WorkspaceJobType.CREATE.value)
+    record_workspace_created(
+        workspace_status=ws.status,
+        provider_type=(chosen.provider_type or "unknown"),
+    )
     assert job.workspace_job_id is not None
     assert ws.workspace_id is not None
     log_event(

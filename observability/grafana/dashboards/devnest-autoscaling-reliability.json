@@ -1,0 +1,282 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(devnest_autoscaler_scale_up_total[5m]))",
+          "legendFormat": "scale up / s",
+          "refId": "A"
+        }
+      ],
+      "title": "Scale-up rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "id": 11,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(devnest_autoscaler_scale_down_total[5m]))",
+          "legendFormat": "scale down / s",
+          "refId": "A"
+        }
+      ],
+      "title": "Scale-down rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {"group": "A", "mode": "none"}
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 12,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (status, provider_type) (devnest_execution_nodes)",
+          "legendFormat": "{{status}} / {{provider_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Execution nodes by status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never"},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "id": 13,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(devnest_workspace_provision_seconds_bucket[5m])))",
+          "legendFormat": "p50 provision",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(devnest_workspace_provision_seconds_bucket[5m])))",
+          "legendFormat": "p95 provision",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(devnest_workspace_provisioning_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 legacy histogram",
+          "refId": "C"
+        }
+      ],
+      "title": "Workspace provisioning latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never"},
+          "unit": "mbytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 14,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "expr": "devnest_node_disk_free_mb",
+          "legendFormat": "disk {{node_key}}",
+          "refId": "A"
+        },
+        {
+          "expr": "devnest_node_memory_free_mb",
+          "legendFormat": "mem {{node_key}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Disk / memory free per node",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1, "showPoints": "never"},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "id": 15,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (failure_reason) (rate(devnest_workspace_failed_total[5m]))",
+          "legendFormat": "failed: {{failure_reason}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (failure_reason) (rate(devnest_workspace_retried_total[5m]))",
+          "legendFormat": "retried: {{failure_reason}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(devnest_chaos_recovery_total[5m]))",
+          "legendFormat": "chaos recovery",
+          "refId": "C"
+        }
+      ],
+      "title": "Failures, retries, chaos recovery",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"drawStyle": "line", "fillOpacity": 20, "lineWidth": 2, "showPoints": "never"},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 16,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "expr": "sum by (action) (rate(devnest_node_cleanup_total[5m]))",
+          "legendFormat": "{{action}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (kind) (rate(devnest_topology_janitor_actions_total[5m]))",
+          "legendFormat": "topology {{kind}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Cleanup / janitor actions",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "devnest-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 20},
+      "id": 17,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "none"}
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(devnest_scale_down_seconds_bucket[5m])))",
+          "legendFormat": "p95 scale-down",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(devnest_node_bootstrap_seconds_bucket[5m])))",
+          "legendFormat": "p95 node bootstrap",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(devnest_ssm_command_seconds_bucket[5m])))",
+          "legendFormat": "p95 SSM command",
+          "refId": "C"
+        }
+      ],
+      "title": "Scale-down, bootstrap, SSM latency (p95)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["devnest", "autoscaler", "reliability"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "DevNest Autoscaling & Reliability",
+  "uid": "devnest-autoscaling-reliability",
+  "version": 1,
+  "weekStart": ""
+}
