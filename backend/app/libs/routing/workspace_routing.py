@@ -1,6 +1,6 @@
-"""Multi-tenant workspace URLs: ``https://<user-subdomain>.<base>/workspaces/<slug>``.
+"""Multi-tenant workspace URLs: ``https://<route_subdomain>.<public_base>/workspaces/<slug>``.
 
-Legacy routing (``ws-<id>.<base>``) remains when ``DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED`` is false.
+Legacy routing (``ws-<id>.<base>``) remains when tenant routing is off (see ``tenant_workspace_urls_enabled``).
 """
 
 from __future__ import annotations
@@ -45,6 +45,34 @@ def effective_public_scheme(settings: Settings) -> str:
     return (settings.devnest_gateway_public_scheme or "http").strip().lower().rstrip(":")
 
 
+def tenant_workspace_urls_enabled(settings: Settings) -> bool:
+    """True when browser-facing URLs use per-user host + ``/workspaces/<slug>``."""
+    raw = getattr(settings, "devnest_workspace_domain_mode", "") or ""
+    mode = raw.strip().lower() if isinstance(raw, str) else ""
+    if mode == "legacy":
+        return False
+    if mode == "tenant":
+        return True
+    return bool(settings.devnest_tenant_subdomain_routing_enabled)
+
+
+def effective_browser_port(settings: Settings) -> int:
+    """Port segment for user-facing workspace URLs (not route-admin / Traefik debug URLs)."""
+    raw = getattr(settings, "devnest_public_port", 0)
+    try:
+        explicit = int(raw or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        return explicit
+    if tenant_workspace_urls_enabled(settings):
+        return 0
+    try:
+        return int(settings.devnest_gateway_public_port or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def gateway_public_host_with_port(host: str, scheme: str, port: int) -> str:
     if port <= 0:
         return host
@@ -62,12 +90,14 @@ def build_workspace_url(*, user: UserAuth, workspace: Workspace, settings: Setti
 
     s = settings or get_settings()
     scheme = effective_public_scheme(s)
-    port = int(s.devnest_gateway_public_port or 0)
+    port = effective_browser_port(s)
     base_dom = effective_public_base_domain(s)
 
-    if s.devnest_tenant_subdomain_routing_enabled and (user.route_subdomain_slug or "").strip():
-        sub = (user.route_subdomain_slug or "").strip().lower()
-        slug = (workspace.url_slug or "").strip().lower()
+    tenant_on = tenant_workspace_urls_enabled(s)
+    sub = (user.route_subdomain_slug or "").strip().lower()
+    slug = (workspace.url_slug or "").strip().lower()
+
+    if tenant_on and sub and slug:
         host = gateway_public_host_with_port(f"{sub}.{base_dom}", scheme, port)
         url = f"{scheme}://{host}/workspaces/{slug}"
         _logger.info(
@@ -83,6 +113,17 @@ def build_workspace_url(*, user: UserAuth, workspace: Workspace, settings: Setti
         )
         return url
 
+    if tenant_on and not (sub and slug):
+        _logger.warning(
+            "routing.tenant_url_incomplete_fallback_legacy",
+            extra={
+                "workspace_id": workspace.workspace_id,
+                "owner_user_id": workspace.owner_user_id,
+                "has_route_subdomain": bool(sub),
+                "has_url_slug": bool(slug),
+            },
+        )
+
     # Legacy: single-host per workspace (ws-<id>....)
     explicit = (workspace.public_host or "").strip()
     if explicit:
@@ -93,7 +134,7 @@ def build_workspace_url(*, user: UserAuth, workspace: Workspace, settings: Setti
         host = gateway_public_host_with_port(f"ws-{wid}.{dom}", scheme, port)
     url = f"{scheme}://{host}/"
     _logger.info(
-        "routing.workspace_url_generated",
+        "routing.legacy_url_generated",
         extra={
             "workspace_id": workspace.workspace_id,
             "owner_user_id": workspace.owner_user_id,

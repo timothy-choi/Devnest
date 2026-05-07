@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from app.libs.db.database import get_db
+from app.libs.common.config import get_settings
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.api.routers.workspaces import router
@@ -156,6 +158,112 @@ def test_get_access_403_without_workspace_session_header(workspace_unit_engine, 
 
     assert res.status_code == 403
     assert "session token" in res.json()["detail"].lower()
+
+
+def test_post_attach_tenant_domain_mode_splits_public_and_internal_gateway_urls(
+    workspace_unit_engine,
+    owner_user_id: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tenant browser URL uses public base domain; gateway_url stays ws-* on DEVNEST_BASE_DOMAIN (+ gateway port)."""
+
+    class _FakeGatewayClient:
+        def __init__(self) -> None:
+            self.routes: list[dict] = []
+            self.register_calls: list[tuple[str, str, str]] = []
+
+        def get_registered_routes(self) -> list[dict]:
+            return list(self.routes)
+
+        def register_route(
+            self,
+            workspace_id: str,
+            internal_endpoint: str,
+            public_host: str,
+            **kwargs: object,
+        ) -> None:
+            self.register_calls.append((workspace_id, internal_endpoint, public_host))
+            self.routes.append(
+                {
+                    "workspace_id": workspace_id,
+                    "target": f"http://{internal_endpoint}",
+                    "public_host": public_host,
+                    "path_prefix": kwargs.get("path_prefix") or "",
+                }
+            )
+
+    fake_client = _FakeGatewayClient()
+    monkeypatch.setenv("DEVNEST_GATEWAY_ENABLED", "true")
+    monkeypatch.setenv("DEVNEST_WORKSPACE_DOMAIN_MODE", "tenant")
+    monkeypatch.setenv("DEVNEST_PUBLIC_BASE_DOMAIN", "devnest.example.com")
+    monkeypatch.setenv("DEVNEST_PUBLIC_SCHEME", "https")
+    monkeypatch.setenv("DEVNEST_BASE_DOMAIN", "ws-edge.sslip.io")
+    monkeypatch.setenv("DEVNEST_GATEWAY_PUBLIC_SCHEME", "http")
+    monkeypatch.setenv("DEVNEST_GATEWAY_PUBLIC_PORT", "9081")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.services.workspace_service.services.workspace_intent_service.DevnestGatewayClient.from_settings",
+        lambda _settings: fake_client,
+    )
+
+    try:
+        with Session(workspace_unit_engine) as session:
+            u = session.get(UserAuth, owner_user_id)
+            assert u is not None
+            u.route_subdomain_slug = "tim"
+            session.add(u)
+            now = datetime.now(timezone.utc)
+            ws = Workspace(
+                name="Tenant Route Attach",
+                url_slug="my-lab",
+                owner_user_id=owner_user_id,
+                status=WorkspaceStatus.RUNNING.value,
+                is_private=True,
+                endpoint_ref=ENDPOINT_REF,
+                public_host="tim.devnest.example.com",
+                gateway_path_prefix="/workspaces/my-lab",
+                project_storage_key="",
+                active_sessions_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(ws)
+            session.flush()
+            session.add(
+                WorkspaceConfig(workspace_id=ws.workspace_id, version=1, config_json={}),
+            )
+            session.add(
+                WorkspaceRuntime(
+                    workspace_id=ws.workspace_id,
+                    node_id="node-1",
+                    container_id=CONTAINER_ID,
+                    container_state="running",
+                    topology_id=1,
+                    internal_endpoint=INTERNAL_EP,
+                    config_version=1,
+                    health_status=WorkspaceRuntimeHealthStatus.HEALTHY.value,
+                )
+            )
+            session.commit()
+            wid = ws.workspace_id
+            assert wid is not None
+
+        app = _make_app(workspace_unit_engine)
+        app.dependency_overrides[get_current_user] = lambda: _auth_user(owner_user_id)
+
+        with TestClient(app) as client:
+            res = client.post(f"/workspaces/attach/{wid}")
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["accepted"] is True
+        exp_public = "https://tim.devnest.example.com/workspaces/my-lab"
+        assert data["public_url"] == exp_public
+        assert data["workspace_url"] == exp_public
+        assert data["gateway_url"] == f"http://ws-{wid}.ws-edge.sslip.io:9081/"
+        assert fake_client.register_calls == [(str(wid), INTERNAL_EP, "tim.devnest.example.com")]
+    finally:
+        get_settings.cache_clear()
 
 
 def test_attach_not_found_404(workspace_unit_engine, owner_user_id: int) -> None:

@@ -352,9 +352,13 @@ export function useWorkspaces() {
         );
       }
 
-      const gatewayUrl = (attach.gateway_url || "").trim();
-      if (!gatewayUrl) {
-        throw new ApiError(502, "No gateway URL was returned for this workspace.");
+      const openUrl = (
+        (attach.workspace_url || "").trim() ||
+        (attach.public_url || "").trim() ||
+        (attach.gateway_url || "").trim()
+      );
+      if (!openUrl) {
+        throw new ApiError(502, "No workspace URL was returned for this workspace.");
       }
 
       const browserWindow = typeof globalThis !== "undefined" ? globalThis.window : undefined;
@@ -364,11 +368,11 @@ export function useWorkspaces() {
         const origin = apexOrigin || browserWindow.location.origin;
         const dashboardUrl = new URL("/dashboard?workspaceReturn=1", origin).toString();
         browserWindow.history.pushState({ devnestWorkspaceReturn: true }, "", dashboardUrl);
-        browserWindow.location.assign(gatewayUrl);
+        browserWindow.location.assign(openUrl);
         return;
       }
 
-      globalThis.location?.assign(gatewayUrl);
+      globalThis.location?.assign(openUrl);
       return;
     } catch (error) {
       queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);

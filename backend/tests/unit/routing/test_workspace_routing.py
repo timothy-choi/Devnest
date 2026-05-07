@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -52,6 +53,8 @@ def test_build_workspace_url_tenant_mode():
     ws.url_slug = "eventrelay"
     ws.public_host = None
     settings = MagicMock()
+    settings.devnest_workspace_domain_mode = ""
+    settings.devnest_public_port = 0
     settings.devnest_tenant_subdomain_routing_enabled = True
     settings.devnest_gateway_public_port = 0
     settings.devnest_public_base_domain = "devnest.example.com"
@@ -71,6 +74,8 @@ def test_build_workspace_url_legacy_mode():
     ws.url_slug = "x"
     ws.public_host = None
     settings = MagicMock()
+    settings.devnest_workspace_domain_mode = ""
+    settings.devnest_public_port = 0
     settings.devnest_tenant_subdomain_routing_enabled = False
     settings.devnest_gateway_public_port = 0
     settings.devnest_public_base_domain = "devnest.example.com"
@@ -79,6 +84,92 @@ def test_build_workspace_url_legacy_mode():
 
     url = build_workspace_url(user=user, workspace=ws, settings=settings)
     assert url == "https://ws-42.app.devnest.local/"
+
+
+def test_build_workspace_url_domain_mode_tenant_without_legacy_bool():
+    user = MagicMock()
+    user.route_subdomain_slug = "tim"
+    ws = MagicMock()
+    ws.workspace_id = 9
+    ws.owner_user_id = 3
+    ws.url_slug = "eventrelay"
+    ws.public_host = None
+    settings = MagicMock()
+    settings.devnest_workspace_domain_mode = "tenant"
+    settings.devnest_public_port = 0
+    settings.devnest_tenant_subdomain_routing_enabled = False
+    settings.devnest_gateway_public_port = 9081
+    settings.devnest_public_base_domain = "devnest.example.com"
+    settings.devnest_public_scheme = "https"
+    settings.devnest_base_domain = "app.devnest.local"
+
+    url = build_workspace_url(user=user, workspace=ws, settings=settings)
+    assert url == "https://tim.devnest.example.com/workspaces/eventrelay"
+
+
+def test_build_workspace_url_legacy_forced_by_domain_mode():
+    user = MagicMock()
+    user.route_subdomain_slug = "tim"
+    ws = MagicMock()
+    ws.workspace_id = 42
+    ws.owner_user_id = 3
+    ws.url_slug = "should-not-matter"
+    ws.public_host = None
+    settings = MagicMock()
+    settings.devnest_workspace_domain_mode = "legacy"
+    settings.devnest_public_port = 0
+    settings.devnest_tenant_subdomain_routing_enabled = True
+    settings.devnest_gateway_public_port = 0
+    settings.devnest_public_base_domain = "devnest.example.com"
+    settings.devnest_public_scheme = "https"
+    settings.devnest_base_domain = "app.devnest.local"
+
+    url = build_workspace_url(user=user, workspace=ws, settings=settings)
+    assert url == "https://ws-42.app.devnest.local/"
+
+
+def test_build_workspace_url_legacy_emits_legacy_log(caplog):
+    user = MagicMock()
+    user.route_subdomain_slug = "tim"
+    ws = MagicMock()
+    ws.workspace_id = 42
+    ws.owner_user_id = 3
+    ws.url_slug = "x"
+    ws.public_host = None
+    settings = MagicMock()
+    settings.devnest_workspace_domain_mode = "legacy"
+    settings.devnest_public_port = 0
+    settings.devnest_tenant_subdomain_routing_enabled = False
+    settings.devnest_gateway_public_port = 0
+    settings.devnest_public_base_domain = "devnest.example.com"
+    settings.devnest_public_scheme = "https"
+    settings.devnest_base_domain = "app.devnest.local"
+
+    with caplog.at_level(logging.INFO, logger="app.libs.routing.workspace_routing"):
+        build_workspace_url(user=user, workspace=ws, settings=settings)
+    assert any(r.message == "routing.legacy_url_generated" for r in caplog.records)
+
+
+def test_build_workspace_url_tenant_emits_routing_workspace_log(caplog):
+    user = MagicMock()
+    user.route_subdomain_slug = "tim"
+    ws = MagicMock()
+    ws.workspace_id = 9
+    ws.owner_user_id = 3
+    ws.url_slug = "eventrelay"
+    ws.public_host = None
+    settings = MagicMock()
+    settings.devnest_workspace_domain_mode = "tenant"
+    settings.devnest_public_port = 0
+    settings.devnest_tenant_subdomain_routing_enabled = False
+    settings.devnest_gateway_public_port = 9081
+    settings.devnest_public_base_domain = "devnest.example.com"
+    settings.devnest_public_scheme = "https"
+    settings.devnest_base_domain = "app.devnest.local"
+
+    with caplog.at_level(logging.INFO, logger="app.libs.routing.workspace_routing"):
+        build_workspace_url(user=user, workspace=ws, settings=settings)
+    assert any(r.message == "routing.workspace_url_generated" for r in caplog.records)
 
 
 def test_parse_workspace_host():

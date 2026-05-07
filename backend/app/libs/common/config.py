@@ -280,6 +280,21 @@ class Settings(BaseSettings):
             "devnest_tenant_subdomain_routing_enabled",
         ),
     )
+    # Primary switch for browser-facing workspace URLs: ``tenant`` → ``https://<route_subdomain>.<public_base>/workspaces/<slug>``.
+    # ``legacy`` forces per-workspace ``ws-<id>`` hosts. Empty → follow ``DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED`` only.
+    devnest_workspace_domain_mode: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "DEVNEST_WORKSPACE_DOMAIN_MODE",
+            "devnest_workspace_domain_mode",
+        ),
+    )
+    # Optional port for user-facing workspace URLs (443/80 usually omitted). When unset, tenant URLs omit non-default ports;
+    # legacy mode falls back to ``DEVNEST_GATEWAY_PUBLIC_PORT``.
+    devnest_public_port: int = Field(
+        default=0,
+        validation_alias=AliasChoices("DEVNEST_PUBLIC_PORT", "devnest_public_port"),
+    )
 
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""
@@ -577,6 +592,22 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 0
         return max(0, min(n, 65535))
+
+    @field_validator("devnest_public_port", mode="before")
+    @classmethod
+    def _coerce_public_port(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(n, 65535))
+
+    @field_validator("devnest_workspace_domain_mode", mode="before")
+    @classmethod
+    def _normalize_workspace_domain_mode(cls, v):  # noqa: ANN001
+        if v is None:
+            return ""
+        return str(v).strip().lower()
 
     @field_validator("devnest_reconcile_interval_seconds", mode="before")
     @classmethod

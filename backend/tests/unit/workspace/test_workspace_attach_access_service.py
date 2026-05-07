@@ -272,6 +272,8 @@ def test_attach_repairs_missing_gateway_route(workspace_unit_engine, owner_user_
             )
             exp_url = _expected_attach_gateway_url(session, wid, owner_user_id)
         assert out.accepted is True
+        assert out.public_url == exp_url
+        assert out.workspace_url == exp_url
         assert out.gateway_url == exp_url
         assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
     finally:
@@ -333,6 +335,8 @@ def test_attach_waits_until_gateway_route_observable_after_register(
             )
             exp_url = _expected_attach_gateway_url(session, wid, owner_user_id)
         assert out.accepted is True
+        assert out.public_url == exp_url
+        assert out.workspace_url == exp_url
         assert out.gateway_url == exp_url
         assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
         assert fake_client._gets_after_register == 2
@@ -744,6 +748,8 @@ def test_attach_gateway_url_includes_public_port(
                 correlation_id=None,
             )
             exp_url = _expected_attach_gateway_url(session, wid, owner_user_id)
+        assert out.public_url == exp_url
+        assert out.workspace_url == exp_url
         assert out.gateway_url == exp_url
     finally:
         get_settings.cache_clear()

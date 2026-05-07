@@ -77,6 +77,8 @@ export type WorkspaceDetail = {
 
 export type WorkspaceAttachResponse = {
   accepted?: boolean;
+  public_url?: string | null;
+  workspace_url?: string | null;
   gateway_url?: string | null;
   issues?: string[];
   detail?: string;

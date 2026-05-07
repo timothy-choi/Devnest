@@ -18,6 +18,8 @@ type WorkspaceDetailJson = {
 
 type AttachJson = {
   accepted?: boolean;
+  public_url?: string | null;
+  workspace_url?: string | null;
   gateway_url?: string | null;
   issues?: string[];
   detail?: string;
@@ -134,15 +136,20 @@ export default function WorkspaceBySlugPage() {
           return;
         }
 
-        const gatewayUrl = (attach.gateway_url || "").trim();
-        if (gatewayUrl) {
-          window.location.replace(gatewayUrl);
+        const openUrl = (
+          (attach.workspace_url || "").trim() ||
+          (attach.public_url || "").trim() ||
+          (attach.gateway_url || "").trim()
+        );
+        if (openUrl) {
+          window.location.replace(openUrl);
           return;
         }
 
         setMessage(
-          "No gateway URL was returned. Ensure the API has DEVNEST_GATEWAY_ENABLED, a reachable DEVNEST_GATEWAY_URL " +
-            "(route-admin), and DEVNEST_BASE_DOMAIN aligned with Traefik Host rules. If Traefik is published on a " +
+          "No workspace URL was returned. Ensure the API has DEVNEST_GATEWAY_ENABLED, a reachable DEVNEST_GATEWAY_URL " +
+            "(route-admin), and DEVNEST_BASE_DOMAIN aligned with Traefik Host rules. For tenant URLs, set " +
+            "DEVNEST_WORKSPACE_DOMAIN_MODE=tenant and DEVNEST_PUBLIC_BASE_DOMAIN. If Traefik is published on a " +
             "non-default port, set DEVNEST_GATEWAY_PUBLIC_PORT to match (see docker-compose.integration.yml).",
         );
         redirectToDashboard();

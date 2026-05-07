@@ -41,6 +41,7 @@ from app.libs.routing.workspace_routing import (
     log_workspace_access_validated,
     log_workspace_route_failed,
     parse_workspace_host,
+    tenant_workspace_urls_enabled,
 )
 from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.models import Workspace, WorkspaceSession
@@ -109,7 +110,7 @@ def _resolve_workspace_id_from_gateway_request(
     wid = _workspace_id_from_host(forwarded_host, base_legacy)
     if wid is not None:
         return wid
-    if not settings.devnest_tenant_subdomain_routing_enabled:
+    if not tenant_workspace_urls_enabled(settings):
         return None
     base_pub = effective_public_base_domain(settings)
     sub = parse_workspace_host(forwarded_host, base_pub)

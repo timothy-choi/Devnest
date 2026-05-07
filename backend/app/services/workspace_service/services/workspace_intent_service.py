@@ -21,7 +21,9 @@ from app.libs.routing.workspace_routing import (
     allocate_unique_workspace_url_slug,
     build_workspace_url,
     effective_public_base_domain,
+    gateway_public_host_with_port,
     slugify_workspace_name,
+    tenant_workspace_urls_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,7 +150,9 @@ class WorkspaceAccessResult:
     endpoint_ref: str | None
     public_host: str | None
     internal_endpoint: str | None
-    gateway_url: str | None
+    public_url: str | None = None
+    workspace_url: str | None = None
+    gateway_url: str | None = None
     issues: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -167,7 +171,9 @@ class WorkspaceAttachResult:
     endpoint_ref: str | None
     public_host: str | None
     internal_endpoint: str | None
-    gateway_url: str | None
+    public_url: str | None = None
+    workspace_url: str | None = None
+    gateway_url: str | None = None
     issues: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -239,7 +245,7 @@ def _workspace_project_storage_reopen_assessment(
     wid_s = str(int(wid))
     key = (ws.project_storage_key or "").strip() or None
 
-    if settings.devnest_gateway_enabled:
+    if settings.devnest_gateway_enabled and not tenant_workspace_urls_enabled(settings):
         expected = _gateway_unique_public_host(int(wid), settings.devnest_base_domain, project_storage_key=key)
         stored = (ws.public_host or "").strip()
         if stored and stored.lower() != expected.lower():
@@ -477,7 +483,7 @@ def _assign_workspace_gateway_public_identity(
     owner = session.get(UserAuth, owner_user_id)
     if owner is None:
         return
-    if settings.devnest_tenant_subdomain_routing_enabled:
+    if tenant_workspace_urls_enabled(settings):
         sub = (owner.route_subdomain_slug or "").strip().lower()
         slug = (ws.url_slug or "").strip().lower()
         if sub and slug:
@@ -528,21 +534,45 @@ def _gateway_public_host_for_url(host: str, scheme: str, port: int) -> str:
     return f"{host}:{port}"
 
 
-def _derive_gateway_url_v1(session: Session, ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
-    """Public URL clients would use via Traefik when ``DEVNEST_GATEWAY_ENABLED``."""
+def _derive_internal_edge_gateway_url(ws: Workspace, settings) -> str | None:
+    """Traefik/debug URL on ``DEVNEST_BASE_DOMAIN`` (``ws-<id>-…``), independent of tenant browser URLs."""
+    if ws.workspace_id is None:
+        return None
+    scheme = (settings.devnest_gateway_public_scheme or "http").strip().lower().rstrip(":")
+    port = int(settings.devnest_gateway_public_port or 0)
+    key = (ws.project_storage_key or "").strip() or None
+    internal_host = _gateway_unique_public_host(
+        int(ws.workspace_id),
+        settings.devnest_base_domain,
+        project_storage_key=key,
+    )
+    host = gateway_public_host_with_port(internal_host, scheme, port)
+    return f"{scheme}://{host}/"
+
+
+def _workspace_access_urls(
+    session: Session,
+    ws: Workspace,
+    rt: WorkspaceRuntime | None,
+) -> tuple[str | None, str | None, str | None]:
+    """Returns ``(public_url, workspace_url, gateway_url)`` for attach/access when gateway + runtime are ready."""
     from app.libs.common.config import get_settings
 
     settings = get_settings()
     if not settings.devnest_gateway_enabled:
-        return None
+        return None, None, None
     if ws.status != WorkspaceStatus.RUNNING.value:
-        return None
+        return None, None, None
     if rt is None or not (rt.container_id or "").strip():
-        return None
+        return None, None, None
     user = session.get(UserAuth, ws.owner_user_id)
     if user is None:
-        return None
-    return build_workspace_url(user=user, workspace=ws, settings=settings)
+        return None, None, None
+
+    browser = build_workspace_url(user=user, workspace=ws, settings=settings)
+    if tenant_workspace_urls_enabled(settings):
+        return browser, browser, _derive_internal_edge_gateway_url(ws, settings)
+    return browser, browser, browser
 
 
 def _best_effort_enqueue_reconcile_for_access_drift(
@@ -765,6 +795,7 @@ def get_workspace_access(
         session.rollback()
         raise
     issues = _access_issues_for_runtime(rt)
+    pub_u, ws_u, gw_u = _workspace_access_urls(session, ws, rt)
     return WorkspaceAccessResult(
         workspace_id=workspace_id,
         success=True,
@@ -773,7 +804,9 @@ def get_workspace_access(
         endpoint_ref=ws.endpoint_ref,
         public_host=_resolve_public_host_for_gateway_display(ws, rt),
         internal_endpoint=rt.internal_endpoint,
-        gateway_url=_derive_gateway_url_v1(session, ws, rt),
+        public_url=pub_u,
+        workspace_url=ws_u,
+        gateway_url=gw_u,
         issues=issues,
     )
 
@@ -861,6 +894,20 @@ def request_attach_workspace(
     session.refresh(ws)
     session.refresh(row)
     assert row.workspace_session_id is not None
+    pub_u, ws_u, gw_u = _workspace_access_urls(session, ws, rt)
+    from app.libs.common.config import get_settings as _attach_gs  # noqa: PLC0415
+
+    if (pub_u or "").strip():
+        logger.info(
+            "workspace.attach.public_url_selected",
+            extra={
+                "workspace_id": workspace_id,
+                "public_url": pub_u,
+                "workspace_url": ws_u,
+                "gateway_url_internal": gw_u,
+                "tenant_workspace_urls": tenant_workspace_urls_enabled(_attach_gs()),
+            },
+        )
     return WorkspaceAttachResult(
         workspace_id=workspace_id,
         accepted=True,
@@ -873,7 +920,9 @@ def request_attach_workspace(
         endpoint_ref=ws.endpoint_ref,
         public_host=_resolve_public_host_for_gateway_display(ws, rt),
         internal_endpoint=rt.internal_endpoint,
-        gateway_url=_derive_gateway_url_v1(session, ws, rt),
+        public_url=pub_u,
+        workspace_url=ws_u,
+        gateway_url=gw_u,
         issues=issues,
     )
 

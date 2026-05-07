@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlmodel import Session
 
 from app.libs.common.config import get_settings
+from app.libs.routing.workspace_routing import effective_public_base_domain, tenant_workspace_urls_enabled
 
 from app.libs.db.database import get_db, get_engine
 from app.libs.observability.log_events import LogEvent, log_event
@@ -109,6 +110,8 @@ def _access_response(out: workspace_intent_service.WorkspaceAccessResult) -> Wor
         endpoint_ref=out.endpoint_ref,
         public_host=out.public_host,
         internal_endpoint=out.internal_endpoint,
+        public_url=out.public_url,
+        workspace_url=out.workspace_url,
         gateway_url=out.gateway_url,
         issues=list(out.issues),
     )
@@ -127,6 +130,8 @@ def _attach_response(out: workspace_intent_service.WorkspaceAttachResult) -> Wor
         endpoint_ref=out.endpoint_ref,
         public_host=out.public_host,
         internal_endpoint=out.internal_endpoint,
+        public_url=out.public_url,
+        workspace_url=out.workspace_url,
         gateway_url=out.gateway_url,
         issues=list(out.issues),
     )
@@ -459,6 +464,7 @@ def post_workspace_attach(
             workspace_id=workspace_id,
             user_id=uid,
             gateway_url_present=bool((out.gateway_url or "").strip()),
+            public_url_present=bool((out.public_url or out.workspace_url or "").strip()),
             public_host_present=bool((out.public_host or "").strip()),
         )
     resp = JSONResponse(status_code=status.HTTP_200_OK, content=payload.model_dump(mode="json"))
@@ -472,7 +478,12 @@ def post_workspace_attach(
         req_https = request.url.scheme == "https"
         max_age = max(60, int(settings.workspace_session_ttl_seconds))
         tok = out.session_token.strip()
-        dom = (settings.devnest_base_domain or "").strip().strip(".")
+        dom_raw = (
+            effective_public_base_domain(settings)
+            if tenant_workspace_urls_enabled(settings)
+            else (settings.devnest_base_domain or "")
+        )
+        dom = dom_raw.strip().strip(".")
         if dom and "." in dom:
             resp.set_cookie(
                 WORKSPACE_SESSION_COOKIE_NAME,
