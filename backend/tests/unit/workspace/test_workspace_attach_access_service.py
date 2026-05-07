@@ -29,6 +29,7 @@ from app.services.workspace_service.models.enums import (
 )
 from app.services.workspace_service.services import workspace_intent_service
 from app.libs.common.config import get_settings
+from app.libs.routing.workspace_routing import build_workspace_url
 
 ENDPOINT_REF = "node-prod-1:32001"
 INTERNAL_EP = "10.128.0.10:8080"
@@ -44,6 +45,13 @@ def _expected_gateway_public_host(session: Session, wid: int) -> str:
         get_settings().devnest_base_domain,
         project_storage_key=key,
     )
+
+
+def _expected_attach_gateway_url(session: Session, wid: int, owner_user_id: int) -> str:
+    ws = session.get(Workspace, wid)
+    user = session.get(UserAuth, owner_user_id)
+    assert ws is not None and user is not None
+    return build_workspace_url(user=user, workspace=ws, settings=get_settings())
 
 
 def _seed_running_with_runtime(
@@ -262,8 +270,9 @@ def test_attach_repairs_missing_gateway_route(workspace_unit_engine, owner_user_
                 owner_user_id=owner_user_id,
                 requested_by_user_id=owner_user_id,
             )
+            exp_url = _expected_attach_gateway_url(session, wid, owner_user_id)
         assert out.accepted is True
-        assert out.gateway_url == f"http://{exp_host}/"
+        assert out.gateway_url == exp_url
         assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
     finally:
         get_settings.cache_clear()
@@ -316,15 +325,15 @@ def test_attach_waits_until_gateway_route_observable_after_register(
         with Session(workspace_unit_engine) as session:
             wid = _seed_running_with_runtime(session, owner_user_id, active_sessions_count=0)
             exp_host = _expected_gateway_public_host(session, wid)
-        with Session(workspace_unit_engine) as session:
             out = workspace_intent_service.request_attach_workspace(
                 session,
                 workspace_id=wid,
                 owner_user_id=owner_user_id,
                 requested_by_user_id=owner_user_id,
             )
+            exp_url = _expected_attach_gateway_url(session, wid, owner_user_id)
         assert out.accepted is True
-        assert out.gateway_url == f"http://{exp_host}/"
+        assert out.gateway_url == exp_url
         assert fake_client.register_calls == [(str(wid), INTERNAL_EP, exp_host)]
         assert fake_client._gets_after_register == 2
     finally:
@@ -726,7 +735,6 @@ def test_attach_gateway_url_includes_public_port(
                 public_host=None,
                 name="gw-port-ws",
             )
-            exp_host = _expected_gateway_public_host(session, wid)
             out = workspace_intent_service.request_attach_workspace(
                 session,
                 workspace_id=wid,
@@ -735,6 +743,7 @@ def test_attach_gateway_url_includes_public_port(
                 client_metadata={},
                 correlation_id=None,
             )
-        assert out.gateway_url == f"http://{exp_host}:9081/"
+            exp_url = _expected_attach_gateway_url(session, wid, owner_user_id)
+        assert out.gateway_url == exp_url
     finally:
         get_settings.cache_clear()

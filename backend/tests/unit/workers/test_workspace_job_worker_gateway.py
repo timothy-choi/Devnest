@@ -15,6 +15,7 @@ def running_workspace() -> Workspace:
     ws = MagicMock(spec=Workspace)
     ws.workspace_id = 101
     ws.public_host = None
+    ws.gateway_path_prefix = None
     ws.execution_node_id = 2
     return ws
 
@@ -67,6 +68,7 @@ def test_gateway_try_register_calls_client_when_enabled(
                 "101",
                 "http://10.0.0.1:8080",
                 "ws-101.app.devnest.local",
+                path_prefix=None,
                 node_key="node-2",
                 execution_node_id=2,
             )
