@@ -29,6 +29,7 @@ class AuthProfileResponse(BaseModel):
     username: str
     email: str
     created_at: datetime
+    route_subdomain_slug: str | None = None
 
 
 class LoginRequest(BaseModel):

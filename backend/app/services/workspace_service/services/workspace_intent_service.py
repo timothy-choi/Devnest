@@ -17,6 +17,12 @@ from sqlmodel import Session, select
 from app.libs.observability.correlation import generate_correlation_id
 from app.libs.observability.log_events import LogEvent, log_event
 from app.libs.observability.metrics import record_job_queued, record_workspace_created
+from app.libs.routing.workspace_routing import (
+    allocate_unique_workspace_url_slug,
+    build_workspace_url,
+    effective_public_base_domain,
+    slugify_workspace_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +76,7 @@ from app.services.node_execution_service.workspace_project_dir import (
 from app.services.reconcile_service.decisions import gateway_route_needs_repair, route_row_for_workspace
 from app.services.audit_service.enums import AuditAction, AuditActorType, AuditOutcome
 from app.services.audit_service.service import record_audit
+from app.services.auth_service.models import UserAuth
 from app.services.usage_service.enums import UsageEventType
 from app.services.usage_service.service import record_usage
 from app.services.placement_service.bootstrap import ensure_default_local_execution_node
@@ -337,6 +344,7 @@ def _ensure_traefik_edge_observes_host(
     session: Session | None = None,
     workspace_id: int | None = None,
     correlation_id: str | None = None,
+    probe_path: str | None = None,
 ) -> None:
     """When configured, poll Traefik until the workspace Host routes (not 404).
 
@@ -352,7 +360,10 @@ def _ensure_traefik_edge_observes_host(
     host_header = (host_header_source or "").strip().split(":")[0].strip()
     if not host_header:
         return
-    url = base.rstrip("/") + "/"
+    path = ((probe_path or "").strip() or "/").split("?", 1)[0]
+    if not path.startswith("/"):
+        path = "/" + path
+    url = base.rstrip("/") + path
     deadline = time.monotonic() + 8.0
     interval_s = 0.12
     while time.monotonic() < deadline:
@@ -451,6 +462,39 @@ def _gateway_unique_public_host(
     return f"{label}.{dom}"
 
 
+def _assign_workspace_gateway_public_identity(
+    session: Session,
+    ws: Workspace,
+    *,
+    owner_user_id: int,
+) -> None:
+    """Set ``public_host`` / ``gateway_path_prefix`` after ``workspace_id`` is allocated."""
+    from app.libs.common.config import get_settings
+
+    settings = get_settings()
+    if not settings.devnest_gateway_enabled or ws.workspace_id is None:
+        return
+    owner = session.get(UserAuth, owner_user_id)
+    if owner is None:
+        return
+    if settings.devnest_tenant_subdomain_routing_enabled:
+        sub = (owner.route_subdomain_slug or "").strip().lower()
+        slug = (ws.url_slug or "").strip().lower()
+        if sub and slug:
+            base = effective_public_base_domain(settings)
+            ws.public_host = f"{sub}.{base}"
+            ws.gateway_path_prefix = f"/workspaces/{slug}"
+            session.add(ws)
+            return
+    ws.public_host = _gateway_unique_public_host(
+        int(ws.workspace_id),
+        settings.devnest_base_domain,
+        project_storage_key=ws.project_storage_key,
+    )
+    ws.gateway_path_prefix = None
+    session.add(ws)
+
+
 def _resolve_public_host_for_gateway_display(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
     """Stored ``Workspace.public_host``, or default ``ws-{id}.{base_domain}`` when gateway is on and runtime is ready."""
     from app.libs.common.config import get_settings
@@ -484,20 +528,21 @@ def _gateway_public_host_for_url(host: str, scheme: str, port: int) -> str:
     return f"{host}:{port}"
 
 
-def _derive_gateway_url_v1(ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
-    """Public URL clients would use via Traefik when ``DEVNEST_GATEWAY_ENABLED`` (DNS/TLS out of scope)."""
+def _derive_gateway_url_v1(session: Session, ws: Workspace, rt: WorkspaceRuntime | None) -> str | None:
+    """Public URL clients would use via Traefik when ``DEVNEST_GATEWAY_ENABLED``."""
     from app.libs.common.config import get_settings
 
     settings = get_settings()
     if not settings.devnest_gateway_enabled:
         return None
-    host = _resolve_public_host_for_gateway_display(ws, rt)
-    if not host:
+    if ws.status != WorkspaceStatus.RUNNING.value:
         return None
-    scheme = (settings.devnest_gateway_public_scheme or "http").strip().rstrip(":")
-    pub_port = int(settings.devnest_gateway_public_port or 0)
-    host = _gateway_public_host_for_url(host, scheme, pub_port)
-    return f"{scheme}://{host}/"
+    if rt is None or not (rt.container_id or "").strip():
+        return None
+    user = session.get(UserAuth, ws.owner_user_id)
+    if user is None:
+        return None
+    return build_workspace_url(user=user, workspace=ws, settings=settings)
 
 
 def _best_effort_enqueue_reconcile_for_access_drift(
@@ -543,6 +588,7 @@ def _ensure_gateway_route_ready_for_open(
         )
 
     expected_public_host = _resolve_public_host_for_gateway_display(ws, rt)
+    expected_path_prefix = (ws.gateway_path_prefix or "").strip() or None
     client = DevnestGatewayClient.from_settings(settings)
     try:
         routes = client.get_registered_routes()
@@ -561,6 +607,7 @@ def _ensure_gateway_route_ready_for_open(
         route_row=route_row,
         observed_internal_endpoint=observed_upstream,
         expected_public_host=expected_public_host,
+        expected_path_prefix=expected_path_prefix,
     ):
         host_probe = (expected_public_host or "").strip()
         if host_probe:
@@ -570,6 +617,7 @@ def _ensure_gateway_route_ready_for_open(
                 session=session,
                 workspace_id=wid,
                 correlation_id=correlation_id,
+                probe_path=expected_path_prefix or "/",
             )
         return
 
@@ -582,6 +630,7 @@ def _ensure_gateway_route_ready_for_open(
             str(wid),
             observed_upstream,
             public_host,
+            path_prefix=expected_path_prefix,
             node_key=nk,
             execution_node_id=ws.execution_node_id,
         )
@@ -620,6 +669,7 @@ def _ensure_gateway_route_ready_for_open(
             route_row=observed_row,
             observed_internal_endpoint=observed_upstream,
             expected_public_host=expected_public_host,
+            expected_path_prefix=expected_path_prefix,
         ):
             host_probe = (expected_public_host or "").strip()
             if host_probe:
@@ -629,6 +679,7 @@ def _ensure_gateway_route_ready_for_open(
                     session=session,
                     workspace_id=wid,
                     correlation_id=correlation_id,
+                    probe_path=expected_path_prefix or "/",
                 )
             return
         if time.monotonic() >= deadline:
@@ -722,7 +773,7 @@ def get_workspace_access(
         endpoint_ref=ws.endpoint_ref,
         public_host=_resolve_public_host_for_gateway_display(ws, rt),
         internal_endpoint=rt.internal_endpoint,
-        gateway_url=_derive_gateway_url_v1(ws, rt),
+        gateway_url=_derive_gateway_url_v1(session, ws, rt),
         issues=issues,
     )
 
@@ -822,7 +873,7 @@ def request_attach_workspace(
         endpoint_ref=ws.endpoint_ref,
         public_host=_resolve_public_host_for_gateway_display(ws, rt),
         internal_endpoint=rt.internal_endpoint,
-        gateway_url=_derive_gateway_url_v1(ws, rt),
+        gateway_url=_derive_gateway_url_v1(session, ws, rt),
         issues=issues,
     )
 
@@ -1394,8 +1445,10 @@ def create_workspace(
             "placement requires positive requested_cpu, memory_limit_mib, and disk budget",
         )
 
+    url_slug = allocate_unique_workspace_url_slug(session, owner_user_id=owner_user_id, display_name=body.name)
     ws = Workspace(
         name=body.name,
+        url_slug=url_slug,
         description=body.description,
         owner_user_id=owner_user_id,
         project_storage_key=uuid4().hex,
@@ -1412,12 +1465,7 @@ def create_workspace(
     session.flush()
     settings = get_settings()
     if settings.devnest_gateway_enabled and ws.workspace_id is not None:
-        ws.public_host = _gateway_unique_public_host(
-            int(ws.workspace_id),
-            settings.devnest_base_domain,
-            project_storage_key=ws.project_storage_key,
-        )
-        session.add(ws)
+        _assign_workspace_gateway_public_identity(session, ws, owner_user_id=owner_user_id)
         session.flush()
 
     cfg = WorkspaceConfig(workspace_id=ws.workspace_id, version=1, config_json=config_json)
@@ -1620,8 +1668,10 @@ def create_operator_pinned_test_workspace(
 
     ensure_default_local_execution_node(session)
 
+    url_slug = allocate_unique_workspace_url_slug(session, owner_user_id=owner_user_id, display_name=body.name)
     ws = Workspace(
         name=body.name,
+        url_slug=url_slug,
         description=body.description,
         owner_user_id=owner_user_id,
         project_storage_key=uuid4().hex,
@@ -1634,12 +1684,7 @@ def create_operator_pinned_test_workspace(
     session.add(ws)
     session.flush()
     if settings.devnest_gateway_enabled and ws.workspace_id is not None:
-        ws.public_host = _gateway_unique_public_host(
-            int(ws.workspace_id),
-            settings.devnest_base_domain,
-            project_storage_key=ws.project_storage_key,
-        )
-        session.add(ws)
+        _assign_workspace_gateway_public_identity(session, ws, owner_user_id=owner_user_id)
         session.flush()
 
     cfg = WorkspaceConfig(workspace_id=ws.workspace_id, version=1, config_json=config_json)
@@ -1785,6 +1830,27 @@ def list_workspaces(
             rq = _runtime_quotas_from_row(rt_map.get(int(w.workspace_id)))
         items.append(base.model_copy(update={"runtime_quotas": rq}))
     return items, int(total)
+
+
+def get_workspace_by_url_slug(
+    session: Session,
+    *,
+    owner_user_id: int,
+    url_slug: str,
+) -> WorkspaceDetailResponse | None:
+    """Resolve a workspace by tenant ``url_slug`` for the authenticated owner."""
+    want = slugify_workspace_name(url_slug)
+    if not want:
+        return None
+    stmt = select(Workspace).where(
+        Workspace.owner_user_id == owner_user_id,
+        func.lower(Workspace.url_slug) == want.lower(),
+        Workspace.status != WorkspaceStatus.DELETED.value,
+    )
+    ws = session.exec(stmt).first()
+    if ws is None or ws.workspace_id is None:
+        return None
+    return get_workspace(session, workspace_id=int(ws.workspace_id), owner_user_id=owner_user_id)
 
 
 def get_workspace(

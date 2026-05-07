@@ -3,12 +3,14 @@ import { serialize } from "cookie";
 
 import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "@/lib/server/backend-client";
 import { sendMethodNotAllowed } from "@/lib/server/http";
+import { getConfiguredPublicBaseDomain, normalizeTenantWorkspaceNextUrl } from "@/lib/tenant-routing";
 
 type OAuthStartPayload = {
   authorization_url: string;
 };
 
 const OAUTH_RETURN_COOKIE = "devnest_oauth_return_to";
+const OAUTH_NEXT_COOKIE = "devnest_oauth_next";
 
 function authRouteFromSource(source: string | string[] | undefined) {
   return source === "signup" ? "/signup" : "/login";
@@ -18,6 +20,19 @@ function setOAuthReturnCookie(res: NextApiResponse, route: string) {
   res.setHeader(
     "Set-Cookie",
     serialize(OAUTH_RETURN_COOKIE, route, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.AUTH_COOKIE_SECURE === "true",
+      path: "/",
+      maxAge: 60 * 10,
+    }),
+  );
+}
+
+function appendOAuthNextCookie(res: NextApiResponse, nextUrl: string) {
+  res.appendHeader(
+    "Set-Cookie",
+    serialize(OAUTH_NEXT_COOKIE, nextUrl, {
       httpOnly: true,
       sameSite: "lax",
       secure: process.env.AUTH_COOKIE_SECURE === "true",
@@ -44,6 +59,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return;
   }
   setOAuthReturnCookie(res, authRoute);
+
+  const nextRaw = typeof req.query.next === "string" ? req.query.next : "";
+  const baseDomain = getConfiguredPublicBaseDomain();
+  const normalizedNext = baseDomain ? normalizeTenantWorkspaceNextUrl(nextRaw, baseDomain) : null;
+  if (normalizedNext) {
+    appendOAuthNextCookie(res, normalizedNext);
+  }
 
   let response: Awaited<ReturnType<typeof backendRequest>>;
   let data: OAuthStartPayload | { detail?: string } | null;

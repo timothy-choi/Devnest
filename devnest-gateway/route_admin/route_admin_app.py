@@ -48,6 +48,7 @@ _routes: dict[str, dict[str, str]] = {}
 
 _SAFE_WID = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
 _HOST_RULE = re.compile(r"^Host\(`([^`]+)`\)\s*$")
+_HOST_RULE_PREFIX = re.compile(r"^Host\(`([^`]+)`\)\s*&&\s*PathPrefix\(`([^`]+)`\)\s*$")
 
 
 def _hydrate_routes_from_disk_locked() -> None:
@@ -83,10 +84,17 @@ def _hydrate_routes_from_disk_locked() -> None:
         if not _SAFE_WID.match(wid):
             continue
         rule = str(rdef.get("rule") or "").strip()
-        m = _HOST_RULE.match(rule)
-        if not m:
-            continue
-        public_host = m.group(1).strip()
+        public_host = ""
+        path_prefix = ""
+        m2 = _HOST_RULE_PREFIX.match(rule)
+        if m2:
+            public_host = m2.group(1).strip()
+            path_prefix = m2.group(2).strip()
+        else:
+            m = _HOST_RULE.match(rule)
+            if not m:
+                continue
+            public_host = m.group(1).strip()
         svc_name = f"{rname}-upstream"
         svc = services.get(svc_name)
         if not isinstance(svc, dict):
@@ -107,7 +115,12 @@ def _hydrate_routes_from_disk_locked() -> None:
             target = _normalize_target(target)
         except ValueError:
             continue
-        _routes[wid] = {"workspace_id": wid, "public_host": public_host, "target": target}
+        _routes[wid] = {
+            "workspace_id": wid,
+            "public_host": public_host,
+            "target": target,
+            "path_prefix": path_prefix,
+        }
         loaded += 1
     if loaded:
         logger.info("route_admin_hydrated", extra={"path": str(path), "count": loaded})
@@ -127,6 +140,7 @@ class RouteRegisterBody(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=128)
     public_host: str = Field(min_length=1, max_length=512)
     target: str = Field(min_length=1, max_length=1024)
+    path_prefix: str | None = Field(default=None, max_length=512)
     # Optional metadata for ops logs (not written into Traefik YAML).
     node_key: str | None = Field(default=None, max_length=256)
     execution_node_id: int | None = Field(default=None, ge=1)
@@ -172,23 +186,36 @@ def _persist_locked() -> None:
 
     routers: dict[str, Any] = {}
     services: dict[str, Any] = {}
+    middlewares: dict[str, Any] = {}
     entrypoint = "websecure" if _TLS_ENABLED else "web"
     for wid, row in sorted(_routes.items(), key=lambda kv: kv[0]):
         rname = _router_name(wid)
+        path_prefix = (row.get("path_prefix") or "").strip()
+        rule = f"Host(`{row['public_host']}`)"
+        mids: list[str] = []
+        if path_prefix:
+            rule += f" && PathPrefix(`{path_prefix}`)"
+            strip_name = f"{rname}-stripprefix"
+            middlewares[strip_name] = {"stripPrefix": {"prefixes": [path_prefix]}}
+            mids.append(strip_name)
+        if _GATEWAY_AUTH_ENABLED:
+            mids.insert(0, "devnest-workspace-auth@file")
         router_def: dict[str, Any] = {
-            "rule": f"Host(`{row['public_host']}`)",
+            "rule": rule,
             "entryPoints": [entrypoint],
             "service": f"{rname}-upstream",
         }
-        if _GATEWAY_AUTH_ENABLED:
-            router_def["middlewares"] = ["devnest-workspace-auth@file"]
+        if mids:
+            router_def["middlewares"] = mids
         if _TLS_ENABLED:
             router_def["tls"] = {}
         routers[rname] = router_def
         services[f"{rname}-upstream"] = {
             "loadBalancer": {"servers": [{"url": row["target"]}]},
         }
-    doc = {"http": {"routers": routers, "services": services}}
+    doc: dict[str, Any] = {"http": {"routers": routers, "services": services}}
+    if middlewares:
+        doc["http"]["middlewares"] = middlewares
     fd, tmp = tempfile.mkstemp(
         prefix=".routes-",
         suffix=".yml",
@@ -218,7 +245,13 @@ def register_route(body: RouteRegisterBody) -> dict[str, str]:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     public_host = body.public_host.strip()
-    row = {"workspace_id": wid, "public_host": public_host, "target": target}
+    path_prefix = (body.path_prefix or "").strip()
+    row = {
+        "workspace_id": wid,
+        "public_host": public_host,
+        "target": target,
+        "path_prefix": path_prefix,
+    }
     with _lock:
         _routes[wid] = row
         _persist_locked()
@@ -227,6 +260,7 @@ def register_route(body: RouteRegisterBody) -> dict[str, str]:
         extra={
             "workspace_id": wid,
             "public_host": public_host,
+            "path_prefix": path_prefix or "",
             "target": target,
             "node_key": (body.node_key or "").strip() or None,
             "execution_node_id": body.execution_node_id,

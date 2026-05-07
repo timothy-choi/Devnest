@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { browserApi } from "@/lib/api/browser-client";
 import { ApiError } from "@/lib/api/error";
 import { getApiBaseUrl } from "@/lib/env";
+import { getDashboardOriginForAppShell } from "@/lib/tenant-routing";
 import { WorkspaceFormValues } from "@/lib/validators";
 import { toWorkspace } from "@/lib/workspace-mappers";
 import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
@@ -359,7 +360,9 @@ export function useWorkspaces() {
       const browserWindow = typeof globalThis !== "undefined" ? globalThis.window : undefined;
       if (browserWindow) {
         browserWindow.sessionStorage.setItem("devnestWorkspaceReturnTarget", "/dashboard");
-        const dashboardUrl = new URL("/dashboard?workspaceReturn=1", browserWindow.location.origin).toString();
+        const apexOrigin = getDashboardOriginForAppShell();
+        const origin = apexOrigin || browserWindow.location.origin;
+        const dashboardUrl = new URL("/dashboard?workspaceReturn=1", origin).toString();
         browserWindow.history.pushState({ devnestWorkspaceReturn: true }, "", dashboardUrl);
         browserWindow.location.assign(gatewayUrl);
         return;

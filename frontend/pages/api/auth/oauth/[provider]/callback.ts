@@ -5,12 +5,14 @@ import { backendRequest, backendReachabilityUserDetail, readBackendJson } from "
 import { clearAuthCookies, setAuthCookies } from "@/lib/server/auth-cookies";
 import { sendMethodNotAllowed } from "@/lib/server/http";
 import { getSetCookieHeaderValues } from "@/lib/server/response-cookies";
+import { getConfiguredPublicBaseDomain, safePostLoginTenantRedirect } from "@/lib/tenant-routing";
 
 type OAuthCallbackPayload = {
   access_token: string;
 };
 
 const OAUTH_RETURN_COOKIE = "devnest_oauth_return_to";
+const OAUTH_NEXT_COOKIE = "devnest_oauth_next";
 
 function extractCookieValue(setCookieHeaders: string[] | undefined, cookieName: string): string | null {
   for (const header of setCookieHeaders || []) {
@@ -39,9 +41,23 @@ function clearOAuthReturnCookie(res: NextApiResponse) {
   );
 }
 
+function clearOAuthNextCookie(res: NextApiResponse) {
+  res.appendHeader(
+    "Set-Cookie",
+    serialize(OAUTH_NEXT_COOKIE, "", {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.AUTH_COOKIE_SECURE === "true",
+      path: "/",
+      maxAge: 0,
+    }),
+  );
+}
+
 function redirectToAuthWithError(req: NextApiRequest, res: NextApiResponse, detail: string) {
   clearAuthCookies(res);
   clearOAuthReturnCookie(res);
+  clearOAuthNextCookie(res);
   res.redirect(302, `${resolveAuthReturnRoute(req)}?oauth_error=${encodeURIComponent(detail)}`);
 }
 
@@ -108,5 +124,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     refreshToken,
   });
   clearOAuthReturnCookie(res);
-  res.redirect(302, "/dashboard");
+
+  let redirectTarget = "/dashboard";
+  const baseDomain = getConfiguredPublicBaseDomain();
+  const storedNext = req.cookies[OAUTH_NEXT_COOKIE];
+  if (baseDomain && storedNext) {
+    try {
+      const authMe = await backendRequest({
+        req,
+        res,
+        path: "/auth",
+        accessTokenOverride: accessToken,
+        refreshTokenOverride: refreshToken,
+      });
+      if (authMe.ok) {
+        const prof = await readBackendJson<{ route_subdomain_slug?: string | null }>(authMe);
+        const dest = safePostLoginTenantRedirect(storedNext, prof.route_subdomain_slug, baseDomain);
+        if (dest) {
+          redirectTarget = dest;
+        }
+      }
+    } catch {
+      // fall through to dashboard
+    }
+  }
+  clearOAuthNextCookie(res);
+  res.redirect(302, redirectTarget);
 }

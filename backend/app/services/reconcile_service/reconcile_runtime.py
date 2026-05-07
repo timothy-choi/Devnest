@@ -97,6 +97,7 @@ def _strict_register_route(session: Session, ws: Workspace, upstream: str) -> No
         int(wid),
         settings.devnest_base_domain,
     )
+    path_prefix = (ws.gateway_path_prefix or "").strip() or None
     rt = session.exec(select(WorkspaceRuntime).where(WorkspaceRuntime.workspace_id == wid)).first()
     nk = ((rt.node_id if rt else None) or "").strip() or None
     node = None
@@ -122,6 +123,7 @@ def _strict_register_route(session: Session, ws: Workspace, upstream: str) -> No
         str(wid),
         upstream,
         public,
+        path_prefix=path_prefix,
         node_key=nk,
         execution_node_id=ws.execution_node_id,
     )
@@ -774,10 +776,12 @@ def _reconcile_running(
             int(wid),
             settings.devnest_base_domain,
         )
+        expected_prefix = (ws.gateway_path_prefix or "").strip() or None
         if gateway_route_needs_repair(
             route_row=row,
             observed_internal_endpoint=observed_upstream,
             expected_public_host=expected_host,
+            expected_path_prefix=expected_prefix,
         ):
             try:
                 _strict_register_route(session, ws, observed_upstream)

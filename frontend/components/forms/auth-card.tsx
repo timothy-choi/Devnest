@@ -11,6 +11,7 @@ import { z } from "zod";
 import { GuestOnly } from "@/components/auth/guest-only";
 import { ApiError } from "@/lib/api/error";
 import { useAuth } from "@/hooks/use-auth";
+import { getConfiguredPublicBaseDomain, safePostLoginTenantRedirect } from "@/lib/tenant-routing";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -49,8 +50,9 @@ export function AuthCard({
   alternateLabel,
 }: AuthCardProps) {
   const router = useRouter();
-  const { login, signup, isAuthenticated } = useAuth();
+  const { login, signup, isAuthenticated, user } = useAuth();
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const baseDomain = getConfiguredPublicBaseDomain();
   const form = useForm<AuthValues>({
     resolver: zodResolver(mode === "signup" ? signupSchema : loginSchema),
     defaultValues: {
@@ -61,12 +63,24 @@ export function AuthCard({
   });
 
   useEffect(() => {
-    if (isAuthenticated) {
-      router.replace("/dashboard");
+    if (!router.isReady || !isAuthenticated || !user) {
+      return;
     }
-  }, [isAuthenticated, router]);
+    const dest =
+      baseDomain ? safePostLoginTenantRedirect(router.query.next, user.routeSubdomainSlug, baseDomain) : null;
+    if (dest) {
+      window.location.replace(dest);
+      return;
+    }
+    void router.replace("/dashboard");
+  }, [router.isReady, isAuthenticated, user, router, baseDomain]);
 
   const isSubmitting = form.formState.isSubmitting;
+
+  const nextQuery =
+    router.isReady && typeof router.query.next === "string" && router.query.next.trim()
+      ? router.query.next.trim()
+      : "";
 
   const showRegisteredMessage =
     router.isReady && mode === "login" && router.query.registered === "1";
@@ -75,7 +89,9 @@ export function AuthCard({
       ? decodeURIComponent(router.query.oauth_error)
       : null;
   const oauthStartHref = (provider: "github" | "google") =>
-    `/api/auth/oauth/${provider}/start?source=${encodeURIComponent(mode)}`;
+    `/api/auth/oauth/${provider}/start?source=${encodeURIComponent(mode)}${
+      nextQuery ? `&next=${encodeURIComponent(nextQuery)}` : ""
+    }`;
 
   const handleSubmit = form.handleSubmit(async (values) => {
     setSubmitError(null);
@@ -91,10 +107,16 @@ export function AuthCard({
         return;
       }
 
-      await login({
+      const loggedIn = await login({
         username: values.username,
         password: values.password,
       });
+      const dest =
+        baseDomain ? safePostLoginTenantRedirect(router.query.next, loggedIn.routeSubdomainSlug, baseDomain) : null;
+      if (dest) {
+        window.location.replace(dest);
+        return;
+      }
       await router.replace("/dashboard");
     } catch (error) {
       setSubmitError(error instanceof ApiError ? error.detail : "Unable to complete authentication.");

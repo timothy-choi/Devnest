@@ -28,7 +28,10 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const AUTH_QUERY_KEY = ["auth", "me"];
 
 function normalizeUser(user: AuthUser): CurrentUser {
-  return user;
+  return {
+    ...user,
+    routeSubdomainSlug: user.routeSubdomainSlug ?? null,
+  };
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {

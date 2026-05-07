@@ -81,8 +81,15 @@ def _make_app(engine):
 def _seed_user(session: Session) -> int:
     # Use a unique email/username per call to avoid conflicts across tests sharing the same engine.
     import uuid as _uuid
+
     uid = str(_uuid.uuid4())[:8]
-    u = UserAuth(username=f"tester-{uid}", email=f"tester-{uid}@devnest.local", password_hash="x")
+    sub = f"user-{uid}"
+    u = UserAuth(
+        username=f"tester-{uid}",
+        email=f"tester-{uid}@devnest.local",
+        password_hash="x",
+        route_subdomain_slug=sub,
+    )
     session.add(u)
     session.flush()
     assert u.user_auth_id is not None
@@ -90,8 +97,12 @@ def _seed_user(session: Session) -> int:
 
 
 def _seed_workspace(session: Session, owner_id: int, status: str = WorkspaceStatus.RUNNING.value) -> int:
+    import uuid as _uuid
+
+    slug = f"ws-{_uuid.uuid4().hex[:10]}"
     ws = Workspace(
         name="test-ws",
+        url_slug=slug,
         owner_user_id=owner_id,
         status=status,
         is_private=True,
@@ -138,6 +149,9 @@ def _settings_auth_enabled(**extra):
     s = MagicMock()
     s.devnest_gateway_auth_enabled = True
     s.devnest_base_domain = BASE_DOMAIN
+    s.devnest_tenant_subdomain_routing_enabled = False
+    s.devnest_public_base_domain = None
+    s.devnest_public_scheme = "https"
     for k, v in extra.items():
         setattr(s, k, v)
     return s
@@ -149,6 +163,8 @@ def _settings_auth_disabled():
     s = MagicMock()
     s.devnest_gateway_auth_enabled = False
     s.devnest_base_domain = BASE_DOMAIN
+    s.devnest_tenant_subdomain_routing_enabled = False
+    s.devnest_public_base_domain = None
     return s
 
 
@@ -390,6 +406,173 @@ def test_non_workspace_host_denied(engine):
             headers={
                 "X-Forwarded-Host": "whoami.app.devnest.local",
                 WORKSPACE_SESSION_HTTP_HEADER: "dnws_some_token",
+            },
+        )
+        assert resp.status_code == 401
+
+
+def test_tenant_subdomain_and_path_allows(engine):
+    """Tenant routing: Host + /workspaces/<slug> resolves and session matches."""
+    import uuid as _uuid
+
+    pub = "devnest.example.com"
+    sub = f"tim-{_uuid.uuid4().hex[:6]}"
+    slug = "eventrelay"
+    with Session(engine) as s:
+        u = UserAuth(
+            username=f"u-{sub}",
+            email=f"u-{sub}@x.devnest.local",
+            password_hash="x",
+            route_subdomain_slug=sub,
+        )
+        s.add(u)
+        s.flush()
+        uid = int(u.user_auth_id or 0)
+        ws = Workspace(
+            name="Event Relay",
+            url_slug=slug,
+            owner_user_id=uid,
+            status=WorkspaceStatus.RUNNING.value,
+            is_private=True,
+            active_sessions_count=0,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        s.add(ws)
+        s.flush()
+        ws_id = int(ws.workspace_id or 0)
+        s.commit()
+        token = _seed_session(s, ws_id, uid)
+
+    host = f"{sub}.{pub}"
+    with patch(
+        "app.services.workspace_service.api.routers.internal_gateway_auth.get_settings",
+        return_value=_settings_auth_enabled(
+            devnest_tenant_subdomain_routing_enabled=True,
+            devnest_public_base_domain=pub,
+        ),
+    ):
+        client = TestClient(_make_app(engine))
+        resp = client.get(
+            "/internal/gateway/auth",
+            headers={
+                "X-Forwarded-Host": host,
+                "X-Forwarded-Uri": f"/workspaces/{slug}",
+                WORKSPACE_SESSION_HTTP_HEADER: token,
+            },
+        )
+        assert resp.status_code == 200, f"body={resp.text!r}"
+
+
+def test_tenant_subdomain_session_must_match_resolved_workspace(engine):
+    """Token for workspace A must not authorize path that resolves to workspace B (same owner)."""
+    import uuid as _uuid
+
+    pub = "devnest.example.com"
+    sub = f"alice-{_uuid.uuid4().hex[:6]}"
+    with Session(engine) as s:
+        u = UserAuth(
+            username=f"u-{sub}",
+            email=f"u-{sub}@x.devnest.local",
+            password_hash="x",
+            route_subdomain_slug=sub,
+        )
+        s.add(u)
+        s.flush()
+        uid = int(u.user_auth_id or 0)
+        ws_a = Workspace(
+            name="A",
+            url_slug="proj-a",
+            owner_user_id=uid,
+            status=WorkspaceStatus.RUNNING.value,
+            is_private=True,
+            active_sessions_count=0,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        ws_b = Workspace(
+            name="B",
+            url_slug="proj-b",
+            owner_user_id=uid,
+            status=WorkspaceStatus.RUNNING.value,
+            is_private=True,
+            active_sessions_count=0,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        s.add(ws_a)
+        s.add(ws_b)
+        s.flush()
+        ws_id_a = int(ws_a.workspace_id or 0)
+        s.commit()
+        token = _seed_session(s, ws_id_a, uid)
+
+    host = f"{sub}.{pub}"
+    with patch(
+        "app.services.workspace_service.api.routers.internal_gateway_auth.get_settings",
+        return_value=_settings_auth_enabled(
+            devnest_tenant_subdomain_routing_enabled=True,
+            devnest_public_base_domain=pub,
+        ),
+    ):
+        client = TestClient(_make_app(engine))
+        resp = client.get(
+            "/internal/gateway/auth",
+            headers={
+                "X-Forwarded-Host": host,
+                "X-Forwarded-Uri": "/workspaces/proj-b",
+                WORKSPACE_SESSION_HTTP_HEADER: token,
+            },
+        )
+        assert resp.status_code == 401
+
+
+def test_tenant_missing_forwarded_uri_denied(engine):
+    """Without /workspaces/<slug> in forwarded URI, tenant mode cannot resolve workspace."""
+    import uuid as _uuid
+
+    pub = "devnest.example.com"
+    sub = f"bob-{_uuid.uuid4().hex[:6]}"
+    with Session(engine) as s:
+        u = UserAuth(
+            username=f"u-{sub}",
+            email=f"u-{sub}@x.devnest.local",
+            password_hash="x",
+            route_subdomain_slug=sub,
+        )
+        s.add(u)
+        s.flush()
+        uid = int(u.user_auth_id or 0)
+        ws = Workspace(
+            name="X",
+            url_slug="foo",
+            owner_user_id=uid,
+            status=WorkspaceStatus.RUNNING.value,
+            is_private=True,
+            active_sessions_count=0,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        s.add(ws)
+        s.flush()
+        ws_id = int(ws.workspace_id or 0)
+        s.commit()
+        token = _seed_session(s, ws_id, uid)
+
+    host = f"{sub}.{pub}"
+    with patch(
+        "app.services.workspace_service.api.routers.internal_gateway_auth.get_settings",
+        return_value=_settings_auth_enabled(
+            devnest_tenant_subdomain_routing_enabled=True,
+            devnest_public_base_domain=pub,
+        ),
+    ):
+        client = TestClient(_make_app(engine))
+        resp = client.get(
+            "/internal/gateway/auth",
+            headers={
+                "X-Forwarded-Host": host,
+                WORKSPACE_SESSION_HTTP_HEADER: token,
             },
         )
         assert resp.status_code == 401

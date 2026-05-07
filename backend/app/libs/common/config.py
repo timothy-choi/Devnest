@@ -263,6 +263,23 @@ class Settings(BaseSettings):
     # Optional Traefik HTTP base (e.g. ``http://traefik:80`` on the Docker network). When set, attach/access
     # waits until a GET with ``Host: <workspace hostname>`` is not 404 so the edge has loaded dynamic routes.
     devnest_gateway_traefik_http_probe_base: str = ""
+    # Multi-tenant workspace URLs: https://<slug>.<DEVNEST_PUBLIC_BASE_DOMAIN>/workspaces/<url_slug>
+    # When unset, falls back to DEVNEST_BASE_DOMAIN for host parsing / URL generation.
+    devnest_public_base_domain: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DEVNEST_PUBLIC_BASE_DOMAIN", "devnest_public_base_domain"),
+    )
+    devnest_public_scheme: str = Field(
+        default="https",
+        validation_alias=AliasChoices("DEVNEST_PUBLIC_SCHEME", "devnest_public_scheme"),
+    )
+    devnest_tenant_subdomain_routing_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED",
+            "devnest_tenant_subdomain_routing_enabled",
+        ),
+    )
 
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""

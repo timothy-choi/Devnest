@@ -166,6 +166,7 @@ class WorkspaceSummaryResponse(BaseModel):
 
     workspace_id: int
     name: str
+    url_slug: str = Field(default="", max_length=128, description="URL path segment under /workspaces/<slug> for tenant routing.")
     status: str
     is_private: bool
     created_at: datetime
@@ -226,6 +227,7 @@ class WorkspaceDetailResponse(BaseModel):
 
     workspace_id: int
     name: str
+    url_slug: str = Field(default="", max_length=128)
     description: str | None
     owner_user_id: int
     status: str

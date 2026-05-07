@@ -40,6 +40,7 @@ from app.services.workspace_service.errors import (
     WorkspaceSchedulingCapacityError,
     WorkspaceSchedulingInvalidError,
     WorkspaceServiceError,
+    WorkspaceSlugConflictError,
 )
 from app.services.workspace_service.services import workspace_intent_service
 from app.services.workspace_service.services.workspace_secret_service import (
@@ -78,6 +79,8 @@ def _raise_workspace_http(exc: WorkspaceServiceError) -> None:
     if isinstance(exc, WorkspaceSchedulingInvalidError):
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceBusyError):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if isinstance(exc, WorkspaceSlugConflictError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceInvalidStateError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -247,6 +250,32 @@ def get_workspaces(
         limit=limit,
     )
     return WorkspaceListResponse(items=items, total=total)
+
+
+@router.get(
+    "/by-url-slug/{url_slug}",
+    response_model=WorkspaceDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get workspace by URL slug (tenant path segment)",
+    description=(
+        "Looks up a non-deleted workspace owned by the caller where ``url_slug`` matches "
+        "the slugified name (same rules as ``/workspaces/<slug>`` on the tenant subdomain)."
+    ),
+)
+def get_workspace_by_url_slug_route(
+    url_slug: str,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> WorkspaceDetailResponse:
+    assert current.user_auth_id is not None
+    detail = workspace_intent_service.get_workspace_by_url_slug(
+        session,
+        owner_user_id=current.user_auth_id,
+        url_slug=url_slug,
+    )
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return detail
 
 
 @router.post(

@@ -21,6 +21,7 @@ export type AuthUser = {
   displayName: string;
   avatarUrl: string | null;
   profileLoaded: boolean;
+  routeSubdomainSlug: string | null;
 };
 
 export type WorkspaceRecord = {
