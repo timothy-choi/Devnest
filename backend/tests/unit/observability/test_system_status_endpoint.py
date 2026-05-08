@@ -73,6 +73,9 @@ def test_system_status_ok_json_shape(
     mock_settings.return_value.devnest_gateway_auth_enabled = True
     mock_settings.return_value.devnest_gateway_url = "http://route-admin:8080"
     mock_settings.return_value.devnest_env = "development"
+    mock_settings.return_value.devnest_workspace_domain_mode = "tenant"
+    mock_settings.return_value.devnest_public_base_domain = "routes.example.test"
+    mock_settings.return_value.devnest_tenant_subdomain_routing_enabled = False
     mock_snap_fields.return_value = {
         "provider": "local",
         "bucket": "-",
@@ -93,6 +96,9 @@ def test_system_status_ok_json_shape(
     assert data["snapshot_storage"]["provider"] == "local"
     assert data["gateway"]["enabled"] is True
     assert data["gateway"]["base_domain"] == "app.example.test"
+    assert data["gateway"]["workspace_domain_mode"] == "tenant"
+    assert data["gateway"]["tenant_workspace_urls_enabled"] is True
+    assert data["gateway"]["public_base_domain"] == "routes.example.test"
     assert data["worker"]["deployment_model"] == "standalone"
     assert data["worker"]["jobs_queued"] == 7
     assert data["worker"]["jobs_running"] == 2

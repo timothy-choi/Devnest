@@ -6,6 +6,7 @@ import { Code2, Loader2 } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { AuthGuard } from "@/components/auth/auth-guard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { workspaceBrowserOpenUrl } from "@/lib/workspace-open-url";
 
 type WorkspaceDetailJson = {
   status?: string;
@@ -129,11 +130,7 @@ export default function WorkspacePage() {
           return;
         }
 
-        const openUrl = (
-          (attach.workspace_url || "").trim() ||
-          (attach.public_url || "").trim() ||
-          (attach.gateway_url || "").trim()
-        );
+        const openUrl = workspaceBrowserOpenUrl(attach);
         if (openUrl) {
           window.location.replace(openUrl);
           return;

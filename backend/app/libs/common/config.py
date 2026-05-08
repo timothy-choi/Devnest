@@ -187,6 +187,15 @@ class Settings(BaseSettings):
     # Browser-visible UI origin (``docker-compose.integration.yml`` / EC2). Used to fix OAuth redirect
     # bases when ``backend/.env`` still pins ``GITHUB_OAUTH_PUBLIC_BASE_URL`` to localhost.
     devnest_frontend_public_base_url: str = ""
+    # Browser-visible FastAPI origin when UI is split (e.g. Vercel dashboard + EC2 API). Used in diagnostics;
+    # link generation for the UI continues to use ``devnest_frontend_public_base_url`` / OAuth bases.
+    devnest_api_public_base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "DEVNEST_API_PUBLIC_BASE_URL",
+            "devnest_api_public_base_url",
+        ),
+    )
 
     # --- Internal platform auth (sensitive; header X-Internal-API-Key) ---
     # Legacy single key: used for any internal surface whose scope-specific key is unset.

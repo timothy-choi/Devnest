@@ -151,15 +151,17 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt
 
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-
-      - name: Wait for PostgreSQL
+      - name: Wait for PostgreSQL (SQLAlchemy probe; avoids apt mirrors)
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+          DEVNEST_DB_WAIT_TIMEOUT_SECONDS: "120"
         run: |
-          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
-            echo "Waiting for PostgreSQL..."
-            sleep 1
-          done
+          echo "::group::postgres_wait_timing"
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          /usr/bin/time -v python3 scripts/wait_for_database.py
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          echo "::endgroup::"
 
       - name: Run Alembic migrations
         working-directory: backend
@@ -383,15 +385,17 @@ jobs:
       - name: Install coverage tools
         run: pip install coverage pytest-cov pytest-timeout
 
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-
-      - name: Wait for PostgreSQL
+      - name: Wait for PostgreSQL (SQLAlchemy probe; avoids apt mirrors)
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+          DEVNEST_DB_WAIT_TIMEOUT_SECONDS: "120"
         run: |
-          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
-            echo "Waiting for PostgreSQL..."
-            sleep 1
-          done
+          echo "::group::postgres_wait_timing"
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          /usr/bin/time -v python3 scripts/wait_for_database.py
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          echo "::endgroup::"
 
       - name: Run Alembic migrations
         run: alembic upgrade head
@@ -483,15 +487,17 @@ jobs:
       - name: Install coverage tools
         run: pip install coverage pytest-cov pytest-timeout
 
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-
-      - name: Wait for PostgreSQL
+      - name: Wait for PostgreSQL (SQLAlchemy probe; avoids apt mirrors)
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/devnest_test
+          DEVNEST_DB_WAIT_TIMEOUT_SECONDS: "120"
         run: |
-          until pg_isready -h localhost -p 5432 -U test -d devnest_test; do
-            echo "Waiting for PostgreSQL..."
-            sleep 1
-          done
+          echo "::group::postgres_wait_timing"
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          /usr/bin/time -v python3 scripts/wait_for_database.py
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          echo "::endgroup::"
 
       - name: Run Alembic migrations
         run: alembic upgrade head
@@ -626,8 +632,23 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y netcat-openbsd
-          nc -zvw30 "$EC2_HOST" 22
+          echo "::group::ssh_preflight_timing"
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          ok=0
+          for i in $(seq 1 40); do
+            if timeout 3 bash -c "echo >/dev/tcp/${EC2_HOST}/22" 2>/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$ok" != "1" ]]; then
+            echo "ERROR: TCP port 22 not reachable on ${EC2_HOST}" >&2
+            exit 1
+          fi
+          echo "ssh_port_open"
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          echo "::endgroup::"
 
       - name: Deploy staging branch to EC2
         if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
@@ -640,7 +661,7 @@ jobs:
           timeout: 2m
           command_timeout: 45m
           script: |
-            set -e
+            set -euo pipefail
             echo "Deploying branch: ${{ github.ref_name }}"
             EC2_HOST_PUBLIC="${{ secrets.EC2_HOST }}"
             if [[ "${EC2_HOST_PUBLIC}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -769,8 +790,23 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y netcat-openbsd
-          nc -zvw30 "$EC2_HOST" 22
+          echo "::group::ssh_preflight_timing"
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          ok=0
+          for i in $(seq 1 40); do
+            if timeout 3 bash -c "echo >/dev/tcp/${EC2_HOST}/22" 2>/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$ok" != "1" ]]; then
+            echo "ERROR: TCP port 22 not reachable on ${EC2_HOST}" >&2
+            exit 1
+          fi
+          echo "ssh_port_open"
+          date -u +"%Y-%m-%dT%H:%M:%SZ"
+          echo "::endgroup::"
 
       - name: Deploy production (main) to EC2
         if: ${{ env.EC2_DEPLOY_HOST != '' && env.EC2_DEPLOY_USER != '' && env.EC2_DEPLOY_KEY != '' }}
@@ -783,7 +819,7 @@ jobs:
           timeout: 2m
           command_timeout: 45m
           script: |
-            set -e
+            set -euo pipefail
             echo "Deploying production branch: main"
             EC2_HOST_PUBLIC="${{ secrets.EC2_HOST }}"
             if [[ "${EC2_HOST_PUBLIC}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

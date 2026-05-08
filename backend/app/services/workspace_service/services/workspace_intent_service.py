@@ -897,6 +897,16 @@ def request_attach_workspace(
     pub_u, ws_u, gw_u = _workspace_access_urls(session, ws, rt)
     from app.libs.common.config import get_settings as _attach_gs  # noqa: PLC0415
 
+    _s = _attach_gs()
+    _tenant_urls = tenant_workspace_urls_enabled(_s)
+    logger.info(
+        "workspace.attach.tenant_mode_enabled",
+        extra={
+            "workspace_id": workspace_id,
+            "tenant_workspace_urls": _tenant_urls,
+            "workspace_domain_mode": (_s.devnest_workspace_domain_mode or "").strip(),
+        },
+    )
     if (pub_u or "").strip():
         logger.info(
             "workspace.attach.public_url_selected",
@@ -905,7 +915,7 @@ def request_attach_workspace(
                 "public_url": pub_u,
                 "workspace_url": ws_u,
                 "gateway_url_internal": gw_u,
-                "tenant_workspace_urls": tenant_workspace_urls_enabled(_attach_gs()),
+                "tenant_workspace_urls": _tenant_urls,
             },
         )
     return WorkspaceAttachResult(

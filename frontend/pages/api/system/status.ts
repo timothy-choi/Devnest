@@ -18,6 +18,9 @@ type BackendGateway = {
   public_port: number;
   auth_enabled: boolean;
   route_admin_host: string;
+  workspace_domain_mode?: string;
+  tenant_workspace_urls_enabled?: boolean;
+  public_base_domain?: string;
 };
 
 type BackendWorker = {
@@ -66,6 +69,9 @@ function mapBody(raw: BackendSystemStatus) {
       publicPort: raw.gateway.public_port,
       authEnabled: raw.gateway.auth_enabled,
       routeAdminHost: raw.gateway.route_admin_host,
+      workspaceDomainMode: raw.gateway.workspace_domain_mode ?? "",
+      tenantWorkspaceUrlsEnabled: Boolean(raw.gateway.tenant_workspace_urls_enabled),
+      publicBaseDomain: raw.gateway.public_base_domain ?? "",
     },
     worker: {
       deploymentModel: raw.worker.deployment_model,

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import traceback
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -12,6 +13,10 @@ from app.libs.common.config import (
     format_database_url_for_log,
     get_settings,
     oauth_startup_status_for_log,
+)
+from app.libs.routing.workspace_routing import (
+    effective_public_base_domain,
+    tenant_workspace_urls_enabled,
 )
 from app.libs.db.database import init_db
 from app.libs.events.workspace_event_bus import get_event_bus
@@ -83,14 +88,52 @@ async def lifespan(_app: FastAPI):
     )
     oauth_status = oauth_startup_status_for_log(settings)
     _lifespan_logger.info(
-        "[DevNest diagnostics] API startup frontend_public_base_url=%s github_oauth_public_base_url=%s "
-        "gcloud_oauth_public_base_url=%s github_oauth_configured=%s google_oauth_configured=%s",
+        "[DevNest diagnostics] API startup frontend_public_base_url=%s api_public_base_url=%s "
+        "github_oauth_public_base_url=%s gcloud_oauth_public_base_url=%s github_oauth_configured=%s "
+        "google_oauth_configured=%s",
         oauth_status["frontend_public_base_url"],
+        (settings.devnest_api_public_base_url or "").strip() or "-",
         oauth_status["github_oauth_public_base_url"],
         oauth_status["gcloud_oauth_public_base_url"],
         oauth_status["github_oauth_configured"],
         oauth_status["google_oauth_configured"],
     )
+    tenant_on = tenant_workspace_urls_enabled(settings)
+    routing_mode = "tenant" if tenant_on else "legacy"
+    mode_raw = (settings.devnest_workspace_domain_mode or "").strip().lower() or "(unset)"
+    pub_base = effective_public_base_domain(settings)
+    _lifespan_logger.info(
+        "[DevNest diagnostics] routing startup routing_mode=%s workspace_domain_mode=%s "
+        "tenant_subdomain_routing_bool=%s public_base_domain=%s public_scheme=%s public_port=%s "
+        "gateway_public_scheme=%s gateway_public_port=%s",
+        routing_mode,
+        mode_raw,
+        bool(settings.devnest_tenant_subdomain_routing_enabled),
+        pub_base or "-",
+        (settings.devnest_public_scheme or "").strip() or "-",
+        int(settings.devnest_public_port or 0),
+        (settings.devnest_gateway_public_scheme or "").strip() or "-",
+        int(settings.devnest_gateway_public_port or 0),
+    )
+    _lifespan_logger.info(
+        "routing_mode_selected",
+        extra={
+            "routing_mode": routing_mode,
+            "workspace_domain_mode": mode_raw,
+            "tenant_workspace_urls_enabled": tenant_on,
+        },
+    )
+    if tenant_on and not (settings.devnest_public_base_domain or "").strip():
+        _lifespan_logger.warning(
+            "[DevNest diagnostics] Tenant URL mode active but DEVNEST_PUBLIC_BASE_DOMAIN is unset — "
+            "workspace hosts fall back to DEVNEST_BASE_DOMAIN; set DEVNEST_PUBLIC_BASE_DOMAIN to your "
+            "registrable apex for production (*.example.com tenant hosts).",
+        )
+    if tenant_on and settings.devnest_gateway_enabled and not int(settings.devnest_public_port or 0):
+        _lifespan_logger.info(
+            "[DevNest diagnostics] Tenant browser URLs omit DEVNEST_GATEWAY_PUBLIC_PORT by default; "
+            "set DEVNEST_PUBLIC_PORT if the public IDE must include a non-default port.",
+        )
     get_snapshot_storage_provider()
     snapshot_fields = snapshot_storage_log_fields()
     _lifespan_logger.info(
@@ -119,7 +162,14 @@ async def lifespan(_app: FastAPI):
             "[DevNest diagnostics] DEVNEST_FRONTEND_PUBLIC_BASE_URL is empty. In EC2/remote mode set it to "
             "the browser-visible UI origin so OAuth redirects and frontend links are correct."
         )
-    init_db()
+    try:
+        init_db()
+    except Exception:
+        _lifespan_logger.error(
+            "[DevNest diagnostics] init_db failed — database schema/migration issue?\n%s",
+            traceback.format_exc(),
+        )
+        raise
     for _route in _app.routes:
         p = getattr(_route, "path", None) or ""
         if p.endswith("/internal/execution-nodes/heartbeat"):

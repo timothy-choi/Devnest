@@ -93,9 +93,12 @@ export function SystemStatusView() {
                 <h2 className="text-lg font-semibold">Gateway</h2>
               </div>
               <StatusRow label="Enabled" value={data.gateway.enabled ? "yes" : "no"} ok={data.gateway.enabled} />
-              <StatusRow label="Base domain" value={data.gateway.baseDomain || "—"} />
+              <StatusRow label="Routing mode" value={data.gateway.tenantWorkspaceUrlsEnabled ? "tenant" : "legacy"} />
+              <StatusRow label="Workspace domain mode (raw)" value={data.gateway.workspaceDomainMode || "—"} />
+              <StatusRow label="Public base domain" value={data.gateway.publicBaseDomain || "—"} />
+              <StatusRow label="Legacy ws-* base domain" value={data.gateway.baseDomain || "—"} />
               <StatusRow
-                label="Public URL"
+                label="Legacy gateway URL pattern"
                 value={`${data.gateway.publicScheme}://ws-<id>.${data.gateway.baseDomain || "?"}${
                   data.gateway.publicPort && data.gateway.publicPort !== 80 && data.gateway.publicPort !== 443
                     ? `:${data.gateway.publicPort}`

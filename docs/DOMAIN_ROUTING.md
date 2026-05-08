@@ -1,6 +1,39 @@
 # Multi-tenant domain routing
 
-DevNest supports **tenant-style workspace URLs** when `DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED=true`:
+## Hybrid deployment (dashboard on Vercel, API + workspaces on EC2)
+
+Typical production split:
+
+| Traffic | Host example | Serves |
+|--------|----------------|--------|
+| Marketing / dashboard UI | `https://<apex>/` (e.g. dashboard origin from env) | Next.js on **Vercel** only |
+| Control-plane REST API | `https://api.<zone>/` | FastAPI on **EC2** (or cloud LB → EC2) |
+| Workspace IDE + WebSockets | `https://<route-subdomain>.<zone>/workspaces/<slug>` | Reverse proxy / Traefik on **EC2** → code-server (do **not** proxy IDE traffic through Vercel) |
+
+**Frontend (Vercel)** — browser calls the API directly:
+
+- `NEXT_PUBLIC_API_BASE_URL=https://api.<your-zone>`  
+- `NEXT_PUBLIC_DEVNEST_PUBLIC_BASE_DOMAIN=<your-zone>` — enables tenant middleware (`*.zone` workspace hosts).
+- `NEXT_PUBLIC_DEVNEST_APEX_URL=https://<apex-dashboard-origin>` — apex used for `/login?next=` redirects from tenant hosts (often same registrable zone without `www`, or your marketing host).
+- `NEXT_PUBLIC_DEVNEST_WORKSPACE_DOMAIN_MODE=tenant` — open-workspace flows use **only** `public_url` / `workspace_url` from attach; never fall back to internal `gateway_url`.
+
+**Backend (EC2)** — must agree with browser-visible origins:
+
+- `DEVNEST_FRONTEND_PUBLIC_BASE_URL` — apex/dashboard origin shown to users (OAuth/UI diagnostics).
+- `DEVNEST_API_PUBLIC_BASE_URL` — optional; logged at startup for operators (split-host EC2 API URL).
+- Tenant workspace URLs: `DEVNEST_WORKSPACE_DOMAIN_MODE=tenant`, `DEVNEST_PUBLIC_BASE_DOMAIN`, `DEVNEST_PUBLIC_SCHEME`, `DEVNEST_PUBLIC_PORT` (often empty).
+- Legacy/sslip stacks keep `DEVNEST_WORKSPACE_DOMAIN_MODE` unset or `legacy` and continue using `DEVNEST_BASE_DOMAIN` + `DEVNEST_GATEWAY_PUBLIC_*`.
+
+**DNS (conceptual)** — no hostname literals are hardcoded in code; substitute your zone:
+
+- Apex/dashboard → Vercel.
+- `api.<zone>` → EC2 (FastAPI).
+- `*.<zone>` wildcard → EC2 edge (Traefik/Caddy) for workspace hosts.
+
+---
+
+DevNest supports **tenant-style workspace URLs** when tenant routing is enabled (`DEVNEST_WORKSPACE_DOMAIN_MODE=tenant` and/or `DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED=true`; see table below):
+
 
 ```text
 https://<route-subdomain>.<DEVNEST_PUBLIC_BASE_DOMAIN>/workspaces/<url-slug>
@@ -18,10 +51,14 @@ Legacy routing (`ws-<workspace_id>.<DEVNEST_BASE_DOMAIN>/`) continues to work wh
 
 | Variable | Purpose |
 |----------|---------|
-| `DEVNEST_PUBLIC_BASE_DOMAIN` | Public apex host for tenant subdomains (e.g. `devnest.example.com`). |
+| `DEVNEST_WORKSPACE_DOMAIN_MODE` | `tenant` \| `legacy` \| empty. **`tenant`** forces per-user workspace URLs; **`legacy`** forces `ws-<id>` URLs; empty follows `DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED`. |
+| `DEVNEST_PUBLIC_BASE_DOMAIN` | Public apex host for tenant subdomains (wildcard DNS target). |
 | `DEVNEST_PUBLIC_SCHEME` | `http` or `https` for generated workspace URLs. |
-| `DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED` | Enable tenant URLs + gateway path prefixes. |
-| `DEVNEST_BASE_DOMAIN` | Legacy gateway host suffix for `ws-<id>` routes (still used for backward compatibility). |
+| `DEVNEST_PUBLIC_PORT` | Optional port on **browser** URLs (443/80 usually omitted). Tenant mode defaults to omitting `DEVNEST_GATEWAY_PUBLIC_PORT`. |
+| `DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED` | Legacy flag; honored when `DEVNEST_WORKSPACE_DOMAIN_MODE` is empty. |
+| `DEVNEST_BASE_DOMAIN` | Legacy gateway host suffix for `ws-<id>` routes and internal `gateway_url` in tenant mode. |
+| `DEVNEST_FRONTEND_PUBLIC_BASE_URL` | Browser-visible dashboard/marketing origin (OAuth + diagnostics). |
+| `DEVNEST_API_PUBLIC_BASE_URL` | Optional browser-visible API origin when API is split (e.g. `https://api…`). Logged at startup. |
 
 ## DNS
 
@@ -36,7 +73,7 @@ The left-most label is the per-user **route subdomain** (`UserAuth.route_subdoma
 - **Production:** terminate TLS at Traefik/Caddy with ACME (Let’s Encrypt DNS-01 recommended for wildcards) or your cloud LB certificate.
 - **Local:** use `mkcert` or Traefik’s default certificate for `*.devnest.local`; map hosts in `/etc/hosts` or use `.localhost` where appropriate.
 
-Generated URLs honor `DEVNEST_PUBLIC_SCHEME` and optional `DEVNEST_GATEWAY_PUBLIC_PORT` when the gateway is not on 80/443.
+Generated URLs honor `DEVNEST_PUBLIC_SCHEME`, `DEVNEST_PUBLIC_PORT`, and (in **legacy** mode) `DEVNEST_GATEWAY_PUBLIC_PORT` when the gateway is not on 80/443.
 
 ## Traefik (route-admin)
 
@@ -116,9 +153,13 @@ Adjust `reverse_proxy` targets to match your code-server sidecar. Preserve `X-Fo
 Structured logs (JSON logger consumers):
 
 - `routing.workspace_url_generated`
+- `routing.legacy_url_generated`
 - `routing.workspace_access_validated`
 - `routing.subdomain_parsed`
 - `routing.workspace_route_failed`
+- `routing_mode_selected` (startup; `extra.routing_mode` = `tenant` \| `legacy`)
+- `workspace.attach.public_url_selected`
+- `workspace.attach.tenant_mode_enabled`
 
 ## Control-plane API
 
@@ -140,15 +181,17 @@ Helpers (Python):
 | Frontend env | Purpose |
 |----------------|---------|
 | `NEXT_PUBLIC_DEVNEST_PUBLIC_BASE_DOMAIN` | Enables tenant middleware when set. |
+| `NEXT_PUBLIC_DEVNEST_WORKSPACE_DOMAIN_MODE` | `tenant` \| `legacy` \| unset — controls whether the UI may fall back to attach `gateway_url`. |
 | `NEXT_PUBLIC_DEVNEST_APEX_URL` | Optional apex origin for redirects. |
 | `NEXT_PUBLIC_DEVNEST_PUBLIC_SCHEME` | Fallback scheme if apex URL omitted. |
-| `AUTH_COOKIE_DOMAIN` | Parent domain for HttpOnly auth cookies (e.g. `.devnest.example.com`). |
+| `NEXT_PUBLIC_API_BASE_URL` | Browser → FastAPI (e.g. `https://api…` on EC2 when UI is on Vercel). |
+| `AUTH_COOKIE_DOMAIN` | Parent domain for HttpOnly auth cookies (e.g. `.example.com`). |
 
 ## Local development
 
 1. Set `DEVNEST_PUBLIC_BASE_DOMAIN` to something resolvable locally (e.g. `devnest.local`).
 2. Add `127.0.0.1 tim.devnest.local` (or use dnsmasq).
-3. Enable tenant routing if you want path-based URLs: `DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED=true`.
+3. Enable tenant routing for path-based URLs: `DEVNEST_WORKSPACE_DOMAIN_MODE=tenant` (and/or `DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED=true`).
 4. Run Traefik/Caddy + route-admin with the same base domain as the backend settings.
 5. For quick iteration without TLS, set `DEVNEST_PUBLIC_SCHEME=http` and use plain HTTP entrypoints.
 

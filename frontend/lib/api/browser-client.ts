@@ -116,6 +116,9 @@ export type SystemStatusPayload = {
     publicPort: number;
     authEnabled: boolean;
     routeAdminHost: string;
+    workspaceDomainMode?: string;
+    tenantWorkspaceUrlsEnabled?: boolean;
+    publicBaseDomain?: string;
   };
   worker: {
     deploymentModel: string;
