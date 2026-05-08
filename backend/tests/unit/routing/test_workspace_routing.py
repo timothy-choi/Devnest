@@ -44,6 +44,46 @@ def test_effective_public_scheme_prefers_explicit():
     assert effective_public_scheme(s) == "https"
 
 
+def test_effective_public_scheme_legacy_uses_gateway_when_public_empty():
+    s = MagicMock()
+    s.devnest_public_scheme = ""
+    s.devnest_workspace_domain_mode = ""
+    s.devnest_tenant_subdomain_routing_enabled = False
+    s.devnest_gateway_public_scheme = "http"
+    assert effective_public_scheme(s) == "http"
+
+
+def test_effective_public_scheme_tenant_defaults_https_when_public_empty():
+    s = MagicMock()
+    s.devnest_public_scheme = ""
+    s.devnest_workspace_domain_mode = "tenant"
+    s.devnest_tenant_subdomain_routing_enabled = False
+    s.devnest_gateway_public_scheme = "http"
+    assert effective_public_scheme(s) == "https"
+
+
+def test_build_workspace_url_legacy_http_matches_gateway_when_public_scheme_unset():
+    user = MagicMock()
+    user.route_subdomain_slug = "tim"
+    ws = MagicMock()
+    ws.workspace_id = 7
+    ws.owner_user_id = 1
+    ws.url_slug = "x"
+    ws.public_host = None
+    settings = MagicMock()
+    settings.devnest_workspace_domain_mode = ""
+    settings.devnest_public_scheme = ""
+    settings.devnest_public_port = 0
+    settings.devnest_tenant_subdomain_routing_enabled = False
+    settings.devnest_gateway_public_scheme = "http"
+    settings.devnest_gateway_public_port = 9081
+    settings.devnest_public_base_domain = "unused.example.com"
+    settings.devnest_base_domain = "1-2-3-4.sslip.io"
+
+    url = build_workspace_url(user=user, workspace=ws, settings=settings)
+    assert url == "http://ws-7.1-2-3-4.sslip.io:9081/"
+
+
 def test_build_workspace_url_tenant_mode():
     user = MagicMock()
     user.route_subdomain_slug = "tim"

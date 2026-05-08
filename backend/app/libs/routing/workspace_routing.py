@@ -38,13 +38,6 @@ def effective_public_base_domain(settings: Settings) -> str:
     return (settings.devnest_base_domain or "").strip().strip(".")
 
 
-def effective_public_scheme(settings: Settings) -> str:
-    pub = (settings.devnest_public_scheme or "").strip().lower().rstrip(":")
-    if pub:
-        return pub
-    return (settings.devnest_gateway_public_scheme or "http").strip().lower().rstrip(":")
-
-
 def tenant_workspace_urls_enabled(settings: Settings) -> bool:
     """True when browser-facing URLs use per-user host + ``/workspaces/<slug>``."""
     raw = getattr(settings, "devnest_workspace_domain_mode", "") or ""
@@ -54,6 +47,22 @@ def tenant_workspace_urls_enabled(settings: Settings) -> bool:
     if mode == "tenant":
         return True
     return bool(settings.devnest_tenant_subdomain_routing_enabled)
+
+
+def effective_public_scheme(settings: Settings) -> str:
+    """Browser scheme for workspace IDE URLs.
+
+    Explicit ``DEVNEST_PUBLIC_SCHEME`` always wins. When unset:
+    - **Tenant** routing defaults to ``https`` (real-domain / TLS rollout).
+    - **Legacy** routing follows ``DEVNEST_GATEWAY_PUBLIC_SCHEME`` (sslip + Traefik on :9081 stays HTTP).
+    """
+    raw = getattr(settings, "devnest_public_scheme", "") or ""
+    pub = raw.strip().lower().rstrip(":") if isinstance(raw, str) else ""
+    if pub:
+        return pub
+    if tenant_workspace_urls_enabled(settings):
+        return "https"
+    return (settings.devnest_gateway_public_scheme or "http").strip().lower().rstrip(":")
 
 
 def effective_browser_port(settings: Settings) -> int:

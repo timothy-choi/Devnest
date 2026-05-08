@@ -1,9 +1,17 @@
 /**
  * Workspace IDE open URL from attach response.
  *
- * **Tenant production:** set ``NEXT_PUBLIC_DEVNEST_WORKSPACE_DOMAIN_MODE=tenant`` so the UI never
- * navigates to ``gateway_url`` (internal ws-* / Traefik-debug URL). Legacy compose/sslip stacks leave
- * this unset or set ``legacy`` to keep gateway fallback when the API only returns ``gateway_url``.
+ * **Sslip / temporary HTTP edges:** Traefik is usually plain HTTP on e.g. ``:9081``. There is no trusted TLS
+ * certificate on ``*.sslip.io``, so the UI must **never** rewrite attach URLs to ``https:`` or derive schemes
+ * from ``window.location.protocol``. Production tenant rollout behind Cloudflare / wildcard certs sets
+ * ``NEXT_PUBLIC_DEVNEST_WORKSPACE_DOMAIN_MODE=tenant`` and backend ``DEVNEST_PUBLIC_SCHEME=https``.
+ *
+ * **Selection rules:**
+ * - ``NEXT_PUBLIC_DEVNEST_WORKSPACE_DOMAIN_MODE=tenant`` → ``workspace_url`` / ``public_url`` only (internal
+ *   ``gateway_url`` is ws-* debug and must not be used for navigation).
+ * - ``legacy`` or unset (default) → prefer ``gateway_url`` first so sslip stacks match the Traefik edge URL
+ *   the API intended; then ``workspace_url`` / ``public_url``. Values are passed through **verbatim** to
+ *   ``location.assign`` — no protocol normalization.
  */
 
 export type WorkspaceAttachLike = {
@@ -21,20 +29,57 @@ export function getFrontendWorkspaceDomainMode(): "tenant" | "legacy" | "" {
   return "";
 }
 
+function logWorkspaceOpenUrlDecision(
+  attach: WorkspaceAttachLike,
+  selected: string,
+  source: string,
+): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const gw = (attach.gateway_url || "").trim();
+  const pub = (attach.public_url || "").trim();
+  const ws = (attach.workspace_url || "").trim();
+  try {
+    console.info(
+      "[DevNest workspace open]",
+      JSON.stringify({
+        frontend_workspace_domain_mode: getFrontendWorkspaceDomainMode() || "unset-legacy-compat",
+        selection_source: source,
+        selected_url_prefix: selected.slice(0, 48),
+        attach_fields_present: {
+          gateway_url: Boolean(gw),
+          public_url: Boolean(pub),
+          workspace_url: Boolean(ws),
+        },
+      }),
+    );
+  } catch {
+    /* ignore logging failures */
+  }
+}
+
 /**
- * Browser navigation target after attach. In ``tenant`` mode, returns only ``workspace_url`` /
- * ``public_url`` (never ``gateway_url``).
+ * Browser navigation target after attach. Does not modify URL strings (no https upgrade).
  */
 export function workspaceBrowserOpenUrl(attach: WorkspaceAttachLike): string {
   const ws = (attach.workspace_url || "").trim();
   const pub = (attach.public_url || "").trim();
   const gw = (attach.gateway_url || "").trim();
   const mode = getFrontendWorkspaceDomainMode();
+
   if (mode === "tenant") {
-    return ws || pub;
+    const chosen = ws || pub;
+    logWorkspaceOpenUrlDecision(attach, chosen, "tenant:workspace_url|public_url_only");
+    return chosen;
   }
-  if (mode === "legacy") {
-    return gw || ws || pub;
-  }
-  return ws || pub || gw;
+
+  // Legacy / default: Traefik edge URL first (sslip HTTP); API keeps gateway_url aligned with registration.
+  const chosen = gw || ws || pub;
+  logWorkspaceOpenUrlDecision(
+    attach,
+    chosen,
+    mode === "legacy" ? "legacy:gateway_url|workspace_url|public_url" : "default-legacy:gateway_url|workspace_url|public_url",
+  );
+  return chosen;
 }

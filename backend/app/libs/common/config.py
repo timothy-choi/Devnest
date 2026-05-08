@@ -278,8 +278,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("DEVNEST_PUBLIC_BASE_DOMAIN", "devnest_public_base_domain"),
     )
+    # Empty → routing picks scheme per mode (legacy follows DEVNEST_GATEWAY_PUBLIC_SCHEME; tenant defaults https).
+    # Temporary sslip / HTTP edge stacks omit DEVNEST_PUBLIC_SCHEME and stay on http via gateway settings.
     devnest_public_scheme: str = Field(
-        default="https",
+        default="",
         validation_alias=AliasChoices("DEVNEST_PUBLIC_SCHEME", "devnest_public_scheme"),
     )
     devnest_tenant_subdomain_routing_enabled: bool = Field(
