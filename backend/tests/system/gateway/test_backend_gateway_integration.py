@@ -15,6 +15,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, select
 
+from app.libs.common.config import get_settings
+from app.libs.routing.workspace_routing import build_workspace_url, tenant_workspace_urls_enabled
+from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.models import (
     Workspace,
     WorkspaceJob,
@@ -22,6 +25,7 @@ from app.services.workspace_service.models import (
     WorkspaceRuntime,
     WorkspaceStatus,
 )
+from app.services.workspace_service.services import workspace_intent_service
 from app.services.workspace_service.services.workspace_event_service import list_workspace_events
 
 from . import helpers
@@ -104,14 +108,24 @@ def test_access_and_attach_return_public_host_and_gateway_url(
     helpers.process_job(client, jid)
     ws = db_session.get(Workspace, wid)
     assert ws is not None
+    owner = db_session.get(UserAuth, uid)
+    assert owner is not None
     expected_host = ws.public_host
     assert expected_host
+    settings = get_settings()
+    expected_browser_url = build_workspace_url(user=owner, workspace=ws, settings=settings)
 
     r_att = client.post(f"/workspaces/attach/{wid}", headers=helpers.auth_header(token))
     assert r_att.status_code == status.HTTP_200_OK, r_att.text
     att = r_att.json()
     assert att["public_host"] == expected_host
-    assert att["gateway_url"] == f"http://{expected_host}/"
+    assert att["public_url"] == expected_browser_url
+    assert att["workspace_url"] == expected_browser_url
+    if tenant_workspace_urls_enabled(settings):
+        expected_internal = workspace_intent_service._derive_internal_edge_gateway_url(ws, settings)
+        assert att["gateway_url"] == expected_internal
+    else:
+        assert att["gateway_url"] == expected_browser_url
     ws_tok = att["session_token"]
 
     r_acc = client.get(
@@ -121,7 +135,13 @@ def test_access_and_attach_return_public_host_and_gateway_url(
     assert r_acc.status_code == status.HTTP_200_OK, r_acc.text
     acc = r_acc.json()
     assert acc["public_host"] == expected_host
-    assert acc["gateway_url"] == f"http://{expected_host}/"
+    assert acc["public_url"] == expected_browser_url
+    assert acc["workspace_url"] == expected_browser_url
+    if tenant_workspace_urls_enabled(settings):
+        expected_internal = workspace_intent_service._derive_internal_edge_gateway_url(ws, settings)
+        assert acc["gateway_url"] == expected_internal
+    else:
+        assert acc["gateway_url"] == expected_browser_url
 
 
 def test_workspace_job_events_persist_after_running_with_gateway(

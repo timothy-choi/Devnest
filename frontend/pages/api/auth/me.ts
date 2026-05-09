@@ -13,6 +13,7 @@ type AuthProfile = {
   username: string;
   email: string;
   created_at: string;
+  route_subdomain_slug?: string | null;
 };
 
 type MyProfile = {
@@ -69,6 +70,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       displayName: profile?.display_name || auth.username,
       avatarUrl: profile?.avatar_url || null,
       profileLoaded: profileResponse.ok,
+      routeSubdomainSlug: auth.route_subdomain_slug?.trim() || null,
     },
   });
 }

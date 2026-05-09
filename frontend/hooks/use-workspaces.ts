@@ -6,6 +6,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { browserApi } from "@/lib/api/browser-client";
 import { ApiError } from "@/lib/api/error";
 import { getApiBaseUrl } from "@/lib/env";
+import { getDashboardOriginForAppShell } from "@/lib/tenant-routing";
+import { workspaceBrowserOpenUrl, getFrontendWorkspaceDomainMode } from "@/lib/workspace-open-url";
 import { WorkspaceFormValues } from "@/lib/validators";
 import { toWorkspace } from "@/lib/workspace-mappers";
 import { ProjectDataLifecycle, Workspace } from "@/types/workspace";
@@ -351,21 +353,29 @@ export function useWorkspaces() {
         );
       }
 
-      const gatewayUrl = (attach.gateway_url || "").trim();
-      if (!gatewayUrl) {
-        throw new ApiError(502, "No gateway URL was returned for this workspace.");
+      const openUrl = workspaceBrowserOpenUrl(attach);
+      if (!openUrl) {
+        const tenantUi = getFrontendWorkspaceDomainMode() === "tenant";
+        throw new ApiError(
+          502,
+          tenantUi
+            ? "No tenant workspace URL was returned (public_url/workspace_url). Check the API has DEVNEST_WORKSPACE_DOMAIN_MODE=tenant and DEVNEST_PUBLIC_BASE_DOMAIN set."
+            : "No workspace URL was returned for this workspace.",
+        );
       }
 
       const browserWindow = typeof globalThis !== "undefined" ? globalThis.window : undefined;
       if (browserWindow) {
         browserWindow.sessionStorage.setItem("devnestWorkspaceReturnTarget", "/dashboard");
-        const dashboardUrl = new URL("/dashboard?workspaceReturn=1", browserWindow.location.origin).toString();
+        const apexOrigin = getDashboardOriginForAppShell();
+        const origin = apexOrigin || browserWindow.location.origin;
+        const dashboardUrl = new URL("/dashboard?workspaceReturn=1", origin).toString();
         browserWindow.history.pushState({ devnestWorkspaceReturn: true }, "", dashboardUrl);
-        browserWindow.location.assign(gatewayUrl);
+        browserWindow.location.assign(openUrl);
         return;
       }
 
-      globalThis.location?.assign(gatewayUrl);
+      globalThis.location?.assign(openUrl);
       return;
     } catch (error) {
       queryClient.setQueryData<Workspace[]>(["workspaces"], previousWorkspaces);

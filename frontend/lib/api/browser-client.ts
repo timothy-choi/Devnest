@@ -21,6 +21,7 @@ export type AuthUser = {
   displayName: string;
   avatarUrl: string | null;
   profileLoaded: boolean;
+  routeSubdomainSlug: string | null;
 };
 
 export type WorkspaceRecord = {
@@ -76,6 +77,8 @@ export type WorkspaceDetail = {
 
 export type WorkspaceAttachResponse = {
   accepted?: boolean;
+  public_url?: string | null;
+  workspace_url?: string | null;
   gateway_url?: string | null;
   issues?: string[];
   detail?: string;
@@ -113,6 +116,9 @@ export type SystemStatusPayload = {
     publicPort: number;
     authEnabled: boolean;
     routeAdminHost: string;
+    workspaceDomainMode?: string;
+    tenantWorkspaceUrlsEnabled?: boolean;
+    publicBaseDomain?: string;
   };
   worker: {
     deploymentModel: string;

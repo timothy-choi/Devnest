@@ -9,5 +9,10 @@ class GatewayRouteRegisterPayload(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=128)
     public_host: str = Field(min_length=1, max_length=512)
     target: str = Field(min_length=1, max_length=1024)
+    path_prefix: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Traefik PathPrefix when set; stripped before upstream.",
+    )
     node_key: str | None = Field(default=None, max_length=256)
     execution_node_id: int | None = Field(default=None, ge=1)

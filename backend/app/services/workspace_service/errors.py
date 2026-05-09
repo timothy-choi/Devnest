@@ -61,6 +61,12 @@ class WorkspaceSchedulingInvalidError(WorkspaceServiceError):
     pass
 
 
+class WorkspaceSlugConflictError(WorkspaceServiceError):
+    """Workspace URL slug already exists for this owner."""
+
+    pass
+
+
 class WorkspaceOperatorPinnedDisabledError(WorkspaceServiceError):
     """Pinned operator test workspace path is disabled in settings."""
 

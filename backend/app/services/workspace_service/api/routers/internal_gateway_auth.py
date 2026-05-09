@@ -2,7 +2,10 @@
 
 Traefik calls ``GET /internal/gateway/auth`` before proxying each workspace request.
 The backend validates:
-  - workspace_id (derived from X-Forwarded-Host matching ``ws-{id}.<base_domain>``)
+  - workspace_id:
+      - legacy: from ``X-Forwarded-Host`` matching ``ws-{id}.<DEVNEST_BASE_DOMAIN>`` (or numeric host), or
+      - tenant mode: from ``<route_subdomain_slug>.<DEVNEST_PUBLIC_BASE_DOMAIN>`` plus path ``/workspaces/<url_slug>``
+        (requires ``X-Forwarded-Uri`` or equivalent when enabled).
   - session token (X-DevNest-Workspace-Session header forwarded from the client)
   - workspace exists and is RUNNING
   - session is ACTIVE and not expired
@@ -20,18 +23,27 @@ TODO: When DEVNEST_GATEWAY_AUTH_ENABLED=false (dev/local) this endpoint returns 
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import re
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request
 from fastapi.responses import Response
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 from app.libs.db.database import get_db
 from app.libs.observability.log_events import LogEvent, log_event
+from app.libs.routing.workspace_routing import (
+    effective_public_base_domain,
+    extract_workspace_slug_from_path,
+    log_subdomain_parsed,
+    log_workspace_access_validated,
+    log_workspace_route_failed,
+    parse_workspace_host,
+    tenant_workspace_urls_enabled,
+)
+from app.services.auth_service.models import UserAuth
 from app.services.workspace_service.models import Workspace, WorkspaceSession
 from app.services.workspace_service.models.enums import WorkspaceSessionStatus, WorkspaceStatus
 from app.services.workspace_service.services.workspace_session_service import (
@@ -86,6 +98,58 @@ def _workspace_id_from_host(host: str, base_domain: str) -> int | None:
     return None
 
 
+def _resolve_workspace_id_from_gateway_request(
+    session: Session,
+    *,
+    forwarded_host: str,
+    forwarded_uri: str | None,
+    settings,
+) -> int | None:
+    """Legacy ``ws-<id>.<DEVNEST_BASE_DOMAIN>`` first, then tenant routes when enabled."""
+    base_legacy = (settings.devnest_base_domain or "").strip().strip(".")
+    wid = _workspace_id_from_host(forwarded_host, base_legacy)
+    if wid is not None:
+        return wid
+    if not tenant_workspace_urls_enabled(settings):
+        return None
+    base_pub = effective_public_base_domain(settings)
+    sub = parse_workspace_host(forwarded_host, base_pub)
+    log_subdomain_parsed(forwarded_host=forwarded_host, base_domain=base_pub, subdomain=sub)
+    if not sub:
+        log_workspace_route_failed(reason="tenant_subdomain_unparsed", forwarded_host=forwarded_host)
+        return None
+    slug = extract_workspace_slug_from_path(forwarded_uri or "/")
+    if not slug:
+        log_workspace_route_failed(
+            reason="tenant_path_missing_slug",
+            forwarded_host=forwarded_host,
+            detail=(forwarded_uri or "")[:256],
+        )
+        return None
+    user = session.exec(select(UserAuth).where(UserAuth.route_subdomain_slug == sub)).first()
+    if user is None or user.user_auth_id is None:
+        log_workspace_route_failed(reason="tenant_user_not_found", forwarded_host=forwarded_host, detail=sub)
+        return None
+    ws = session.exec(
+        select(Workspace).where(
+            Workspace.owner_user_id == user.user_auth_id,
+            func.lower(Workspace.url_slug) == slug.lower(),
+            Workspace.status != WorkspaceStatus.DELETED.value,
+        )
+    ).first()
+    if ws is None or ws.workspace_id is None:
+        log_workspace_route_failed(reason="tenant_workspace_not_found", forwarded_host=forwarded_host, detail=slug)
+        return None
+    log_workspace_access_validated(
+        workspace_id=int(ws.workspace_id),
+        owner_user_id=int(ws.owner_user_id),
+        route_mode="tenant_subdomain",
+        subdomain=sub,
+        url_slug=slug,
+    )
+    return int(ws.workspace_id)
+
+
 @router.get(
     "/auth",
     summary="ForwardAuth workspace session check (Traefik edge)",
@@ -97,6 +161,7 @@ def gateway_forward_auth(
     request: Request,
     session: Session = Depends(get_db),
     x_forwarded_host: str | None = Header(default=None, alias="X-Forwarded-Host"),
+    x_forwarded_uri: str | None = Header(default=None, alias="X-Forwarded-Uri"),
     x_devnest_ws_session: str | None = Header(default=None, alias=WORKSPACE_SESSION_HTTP_HEADER),
     devnest_ws_session_cookie: str | None = Cookie(default=None, alias=WORKSPACE_SESSION_COOKIE_NAME),
 ) -> Response:
@@ -114,9 +179,15 @@ def gateway_forward_auth(
     if not settings.devnest_gateway_auth_enabled:
         return Response(status_code=200)
 
-    # Derive workspace_id from the forwarded host header.
+    # Derive workspace_id from the forwarded host (legacy) or tenant host+path.
     forwarded_host = (x_forwarded_host or request.headers.get("host", "")).strip()
-    workspace_id = _workspace_id_from_host(forwarded_host, settings.devnest_base_domain)
+    forwarded_uri = (x_forwarded_uri or request.headers.get("X-Forwarded-Uri") or request.url.path or "").strip()
+    workspace_id = _resolve_workspace_id_from_gateway_request(
+        session,
+        forwarded_host=forwarded_host,
+        forwarded_uri=forwarded_uri,
+        settings=settings,
+    )
     if workspace_id is None:
         log_event(
             _logger,

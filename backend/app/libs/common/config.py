@@ -187,6 +187,15 @@ class Settings(BaseSettings):
     # Browser-visible UI origin (``docker-compose.integration.yml`` / EC2). Used to fix OAuth redirect
     # bases when ``backend/.env`` still pins ``GITHUB_OAUTH_PUBLIC_BASE_URL`` to localhost.
     devnest_frontend_public_base_url: str = ""
+    # Browser-visible FastAPI origin when UI is split (e.g. Vercel dashboard + EC2 API). Used in diagnostics;
+    # link generation for the UI continues to use ``devnest_frontend_public_base_url`` / OAuth bases.
+    devnest_api_public_base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "DEVNEST_API_PUBLIC_BASE_URL",
+            "devnest_api_public_base_url",
+        ),
+    )
 
     # --- Internal platform auth (sensitive; header X-Internal-API-Key) ---
     # Legacy single key: used for any internal surface whose scope-specific key is unset.
@@ -263,6 +272,40 @@ class Settings(BaseSettings):
     # Optional Traefik HTTP base (e.g. ``http://traefik:80`` on the Docker network). When set, attach/access
     # waits until a GET with ``Host: <workspace hostname>`` is not 404 so the edge has loaded dynamic routes.
     devnest_gateway_traefik_http_probe_base: str = ""
+    # Multi-tenant workspace URLs: https://<slug>.<DEVNEST_PUBLIC_BASE_DOMAIN>/workspaces/<url_slug>
+    # When unset, falls back to DEVNEST_BASE_DOMAIN for host parsing / URL generation.
+    devnest_public_base_domain: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DEVNEST_PUBLIC_BASE_DOMAIN", "devnest_public_base_domain"),
+    )
+    # Empty → routing picks scheme per mode (legacy follows DEVNEST_GATEWAY_PUBLIC_SCHEME; tenant defaults https).
+    # Temporary sslip / HTTP edge stacks omit DEVNEST_PUBLIC_SCHEME and stay on http via gateway settings.
+    devnest_public_scheme: str = Field(
+        default="",
+        validation_alias=AliasChoices("DEVNEST_PUBLIC_SCHEME", "devnest_public_scheme"),
+    )
+    devnest_tenant_subdomain_routing_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED",
+            "devnest_tenant_subdomain_routing_enabled",
+        ),
+    )
+    # Primary switch for browser-facing workspace URLs: ``tenant`` → ``https://<route_subdomain>.<public_base>/workspaces/<slug>``.
+    # ``legacy`` forces per-workspace ``ws-<id>`` hosts. Empty → follow ``DEVNEST_TENANT_SUBDOMAIN_ROUTING_ENABLED`` only.
+    devnest_workspace_domain_mode: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "DEVNEST_WORKSPACE_DOMAIN_MODE",
+            "devnest_workspace_domain_mode",
+        ),
+    )
+    # Optional port for user-facing workspace URLs (443/80 usually omitted). When unset, tenant URLs omit non-default ports;
+    # legacy mode falls back to ``DEVNEST_GATEWAY_PUBLIC_PORT``.
+    devnest_public_port: int = Field(
+        default=0,
+        validation_alias=AliasChoices("DEVNEST_PUBLIC_PORT", "devnest_public_port"),
+    )
 
     # Outbound notification email (optional). If smtp_host is empty, the email channel stays in stub mode.
     smtp_host: str = ""
@@ -560,6 +603,22 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 0
         return max(0, min(n, 65535))
+
+    @field_validator("devnest_public_port", mode="before")
+    @classmethod
+    def _coerce_public_port(cls, v):  # noqa: ANN001
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(n, 65535))
+
+    @field_validator("devnest_workspace_domain_mode", mode="before")
+    @classmethod
+    def _normalize_workspace_domain_mode(cls, v):  # noqa: ANN001
+        if v is None:
+            return ""
+        return str(v).strip().lower()
 
     @field_validator("devnest_reconcile_interval_seconds", mode="before")
     @classmethod

@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from app.libs.common.config import database_host_and_name_for_log, get_settings
 from app.libs.db.database import get_db, get_engine
+from app.libs.routing.workspace_routing import effective_public_base_domain, tenant_workspace_urls_enabled
 from app.services.auth_service.api.dependencies import get_current_user
 from app.services.auth_service.models import UserAuth
 from app.services.storage.factory import snapshot_storage_log_fields
@@ -39,6 +40,19 @@ class GatewayStatusOut(BaseModel):
     public_port: int = 0
     auth_enabled: bool
     route_admin_host: str = ""
+    # Workspace browser URL routing (see docs/DOMAIN_ROUTING.md).
+    workspace_domain_mode: str = Field(
+        default="",
+        description="Raw DEVNEST_WORKSPACE_DOMAIN_MODE (tenant / legacy / empty).",
+    )
+    tenant_workspace_urls_enabled: bool = Field(
+        default=False,
+        description="True when attach/open use per-user host + /workspaces/<slug> for public_url.",
+    )
+    public_base_domain: str = Field(
+        default="",
+        description="Effective apex for tenant workspace hosts (explicit DEVNEST_PUBLIC_BASE_DOMAIN or DEVNEST_BASE_DOMAIN).",
+    )
 
 
 class WorkerStatusOut(BaseModel):
@@ -167,6 +181,9 @@ def get_system_status(
             public_port=int(settings.devnest_gateway_public_port or 0),
             auth_enabled=bool(settings.devnest_gateway_auth_enabled),
             route_admin_host=_safe_route_admin_host(settings.devnest_gateway_url),
+            workspace_domain_mode=(settings.devnest_workspace_domain_mode or "").strip(),
+            tenant_workspace_urls_enabled=tenant_workspace_urls_enabled(settings),
+            public_base_domain=effective_public_base_domain(settings),
         ),
         worker=WorkerStatusOut(
             deployment_model=deployment_model,

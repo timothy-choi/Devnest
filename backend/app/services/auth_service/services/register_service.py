@@ -3,6 +3,7 @@
 import bcrypt
 from sqlmodel import Session, select
 
+from app.libs.routing.workspace_routing import allocate_unique_route_subdomain_slug
 from app.services.auth_service.models import UserAuth
 from app.services.user_service.repositories import user_profile_repo
 
@@ -28,7 +29,8 @@ def register_user(
         raise DuplicateEmailError
 
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-    user = UserAuth(username=username, email=email, password_hash=password_hash)
+    route_slug = allocate_unique_route_subdomain_slug(session, preferred_username=username)
+    user = UserAuth(username=username, email=email, password_hash=password_hash, route_subdomain_slug=route_slug)
     session.add(user)
     session.commit()
     session.refresh(user)

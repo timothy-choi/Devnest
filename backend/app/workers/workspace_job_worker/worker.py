@@ -1074,6 +1074,7 @@ def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
             int(wid),
             settings.devnest_base_domain,
         )
+        path_pf = (ws.gateway_path_prefix or "").strip() or None
         nk = ((rt.node_id or "").strip() or None)
         node = None
         if nk:
@@ -1111,6 +1112,7 @@ def _gateway_try_register_running(session: Session, ws: Workspace) -> None:
             str(wid),
             upstream,
             public,
+            path_prefix=path_pf,
             node_key=nk,
             execution_node_id=ws.execution_node_id,
         )

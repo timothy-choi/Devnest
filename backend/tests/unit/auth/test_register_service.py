@@ -30,6 +30,7 @@ def test_register_user_success_assigns_id_and_persists(mock_create_profile: Magi
     mock_session.exec.side_effect = [
         _exec_result(None),
         _exec_result(None),
+        _exec_result(None),
     ]
 
     captured: dict[str, UserAuth] = {}
@@ -58,7 +59,7 @@ def test_register_user_success_assigns_id_and_persists(mock_create_profile: Magi
     mock_session.add.assert_called_once_with(user)
     mock_session.commit.assert_called_once()
     mock_session.refresh.assert_called_once_with(user)
-    assert mock_session.exec.call_count == 2
+    assert mock_session.exec.call_count == 3
     mock_create_profile.assert_called_once_with(mock_session, user_id=42)
 
 
@@ -110,6 +111,7 @@ def test_register_user_hashes_password_before_add(
     mock_hashpw.return_value = b"hashed_secret"
 
     mock_session.exec.side_effect = [
+        _exec_result(None),
         _exec_result(None),
         _exec_result(None),
     ]

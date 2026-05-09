@@ -166,6 +166,7 @@ class WorkspaceSummaryResponse(BaseModel):
 
     workspace_id: int
     name: str
+    url_slug: str = Field(default="", max_length=128, description="URL path segment under /workspaces/<slug> for tenant routing.")
     status: str
     is_private: bool
     created_at: datetime
@@ -190,9 +191,20 @@ class WorkspaceAccessResponse(BaseModel):
     endpoint_ref: str | None = None
     public_host: str | None = None
     internal_endpoint: str | None = None
+    public_url: str | None = Field(
+        default=None,
+        description="Browser URL for the workspace IDE (tenant path or legacy ws-* host).",
+    )
+    workspace_url: str | None = Field(
+        default=None,
+        description="Alias of public_url for clients that prefer an explicit open-workspace field.",
+    )
     gateway_url: str | None = Field(
         default=None,
-        description="TODO: public URL via edge gateway when route registration exists; V1 returns null.",
+        description=(
+            "Legacy: same as public_url. Tenant mode: optional ws-<id> Traefik/debug URL on DEVNEST_BASE_DOMAIN; "
+            "prefer public_url for navigation."
+        ),
     )
     issues: list[str] = Field(default_factory=list)
 
@@ -214,9 +226,20 @@ class WorkspaceAttachResponse(BaseModel):
     endpoint_ref: str | None = None
     public_host: str | None = None
     internal_endpoint: str | None = None
+    public_url: str | None = Field(
+        default=None,
+        description="Browser URL for the workspace IDE (tenant path or legacy ws-* host).",
+    )
+    workspace_url: str | None = Field(
+        default=None,
+        description="Alias of public_url for clients that prefer an explicit open-workspace field.",
+    )
     gateway_url: str | None = Field(
         default=None,
-        description="TODO: public URL via edge gateway when route registration exists; V1 returns null.",
+        description=(
+            "Legacy: same as public_url. Tenant mode: optional ws-<id> Traefik/debug URL on DEVNEST_BASE_DOMAIN; "
+            "prefer public_url for navigation."
+        ),
     )
     issues: list[str] = Field(default_factory=list)
 
@@ -226,6 +249,7 @@ class WorkspaceDetailResponse(BaseModel):
 
     workspace_id: int
     name: str
+    url_slug: str = Field(default="", max_length=128)
     description: str | None
     owner_user_id: int
     status: str

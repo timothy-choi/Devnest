@@ -6,4 +6,6 @@ export type CurrentUser = {
   displayName: string;
   avatarUrl: string | null;
   profileLoaded: boolean;
+  /** DNS route label for ``https://<slug>.<public-base-domain>/...`` (may differ from username). */
+  routeSubdomainSlug: string | null;
 };

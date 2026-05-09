@@ -5,10 +5,13 @@ import { Code2, Loader2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/use-auth";
 import { AuthGuard } from "@/components/auth/auth-guard";
+import { TenantWorkspaceHostGuard } from "@/components/auth/tenant-workspace-host-guard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { workspaceBrowserOpenUrl } from "@/lib/workspace-open-url";
 
 type WorkspaceDetailJson = {
+  workspace_id?: number;
+  url_slug?: string;
   status?: string;
   last_error_message?: string | null;
   reopen_issues?: string[];
@@ -23,10 +26,10 @@ type AttachJson = {
   detail?: string;
 };
 
-export default function WorkspacePage() {
+export default function WorkspaceBySlugPage() {
   const router = useRouter();
   const { isAuthenticated, isLoading, isCheckingSession } = useAuth();
-  const workspaceId = typeof router.query.id === "string" ? router.query.id : "preview";
+  const slug = typeof router.query.slug === "string" ? router.query.slug : "preview";
   const [message, setMessage] = useState<string | null>(null);
   const opened = useRef(false);
 
@@ -41,7 +44,7 @@ export default function WorkspacePage() {
   useEffect(() => {
     opened.current = false;
     setMessage(null);
-  }, [workspaceId]);
+  }, [slug]);
 
   useEffect(() => {
     if (!router.isReady || isLoading || isCheckingSession) {
@@ -50,15 +53,13 @@ export default function WorkspacePage() {
     if (!isAuthenticated) {
       return;
     }
-    if (workspaceId === "preview") {
+    if (slug === "preview") {
       return;
     }
 
     const navEntry = typeof window !== "undefined" ? window.performance.getEntriesByType("navigation")[0] : null;
     const navType =
-      navEntry && "type" in navEntry
-        ? String((navEntry as PerformanceNavigationTiming).type || "")
-        : "";
+      navEntry && "type" in navEntry ? String((navEntry as PerformanceNavigationTiming).type || "") : "";
     if (navType === "back_forward") {
       opened.current = true;
       redirectToDashboard();
@@ -73,10 +74,16 @@ export default function WorkspacePage() {
     const run = async () => {
       opened.current = true;
       try {
-        const detailRes = await fetch(`/api/workspaces/${workspaceId}`);
+        const detailRes = await fetch(`/api/workspaces/by-url-slug/${encodeURIComponent(slug)}`);
         const detail = (await detailRes.json()) as WorkspaceDetailJson & { detail?: string };
         if (!detailRes.ok) {
           setMessage(typeof detail.detail === "string" ? detail.detail : "Unable to load workspace.");
+          redirectToDashboard();
+          return;
+        }
+        const workspaceId = detail.workspace_id;
+        if (typeof workspaceId !== "number") {
+          setMessage("Workspace response missing id.");
           redirectToDashboard();
           return;
         }
@@ -105,16 +112,16 @@ export default function WorkspacePage() {
           if (attachRes.ok) {
             break;
           }
-          const detail = typeof attach.detail === "string" ? attach.detail : "";
+          const errDetail = typeof attach.detail === "string" ? attach.detail : "";
           const transientDetail =
             /retry shortly|not ready|reconcile job was queued|timeout|traefik|gateway edge|ide upstream|restart workspace/i;
           const transient =
-            (attachRes.status === 503 || attachRes.status === 409) && transientDetail.test(detail);
+            (attachRes.status === 503 || attachRes.status === 409) && transientDetail.test(errDetail);
           if (transient && attempt < maxAttachAttempts - 1) {
             await new Promise((r) => setTimeout(r, 180 + attempt * 140));
             continue;
           }
-          setMessage(detail || "Unable to attach to this workspace.");
+          setMessage(errDetail || "Unable to attach to this workspace.");
           redirectToDashboard();
           return;
         }
@@ -155,22 +162,25 @@ export default function WorkspacePage() {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, isCheckingSession, isLoading, router, workspaceId]);
+  }, [isAuthenticated, isCheckingSession, isLoading, router, slug]);
 
   return (
     <AuthGuard>
-      <>
-        <Head>
-          <title>Workspace {workspaceId} | DevNest</title>
-        </Head>
+      <TenantWorkspaceHostGuard>
+        <>
+          <Head>
+            <title>Workspace /{slug} | DevNest</title>
+          </Head>
         <main className="min-h-screen bg-[linear-gradient(180deg,_#f8fafc_0%,_#eef2ff_100%)] px-6 py-10">
           <div className="mx-auto flex max-w-5xl flex-col gap-6">
             <div className="space-y-2">
-              <p className="text-sm font-medium uppercase tracking-[0.25em] text-slate-500">Workspace {workspaceId}</p>
+              <p className="text-sm font-medium uppercase tracking-[0.25em] text-slate-500">
+                Workspace /workspaces/{slug}
+              </p>
               <h1 className="text-3xl font-semibold tracking-tight text-slate-950">Opening your workspace…</h1>
               <p className="max-w-2xl text-slate-600">
-                When the gateway is enabled, you are redirected to the code-server host on your edge domain. The
-                control plane stores an HttpOnly session cookie for Traefik ForwardAuth when gateway auth is on.
+                Tenant URLs use your route subdomain and this slug under <code className="text-sm">/workspaces/</code>.
+                When the gateway is enabled, you are redirected to code-server on the edge domain.
               </p>
             </div>
 
@@ -189,8 +199,8 @@ export default function WorkspacePage() {
                 <div className="rounded-3xl border border-dashed border-sky-200 bg-sky-50/70 p-5">
                   <p className="text-sm font-medium text-sky-800">What happens next</p>
                   <p className="mt-2 text-sm leading-6 text-sky-700">
-                    The app loads workspace metadata, calls attach to mint a session, then navigates to the Traefik
-                    route for code-server (same host cookie when your API and gateway share a registrable domain).
+                    The app resolves your workspace by slug, calls attach to mint a session, then navigates to the
+                    Traefik route for code-server (tenant path prefix when multi-tenant routing is enabled).
                   </p>
                 </div>
                 <div className="flex min-h-[360px] items-center justify-center rounded-3xl border border-slate-200 bg-slate-950 px-6 text-center text-slate-100">
@@ -210,6 +220,7 @@ export default function WorkspacePage() {
           </div>
         </main>
       </>
+      </TenantWorkspaceHostGuard>
     </AuthGuard>
   );
 }

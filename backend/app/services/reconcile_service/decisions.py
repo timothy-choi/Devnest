@@ -30,11 +30,16 @@ def _norm_public_host(raw: str | None) -> str:
     return (raw or "").strip().lower()
 
 
+def _norm_path_prefix(raw: str | None) -> str:
+    return (raw or "").strip().rstrip("/")
+
+
 def gateway_route_needs_repair(
     *,
     route_row: dict | None,
     observed_internal_endpoint: str | None,
     expected_public_host: str | None = None,
+    expected_path_prefix: str | None = None,
 ) -> bool:
     """``observed_internal_endpoint`` is the desired route-admin ``target`` (Traefik upstream), not necessarily the topology IP."""
     ep = (observed_internal_endpoint or "").strip()
@@ -49,5 +54,9 @@ def gateway_route_needs_repair(
         return True
     want = _norm_public_host(expected_public_host)
     if want and _norm_public_host(str(route_row.get("public_host") or "")) != want:
+        return True
+    want_p = _norm_path_prefix(expected_path_prefix)
+    got_p = _norm_path_prefix(str(route_row.get("path_prefix") or ""))
+    if want_p != got_p:
         return True
     return False

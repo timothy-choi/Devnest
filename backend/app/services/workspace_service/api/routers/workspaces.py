@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlmodel import Session
 
 from app.libs.common.config import get_settings
+from app.libs.routing.workspace_routing import effective_public_base_domain, tenant_workspace_urls_enabled
 
 from app.libs.db.database import get_db, get_engine
 from app.libs.observability.log_events import LogEvent, log_event
@@ -40,6 +41,7 @@ from app.services.workspace_service.errors import (
     WorkspaceSchedulingCapacityError,
     WorkspaceSchedulingInvalidError,
     WorkspaceServiceError,
+    WorkspaceSlugConflictError,
 )
 from app.services.workspace_service.services import workspace_intent_service
 from app.services.workspace_service.services.workspace_secret_service import (
@@ -79,6 +81,8 @@ def _raise_workspace_http(exc: WorkspaceServiceError) -> None:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceBusyError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if isinstance(exc, WorkspaceSlugConflictError):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if isinstance(exc, WorkspaceInvalidStateError):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -106,6 +110,8 @@ def _access_response(out: workspace_intent_service.WorkspaceAccessResult) -> Wor
         endpoint_ref=out.endpoint_ref,
         public_host=out.public_host,
         internal_endpoint=out.internal_endpoint,
+        public_url=out.public_url,
+        workspace_url=out.workspace_url,
         gateway_url=out.gateway_url,
         issues=list(out.issues),
     )
@@ -124,6 +130,8 @@ def _attach_response(out: workspace_intent_service.WorkspaceAttachResult) -> Wor
         endpoint_ref=out.endpoint_ref,
         public_host=out.public_host,
         internal_endpoint=out.internal_endpoint,
+        public_url=out.public_url,
+        workspace_url=out.workspace_url,
         gateway_url=out.gateway_url,
         issues=list(out.issues),
     )
@@ -247,6 +255,32 @@ def get_workspaces(
         limit=limit,
     )
     return WorkspaceListResponse(items=items, total=total)
+
+
+@router.get(
+    "/by-url-slug/{url_slug}",
+    response_model=WorkspaceDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get workspace by URL slug (tenant path segment)",
+    description=(
+        "Looks up a non-deleted workspace owned by the caller where ``url_slug`` matches "
+        "the slugified name (same rules as ``/workspaces/<slug>`` on the tenant subdomain)."
+    ),
+)
+def get_workspace_by_url_slug_route(
+    url_slug: str,
+    session: Session = Depends(get_db),
+    current: UserAuth = Depends(get_current_user),
+) -> WorkspaceDetailResponse:
+    assert current.user_auth_id is not None
+    detail = workspace_intent_service.get_workspace_by_url_slug(
+        session,
+        owner_user_id=current.user_auth_id,
+        url_slug=url_slug,
+    )
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return detail
 
 
 @router.post(
@@ -430,6 +464,7 @@ def post_workspace_attach(
             workspace_id=workspace_id,
             user_id=uid,
             gateway_url_present=bool((out.gateway_url or "").strip()),
+            public_url_present=bool((out.public_url or out.workspace_url or "").strip()),
             public_host_present=bool((out.public_host or "").strip()),
         )
     resp = JSONResponse(status_code=status.HTTP_200_OK, content=payload.model_dump(mode="json"))
@@ -443,7 +478,12 @@ def post_workspace_attach(
         req_https = request.url.scheme == "https"
         max_age = max(60, int(settings.workspace_session_ttl_seconds))
         tok = out.session_token.strip()
-        dom = (settings.devnest_base_domain or "").strip().strip(".")
+        dom_raw = (
+            effective_public_base_domain(settings)
+            if tenant_workspace_urls_enabled(settings)
+            else (settings.devnest_base_domain or "")
+        )
+        dom = dom_raw.strip().strip(".")
         if dom and "." in dom:
             resp.set_cookie(
                 WORKSPACE_SESSION_COOKIE_NAME,

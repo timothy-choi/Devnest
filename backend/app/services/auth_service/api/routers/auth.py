@@ -1,6 +1,8 @@
+import re
+
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
-from sqlmodel import Session
+from fastapi.responses import JSONResponse, Response
+from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
 from app.libs.security.rate_limit import auth_rate_limit
@@ -325,6 +327,25 @@ def delete_account(
     return DeleteAccountResponse()
 
 
+_ROUTE_SUBDOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$")
+
+
+@router.get(
+    "/public/route-tenants/{subdomain}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Check whether a route subdomain is registered (public; no auth)",
+)
+def check_route_tenant_public(subdomain: str, session: Session = Depends(get_db)) -> Response:
+    """Returns 204 when ``route_subdomain_slug`` exists; 404 otherwise (no user creation)."""
+    raw = (subdomain or "").strip().lower()
+    if not raw or not _ROUTE_SUBDOMAIN_RE.match(raw):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    row = session.exec(select(UserAuth.user_auth_id).where(UserAuth.route_subdomain_slug == raw)).first()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get(
     "",
     response_model=AuthProfileResponse,
@@ -333,9 +354,11 @@ def delete_account(
 )
 def get_auth_profile(current: UserAuth = Depends(get_current_user)) -> AuthProfileResponse:
     assert current.user_auth_id is not None
+    slug = (current.route_subdomain_slug or "").strip() or None
     return AuthProfileResponse(
         user_auth_id=current.user_auth_id,
         username=current.username,
         email=current.email,
         created_at=current.created_at,
+        route_subdomain_slug=slug,
     )

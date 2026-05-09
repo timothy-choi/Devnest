@@ -9,6 +9,7 @@ import bcrypt
 from sqlmodel import Session, select
 
 from app.libs.common.config import get_settings
+from app.libs.routing.workspace_routing import allocate_unique_route_subdomain_slug
 from app.services.auth_service.models import OAuth, Token, UserAuth
 from app.services.user_service.repositories import user_profile_repo
 from app.services.auth_service.services.auth_token import create_access_token
@@ -124,10 +125,12 @@ def complete_oauth(
 
     base_name = profile.username or f"{p}_{profile.provider_user_id}"
     username = _unique_username(session, base_name)
+    route_slug = allocate_unique_route_subdomain_slug(session, preferred_username=username)
     user = UserAuth(
         username=username,
         email=profile.email,
         password_hash=oauth_placeholder_password_hash(),
+        route_subdomain_slug=route_slug,
     )
     session.add(user)
     session.commit()

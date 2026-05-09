@@ -63,6 +63,7 @@ class DevnestGatewayClient:
         internal_endpoint: str,
         public_host: str,
         *,
+        path_prefix: str | None = None,
         node_key: str | None = None,
         execution_node_id: int | None = None,
     ) -> None:
@@ -72,10 +73,12 @@ class DevnestGatewayClient:
             raise ValueError("workspace_id and public_host are required")
         target = _normalize_target(internal_endpoint)
         nk = (node_key or "").strip() or None
+        pp = (path_prefix or "").strip() or None
         payload = GatewayRouteRegisterPayload(
             workspace_id=wid,
             public_host=host,
             target=target,
+            path_prefix=pp,
             node_key=nk,
             execution_node_id=execution_node_id,
         ).model_dump(exclude_none=True)

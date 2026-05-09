@@ -27,6 +27,7 @@ class Workspace(SQLModel, table=True):
         max_length=64,
     )
     name: str = Field(index=True, max_length=255)
+    url_slug: str = Field(default="", max_length=128, index=True)
     description: str | None = Field(default=None, max_length=8192)
     owner_user_id: int = Field(foreign_key="user_auth.user_auth_id", index=True)
     status: str = Field(
@@ -39,6 +40,7 @@ class Workspace(SQLModel, table=True):
     last_error_message: str | None = Field(default=None, max_length=4096)
     endpoint_ref: str | None = Field(default=None, max_length=512)
     public_host: str | None = Field(default=None, max_length=512)
+    gateway_path_prefix: str | None = Field(default=None, max_length=512)
     active_sessions_count: int = Field(default=0, ge=0)
     is_private: bool = Field(default=True)
     created_at: datetime = Field(
