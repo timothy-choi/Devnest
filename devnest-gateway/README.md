@@ -23,6 +23,8 @@ devnest-gateway/
 │   ├── traefik.yml         # Static: entrypoints, directory provider
 │   └── dynamic/
 │       ├── 000-base.yml    # Static examples (hand-edited)
+│       ├── 050-api-public.yml   # api.devnest-app.com → backend:8000 (HTTP ``web``)
+│       ├── 051-api-https-letsencrypt.yml.example  # Copy to .yml for LE ``websecure``
 │       └── 100-workspaces.yml   # Managed by route-admin
 ├── scripts/
 │   ├── hosts-snippet.sh

@@ -1,0 +1,22 @@
+# Control-plane API via Traefik (separate from workspace / code-server routes in 100-workspaces.yml).
+#
+# Host: api.devnest-app.com → FastAPI backend :8000 on entrypoint ``web`` (Traefik container :80).
+# Workspace legacy traffic stays on the same ``web`` entrypoint with different Host() rules (ws-* / sslip).
+#
+# HTTPS termination + Let's Encrypt: copy ``051-api-https-letsencrypt.yml.example`` →
+# ``051-api-https-letsencrypt.yml`` (same directory), uncomment ``certificatesResolvers`` in ``traefik.yml``,
+# publish host ports 80 and 443 to Traefik, set DEVNEST_ACME_EMAIL, and recreate Traefik (see docs/API_GATEWAY_HTTPS.md).
+
+http:
+  routers:
+    devnest-api-public-http:
+      rule: "Host(`api.devnest-app.com`)"
+      entryPoints:
+        - web
+      service: devnest-backend-api
+
+  services:
+    devnest-backend-api:
+      loadBalancer:
+        servers:
+          - url: "http://backend:8000"

@@ -334,6 +334,10 @@ DEVNEST_RATE_LIMIT_ENABLED=false
 
 ## Gateway: TLS and ForwardAuth
 
+### API HTTPS (`api.<domain>`)
+
+Control-plane API termination on Traefik (separate from workspace `ws-*` hosts) is documented in **[`docs/API_GATEWAY_HTTPS.md`](API_GATEWAY_HTTPS.md)** (DNS, Let’s Encrypt, compose merge file, `curl` validation).
+
 ### TLS / HTTPS
 
 TLS is handled at the Traefik gateway layer.
@@ -365,7 +369,7 @@ certificatesResolvers:
 
 3. Mount the acme volume in `docker-compose.yml` (uncomment the relevant line).
 4. Set `DEVNEST_TLS_ENABLED=true` and `DEVNEST_ACME_EMAIL=you@example.com` in `.env`.
-5. Update workspace routers to use `tls.certResolver: letsencrypt`.
+5. Update workspace routers to use `tls.certResolver: letsencrypt` when terminating TLS for **workspace** hosts (`ws-*`). For **API-only** HTTPS (`api.<domain>`) without changing workspace URLs, see **[`docs/API_GATEWAY_HTTPS.md`](API_GATEWAY_HTTPS.md)** instead — route-admin can stay `DEVNEST_TLS_ENABLED=false` for legacy sslip HTTP on `:9081`.
 
 ### Gateway ForwardAuth
 

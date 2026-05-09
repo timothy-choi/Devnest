@@ -1,0 +1,31 @@
+# Optional merge file: public HTTP/HTTPS + ACME persistence for api.<your-domain> behind Traefik.
+#
+# Usage (repo root):
+#   docker compose --env-file .env.integration \
+#     -f docker-compose.integration.yml \
+#     -f docker-compose.ec2-api-https.yml \
+#     up -d traefik
+#
+# Before merging:
+#   1. DNS A record: api.devnest-app.com → EC2 public IPv4 (DNS-only / grey-cloud on Cloudflare until certs work).
+#   2. Security group: inbound TCP 80 and 443 from the Internet (or your CDN) to the instance.
+#   3. Uncomment ``certificatesResolvers`` in devnest-gateway/traefik/traefik.yml and set DEVNEST_ACME_EMAIL.
+#   4. cp devnest-gateway/traefik/dynamic/051-api-https-letsencrypt.yml.example \
+#        devnest-gateway/traefik/dynamic/051-api-https-letsencrypt.yml
+#   5. Recreate Traefik so it obtains a certificate on first HTTPS request to api.devnest-app.com.
+#
+# This does **not** change DEVNEST_BASE_DOMAIN or workspace URLs; workspace HTTP on DEVNEST_GATEWAY_PORT (e.g. 9081)
+# remains independent if you only map 9081:80 for sslip-style hosts.
+
+services:
+  traefik:
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - devnest_traefik_acme:/etc/traefik/acme
+    environment:
+      DEVNEST_ACME_EMAIL: ${DEVNEST_ACME_EMAIL:-}
+
+volumes:
+  devnest_traefik_acme:

@@ -39,23 +39,41 @@ providers:
   # TODO: Add providers.http pointing at control-plane route registry when implemented.
   # TODO: Add providers.redis or Kubernetes CRD for multi-replica dynamic state.
 
-# ACME / Let's Encrypt certificate resolver (production).
-# Uncomment and configure when DEVNEST_TLS_ENABLED=true with a public domain.
+# ACME / Let's Encrypt (production API HTTPS on api.<domain>).
 #
+# Workspace legacy routes can stay HTTP-only on host :9081 → container :80 (DEVNEST_TLS_ENABLED=false for route-admin).
+# API TLS uses a separate router in ``dynamic/051-api-https-letsencrypt.yml`` (see ``051-api-...yml.example``).
+#
+# Required on the Traefik container / host:
+#   - Set DEVNEST_ACME_EMAIL to a working contact address (Let's Encrypt requirement).
+#   - Persist ``/etc/traefik/acme/acme.json`` (named volume; see ``docker-compose.ec2-api-https.yml``).
+#   - Publish host ``443:443`` to Traefik ``websecure`` (and ``80:80`` if you use httpChallenge below).
+#
+# Uncomment **one** resolver block. Prefer ``tlsChallenge`` when only :443 is exposed (no HTTP-01 on :80).
+
 # certificatesResolvers:
 #   letsencrypt:
 #     acme:
-#       email: "${DEVNEST_ACME_EMAIL}"
+#       email: ${DEVNEST_ACME_EMAIL}
 #       storage: /etc/traefik/acme/acme.json
-#       httpChallenge:
-#         entryPoint: web
-#   # Alternative: DNS challenge via Cloudflare (set CF_API_EMAIL + CF_DNS_API_TOKEN env vars).
-#   # cloudflare:
+#       tlsChallenge: {}
+#   # HTTP-01 (needs public port 80 → Traefik entrypoint ``web``):
+#   # letsencrypt:
 #   #   acme:
-#   #     email: "${DEVNEST_ACME_EMAIL}"
+#   #     email: ${DEVNEST_ACME_EMAIL}
+#   #     storage: /etc/traefik/acme/acme.json
+#   #     httpChallenge:
+#   #       entryPoint: web
+#   # DNS-01 via Cloudflare (set CF_DNS_API_TOKEN; see Traefik ACME docs):
+#   # letsencrypt:
+#   #   acme:
+#   #     email: ${DEVNEST_ACME_EMAIL}
 #   #     storage: /etc/traefik/acme/acme.json
 #   #     dnsChallenge:
 #   #       provider: cloudflare
+#   #       resolvers:
+#   #         - "1.1.1.1:53"
+#   #         - "8.8.8.8:53"
 
 log:
   level: INFO
