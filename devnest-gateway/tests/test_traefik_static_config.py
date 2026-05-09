@@ -16,4 +16,4 @@ def test_traefik_yml_parses_and_wires_file_provider(gateway_root: Path) -> None:
     le = cfg["certificatesResolvers"]["letsencrypt"]["acme"]
     assert le["tlsChallenge"] == {}
     assert le["storage"] == "/etc/traefik/acme/acme.json"
-    assert le["email"] == "${DEVNEST_ACME_EMAIL}"
+    assert le["email"] == "tchoi720@gmail.com"
