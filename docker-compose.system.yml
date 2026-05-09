@@ -37,6 +37,9 @@ services:
     container_name: devnest-system-traefik
     command:
       - "--configFile=/etc/traefik/traefik.yml"
+    environment:
+      # Placeholder for static traefik.yml ACME block (no api.devnest router in system dynamic dir).
+      DEVNEST_ACME_EMAIL: ${DEVNEST_ACME_EMAIL:-devnest-system-tests@example.invalid}
     ports:
       - "${TRAEFIK_SYSTEM_PORT:-18080}:80"
       - "${TRAEFIK_SYSTEM_DASHBOARD_PORT:-18081}:8080"

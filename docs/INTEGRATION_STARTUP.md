@@ -42,6 +42,7 @@ Integration Compose enables a **dedicated heartbeat thread** in `workspace-worke
 | `DEVNEST_FRONTEND_PUBLIC_BASE_URL` | Browser-visible UI origin (scheme + host + port), used for OAuth redirects and `NEXT_PUBLIC_APP_BASE_URL` in the frontend image. |
 | `NEXT_PUBLIC_API_BASE_URL` | Browser → FastAPI origin (often `:8000` on the same host as the API). `deploy-ec2.sh` derives this from `DEVNEST_FRONTEND_PUBLIC_BASE_URL` when unset. |
 | `DEVNEST_GATEWAY_PORT` / `DEVNEST_GATEWAY_PUBLIC_PORT` | Published Traefik HTTP port on the host and the port embedded in `gateway_url` when non-default (see compose header comments). |
+| `DEVNEST_ACME_EMAIL` | Contact email for Let’s Encrypt when serving **`https://api.devnest-app.com`** through Traefik (default **`deploy-ec2.sh`** compose merge). See [API_GATEWAY_HTTPS.md](./API_GATEWAY_HTTPS.md). |
 | `OAUTH_GITHUB_CLIENT_ID` / `OAUTH_GITHUB_CLIENT_SECRET` | Required together to enable GitHub OAuth sign-in. Legacy aliases `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` also work. |
 | `OAUTH_GOOGLE_CLIENT_ID` / `OAUTH_GOOGLE_CLIENT_SECRET` | Required together to enable Google OAuth sign-in. Legacy aliases `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` also work. |
 | `GITHUB_OAUTH_PUBLIC_BASE_URL` / `GCLOUD_OAUTH_PUBLIC_BASE_URL` | Public callback base URLs. If unset or loopback-only, backend will prefer `DEVNEST_FRONTEND_PUBLIC_BASE_URL` when it is a non-loopback public host. |
@@ -94,8 +95,13 @@ Manual equivalent (simplified): export the variables above, then from repo root.
 aligned after restarts:
 
 ```bash
-docker compose --env-file .env.integration -f docker-compose.integration.yml up -d --build
+docker compose --env-file .env.integration \
+  -f docker-compose.integration.yml \
+  -f docker-compose.ec2-api-https.yml \
+  up -d --build
 ```
+
+`scripts/deploy-ec2.sh` defaults **`COMPOSE_FILE`** to **`docker-compose.integration.yml:docker-compose.ec2-api-https.yml`** (Traefik **80/443** + ACME volume alongside legacy **9081/9443**). For local-only stacks, use **`docker-compose.integration.yml`** alone. See **[API_GATEWAY_HTTPS.md](./API_GATEWAY_HTTPS.md)**.
 
 Without that file, `docker compose -f docker-compose.integration.yml …` still works for local bundled Postgres
 when variables are only in the shell or repo-root `.env`.

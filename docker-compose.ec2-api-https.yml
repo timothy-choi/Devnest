@@ -1,21 +1,30 @@
-# Optional merge file: public HTTP/HTTPS + ACME persistence for api.<your-domain> behind Traefik.
+# Merge file: public HTTP/HTTPS + ACME persistence for api.<your-domain> behind Traefik.
 #
-# Usage (repo root):
+# Merged after docker-compose.integration.yml (Compose appends ``ports`` / merges ``volumes`` / ``environment``).
+# Resulting Traefik bindings (typical EC2):
+#   - 9081:80, 9443:443 from the base file (legacy sslip / Host-header tests)
+#   - 80:80, 443:443 from this file (production API + Let's Encrypt tlsChallenge on :443)
+#
+# Usage (repo root) — also the default for scripts/deploy-ec2.sh via COMPOSE_FILE:
 #   docker compose --env-file .env.integration \
 #     -f docker-compose.integration.yml \
 #     -f docker-compose.ec2-api-https.yml \
 #     up -d traefik
 #
-# Before merging:
-#   1. DNS A record: api.devnest-app.com → EC2 public IPv4 (DNS-only / grey-cloud on Cloudflare until certs work).
-#   2. Security group: inbound TCP 80 and 443 from the Internet (or your CDN) to the instance.
-#   3. Uncomment ``certificatesResolvers`` in devnest-gateway/traefik/traefik.yml and set DEVNEST_ACME_EMAIL.
-#   4. cp devnest-gateway/traefik/dynamic/051-api-https-letsencrypt.yml.example \
-#        devnest-gateway/traefik/dynamic/051-api-https-letsencrypt.yml
-#   5. Recreate Traefik so it obtains a certificate on first HTTPS request to api.devnest-app.com.
+# Before first HTTPS request:
+#   1. DNS A: api.devnest-app.com → EC2 public IPv4.
+#   2. Security group: inbound TCP 443 (tlsChallenge) from 0.0.0.0/0; TCP 80 recommended for future HTTP-01
+#      or HTTP API clients. Keep 9081/9443 open only if you still need legacy host ports.
+#   3. Set DEVNEST_ACME_EMAIL in .env.integration (Let's Encrypt contact).
+#   4. Recreate Traefik so it can persist acme.json on the named volume.
 #
-# This does **not** change DEVNEST_BASE_DOMAIN or workspace URLs; workspace HTTP on DEVNEST_GATEWAY_PORT (e.g. 9081)
-# remains independent if you only map 9081:80 for sslip-style hosts.
+# Cloudflare:
+#   - Use DNS only (grey cloud) for api.devnest-app.com while obtaining certificates. Orange-cloud
+#     proxy terminates TLS at Cloudflare and breaks TLS-ALPN-01 to the origin unless you use DNS-01
+#     in Traefik instead of tlsChallenge.
+#
+# Rollback: deploy with COMPOSE_FILE=docker-compose.integration.yml only (removes 80/443 publish and
+# ACME volume mount — use only for emergencies; you will lose persisted certs if the volume is removed).
 
 services:
   traefik:

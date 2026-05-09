@@ -23,3 +23,7 @@ echo ""
 echo "=== GET ${BASE}/health ==="
 curl -fsS "${CURL_HOST[@]}" "${BASE}/health"
 echo ""
+
+echo "=== Optional: direct HTTPS to api.devnest-app.com (after DNS + Let's Encrypt) ==="
+echo "# curl -fsSI https://api.devnest-app.com/health"
+echo "# curl -fsS https://api.devnest-app.com/health"

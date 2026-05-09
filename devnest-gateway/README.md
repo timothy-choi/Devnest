@@ -24,7 +24,8 @@ devnest-gateway/
 │   └── dynamic/
 │       ├── 000-base.yml    # Static examples (hand-edited)
 │       ├── 050-api-public.yml   # api.devnest-app.com → backend:8000 (HTTP ``web``)
-│       ├── 051-api-https-letsencrypt.yml.example  # Copy to .yml for LE ``websecure``
+│       ├── 051-api-https-letsencrypt.yml   # api.devnest-app.com → backend (HTTPS ``websecure`` + LE)
+│       ├── 051-api-https-letsencrypt.yml.example  # Backup of the HTTPS router block
 │       └── 100-workspaces.yml   # Managed by route-admin
 ├── scripts/
 │   ├── hosts-snippet.sh

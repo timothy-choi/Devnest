@@ -1,13 +1,13 @@
-# Rename to ``051-api-https-letsencrypt.yml`` to enable HTTPS for the API host.
+# Template: same router as the tracked ``051-api-https-letsencrypt.yml``.
+# Restore from this file if the active YAML is removed or corrupted.
 #
-# Prerequisites (see docs/API_GATEWAY_HTTPS.md):
+# Prerequisites:
 #   - ``050-api-public.yml`` loaded (defines ``devnest-backend-api`` service).
-#   - ``certificatesResolvers.letsencrypt`` uncommented in ``traefik.yml`` with DEVNEST_ACME_EMAIL set.
-#   - Traefik publishes host ``443:443`` (and ``80:80`` if you use httpChallenge instead of tlsChallenge).
-#   - DNS: api.devnest-app.com → EC2 public IP (proxied DNS off if using Cloudflare, or LE HTTP-01 needs direct reachability).
+#   - ``certificatesResolvers.letsencrypt`` in ``traefik.yml`` with DEVNEST_ACME_EMAIL set on the Traefik container.
+#   - Traefik publishes host ``443:443`` (tlsChallenge). ``80:80`` is optional for HTTP-01 or plain HTTP API.
+#   - DNS: api.devnest-app.com → EC2 public IP (Cloudflare: DNS only / grey cloud while debugging TLS).
 #
-# tlsChallenge uses the ``websecure`` (:443) entrypoint only — no extra open :80 required for ACME
-# (still recommended to publish :80 for redirects and future httpChallenge).
+# tlsChallenge uses the ``websecure`` (:443) entrypoint only — no public :80 strictly required for ACME.
 
 http:
   routers:

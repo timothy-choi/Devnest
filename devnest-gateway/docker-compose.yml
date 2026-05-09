@@ -28,6 +28,8 @@ services:
       - ./traefik/dynamic:/etc/traefik/dynamic:ro
       # Uncomment to persist ACME certificates across restarts (production only).
       # - ./traefik/acme:/etc/traefik/acme
+    environment:
+      DEVNEST_ACME_EMAIL: ${DEVNEST_ACME_EMAIL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
