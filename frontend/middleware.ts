@@ -1,12 +1,66 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
-import {
-  getApexOriginForRedirects,
-  getConfiguredPublicBaseDomain,
-  isApexHostname,
-  parseTenantSubdomainFromHost,
-} from "@/lib/tenant-routing";
+/**
+ * Middleware runs as a **Vercel Edge Function** (and Next.js Edge runtime). It must stay self-contained:
+ * do not import `@/lib/*` or other app modules — bundlers may pull unsupported code into the edge bundle.
+ * Tenant hostname parsing below mirrors `lib/tenant-routing.ts` for the subset needed here only.
+ */
+
+function getFrontendWorkspaceDomainMode(): string {
+  return (process.env.NEXT_PUBLIC_DEVNEST_WORKSPACE_DOMAIN_MODE || "").trim().toLowerCase();
+}
+
+function getConfiguredPublicBaseDomain(): string {
+  return (process.env.NEXT_PUBLIC_DEVNEST_PUBLIC_BASE_DOMAIN || "").trim().toLowerCase().replace(/^\.+/, "");
+}
+
+function getApexOriginForRedirects(): string | null {
+  const explicit = (process.env.NEXT_PUBLIC_DEVNEST_APEX_URL || "").trim();
+  if (explicit) {
+    try {
+      return new URL(explicit).origin;
+    } catch {
+      return null;
+    }
+  }
+  const base = getConfiguredPublicBaseDomain();
+  if (!base) {
+    return null;
+  }
+  const scheme = (process.env.NEXT_PUBLIC_DEVNEST_PUBLIC_SCHEME || "https").replace(/:+$/, "");
+  try {
+    return new URL(`${scheme}://${base}`).origin;
+  } catch {
+    return null;
+  }
+}
+
+function parseTenantSubdomainFromHost(hostname: string, baseDomain: string): string | null {
+  const h = (hostname || "").split(":")[0].toLowerCase();
+  const b = (baseDomain || "").trim().toLowerCase().replace(/^\.+/, "");
+  if (!h || !b) {
+    return null;
+  }
+  if (h === b || h === `www.${b}`) {
+    return null;
+  }
+  const suf = `.${b}`;
+  if (!h.endsWith(suf)) {
+    return null;
+  }
+  const label = h.slice(0, -suf.length);
+  if (!label || label.includes(".")) {
+    return null;
+  }
+  return label;
+}
+
+function isApexHostname(hostname: string, baseDomain: string): boolean {
+  const h = hostname.split(":")[0].toLowerCase();
+  const b = baseDomain.trim().toLowerCase().replace(/^\.+/, "");
+  return h === b || h === `www.${b}`;
+}
 
 const ACCESS = "devnest_access_token";
 const REFRESH = "devnest_refresh_token";
@@ -53,6 +107,11 @@ async function routeTenantExists(subdomain: string): Promise<boolean | null> {
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   if (skipTenantMiddleware(pathname)) {
+    return NextResponse.next();
+  }
+
+  // Legacy / default: no tenant host redirects (sslip, Vercel preview, etc.).
+  if (getFrontendWorkspaceDomainMode() !== "tenant") {
     return NextResponse.next();
   }
 
