@@ -34,6 +34,22 @@ code-server is chosen because:
 - Extensions, themes, and keyboard shortcuts are identical to VS Code.
 - It exposes a single HTTP port (`:8080` by default) suitable for reverse-proxy access.
 
+### Browser URL (`?folder=` / `?workspace=`)
+
+**Root cause (code-server, not DevNest routing):** On `GET /` with no `folder` or `workspace` query, code-server resolves which folder or `.code-workspace` file to open from (1) persisted “last opened” settings, or (2) **CLI positional arguments** (the trailing path you pass after `code-server`). If either yields a folder or workspace file, the server issues an **HTTP redirect** so the browser’s URL includes `?folder=` or `?workspace=`. That logic lives in upstream [`src/node/routes/vscode.ts`](https://github.com/coder/code-server/blob/main/src/node/routes/vscode.ts) (see the `router.get("/", …)` handler around the `NO_FOLDER_OR_WORKSPACE_QUERY` / `HAS_FOLDER_OR_WORKSPACE_FROM_CLI` branches).
+
+In this repo, **`Dockerfile.workspace`** sets `CMD ["--auth", "none", "--bind-addr", "0.0.0.0:8080", "/home/coder/project"]`. **`docker/workspace-entrypoint.sh`** forwards those arguments (after normalizing `--auth`) to the upstream `entrypoint.sh` → `code-server`. The final positional **`/home/coder/project`** is exactly what triggers the redirect to `/?folder=/home/coder/project` on first visit to `/`.
+
+**`config.yaml`:** The entrypoint only writes `bind-addr`, `auth`, and `cert`. There is **no** supported setting there to “open this folder by default but keep the location bar at `/`”.
+
+**CLI flags:** Upstream exposes [`ignore-last-opened`](https://github.com/coder/code-server/blob/main/src/node/cli.ts) (open an empty window instead of last opened). There is **no** documented flag equivalent to “default folder without `?folder=` in the URL.” Removing the CLI folder argument would avoid that particular redirect only until “last opened” is persisted again—then the same redirect behavior applies from stored query state.
+
+**Why client-side URL cleanup is brittle:** A `history.replaceState` hack in `workbench.html` can fail because the VS Code web workbench may **reconcile the URL** with internal workbench state (re-applying query parameters), because the **redirect already committed** the canonical URL before the SPA loads, and because paths and CSP differ across code-server / VS Code versions.
+
+**Traefik / reverse-proxy rewrites:** Stripping query parameters from responses or rewriting `Location` on redirects risks **redirect loops** (browser returns to `/` → code-server redirects again) or breaking behavior that assumes `folder` / `workspace` appear in the URL (reload, deep links). DevNest does **not** rely on proxy tricks for this.
+
+**Verdict:** A stable “external URL always `https://ws-…/` with no query while still opening `/home/coder/project` by default” is **not** achievable without **forking or changing upstream code-server** (or accepting trade-offs such as no CLI default folder and no last-opened persistence). Treat **`?folder=`** as **normal, intentional code-server behavior** when a folder is opened from the server side.
+
 ---
 
 ## Container Image Requirements
