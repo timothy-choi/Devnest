@@ -8,7 +8,7 @@ FROM codercom/code-server:latest
 
 # Bumped when Dockerfile.workspace semantics change so `docker inspect` can prove which revision
 # is on the host (avoids “branch fixed it but EC2 still runs old :latest”).
-ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=10-workbench-clean-url
+ARG DEVNEST_WORKSPACE_DOCKERFILE_REVISION=11-folder-query-native
 LABEL devnest.workspace.dockerfile.revision="${DEVNEST_WORKSPACE_DOCKERFILE_REVISION}"
 
 USER root
@@ -30,10 +30,6 @@ RUN apt-get update \
         python3-pip \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
-
-# Strip visible ?folder= / ?workspace= from the browser bar after load (code-server still opens the project).
-COPY docker/patch-code-server-workbench-clean-url.py /tmp/patch-code-server-workbench-clean-url.py
-RUN python3 /tmp/patch-code-server-workbench-clean-url.py && rm -f /tmp/patch-code-server-workbench-clean-url.py
 
 # Node.js LTS + npm (NodeSource; aligns with current LTS major)
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
