@@ -2,6 +2,8 @@
 
 Expose the FastAPI control plane at **`https://api.devnest-app.com`** through the same Traefik container that serves workspace **legacy HTTP** (for example **`http://ws-<id>.<DEVNEST_BASE_DOMAIN>:9081/`** when **`DEVNEST_GATEWAY_PUBLIC_PORT=9081`**). Workspace and code-server traffic stay on **`DEVNEST_BASE_DOMAIN`**; it is **not** routed through Vercel and does not use the API hostname.
 
+Workspace subdomains (**`ws-*.<DEVNEST_BASE_DOMAIN>`**) can use a **wildcard** Let’s Encrypt certificate via **Cloudflare DNS-01**; see **[`WORKSPACE_TLS_CLOUDFLARE.md`](WORKSPACE_TLS_CLOUDFLARE.md)**.
+
 ## DNS (Cloudflare and others)
 
 | Record | Type | Value | Notes |
@@ -11,7 +13,7 @@ Expose the FastAPI control plane at **`https://api.devnest-app.com`** through th
 **Cloudflare**
 
 - For **TLS-ALPN-01** (`tlsChallenge` on Traefik port 443), Let’s Encrypt must reach **your origin** on **TCP 443**. Set **`api.devnest-app.com`** to **DNS only** (grey cloud) while obtaining and renewing certificates.
-- **Proxied** (orange cloud) terminates TLS at Cloudflare; the origin challenge on 443 will fail unless you switch to **DNS-01** in Traefik (not configured in the default static file).
+- **Proxied** (orange cloud) terminates TLS at Cloudflare; the origin **TLS-ALPN-01** challenge on 443 for **`api.*`** will fail unless that hostname is **DNS only** or you use **DNS-01** for the API. Workspace wildcard TLS uses **DNS-01** separately — see **[`WORKSPACE_TLS_CLOUDFLARE.md`](WORKSPACE_TLS_CLOUDFLARE.md)**.
 - **`www.devnest-app.com`** (Vercel) is unrelated; do not point workspace **`DEVNEST_BASE_DOMAIN`** at Vercel for this gateway path.
 
 Keep **`DEVNEST_BASE_DOMAIN`** (sslip / workspace DNS) unchanged; it is intentionally separate from `api.devnest-app.com`.

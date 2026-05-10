@@ -17,3 +17,6 @@ def test_traefik_yml_parses_and_wires_file_provider(gateway_root: Path) -> None:
     assert le["tlsChallenge"] == {}
     assert le["storage"] == "/etc/traefik/acme/acme.json"
     assert le["email"] == "tchoi720@gmail.com"
+    dns = cfg["certificatesResolvers"]["letsencrypt-dns"]["acme"]
+    assert dns["dnsChallenge"]["provider"] == "cloudflare"
+    assert dns["storage"] == "/etc/traefik/acme/acme-dns.json"

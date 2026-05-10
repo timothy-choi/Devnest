@@ -162,7 +162,7 @@ def test_forward_auth_middleware_absent_when_disabled(tmp_path: Path, monkeypatc
 
 
 def test_tls_enabled_uses_websecure_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When _TLS_ENABLED=True, routers use the websecure entrypoint and tls: {}."""
+    """When _TLS_ENABLED=True, routers use websecure + HTTP mirror on ``web``."""
     import route_admin_app as ra
 
     monkeypatch.setattr(ra, "ROUTES_FILE", tmp_path / "100-workspaces.yml")
@@ -185,6 +185,45 @@ def test_tls_enabled_uses_websecure_entrypoint(tmp_path: Path, monkeypatch: pyte
     router_cfg = cfg["http"]["routers"]["devnest-reg-57"]
     assert router_cfg["entryPoints"] == ["websecure"]
     assert "tls" in router_cfg
+    assert router_cfg["tls"] == {}
+    http_router = cfg["http"]["routers"]["devnest-reg-57-http"]
+    assert http_router["entryPoints"] == ["web"]
+    assert "tls" not in http_router
 
     with ra._lock:
         ra._routes.clear()
+
+
+def test_scheme_https_with_base_domain_uses_dns_resolver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTPS public scheme + real base domain → ACME DNS wildcard resolver on websecure router."""
+    import route_admin_app as ra
+
+    monkeypatch.setattr(ra, "ROUTES_FILE", tmp_path / "100-workspaces.yml")
+    monkeypatch.setattr(ra, "_GATEWAY_AUTH_ENABLED", False)
+    monkeypatch.setattr(ra, "_TLS_ENABLED", False)
+    monkeypatch.setenv("DEVNEST_GATEWAY_PUBLIC_SCHEME", "https")
+    monkeypatch.setenv("DEVNEST_BASE_DOMAIN", "devnest-app.com")
+    with ra._lock:
+        ra._routes.clear()
+
+    try:
+        c = TestClient(ra.app)
+        c.post(
+            "/routes",
+            json={
+                "workspace_id": "58",
+                "public_host": "ws-58-abc.devnest-app.com",
+                "target": "http://10.0.0.58:8080",
+            },
+        )
+        text = (tmp_path / "100-workspaces.yml").read_text(encoding="utf-8")
+        cfg = yaml.safe_load(text)
+        secure = cfg["http"]["routers"]["devnest-reg-58"]
+        assert secure["entryPoints"] == ["websecure"]
+        assert secure["tls"]["certResolver"] == "letsencrypt-dns"
+        assert secure["tls"]["domains"] == [{"main": "*.devnest-app.com", "sans": ["devnest-app.com"]}]
+    finally:
+        monkeypatch.delenv("DEVNEST_GATEWAY_PUBLIC_SCHEME", raising=False)
+        monkeypatch.delenv("DEVNEST_BASE_DOMAIN", raising=False)
+        with ra._lock:
+            ra._routes.clear()
