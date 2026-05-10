@@ -18,6 +18,9 @@
 #   3. Set DEVNEST_ACME_EMAIL in .env.integration (Let's Encrypt contact).
 #   4. Recreate Traefik so it can persist acme.json on the named volume.
 #
+#   - ``CF_DNS_API_TOKEN`` in ``.env.integration`` when using workspace wildcard TLS (DNS-01; see
+#     docs/WORKSPACE_TLS_CLOUDFLARE.md).
+#
 # Cloudflare:
 #   - Use DNS only (grey cloud) for api.devnest-app.com while obtaining certificates. Orange-cloud
 #     proxy terminates TLS at Cloudflare and breaks TLS-ALPN-01 to the origin unless you use DNS-01
@@ -35,6 +38,7 @@ services:
       - devnest_traefik_acme:/etc/traefik/acme
     environment:
       DEVNEST_ACME_EMAIL: ${DEVNEST_ACME_EMAIL:-}
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:-}
 
 volumes:
   devnest_traefik_acme:

@@ -43,6 +43,56 @@ _TLS_ENABLED: bool = os.environ.get("DEVNEST_TLS_ENABLED", "").strip().lower() i
     "1", "true", "yes", "on",
 )
 
+
+def _env_scheme_https() -> bool:
+    s = (os.environ.get("DEVNEST_GATEWAY_PUBLIC_SCHEME") or "").strip().lower()
+    return s == "https"
+
+
+def _workspace_https_enabled() -> bool:
+    """HTTPS on workspace routers when legacy TLS flag is on or public scheme is https."""
+    return _TLS_ENABLED or _env_scheme_https()
+
+
+def _base_domain() -> str:
+    return (os.environ.get("DEVNEST_BASE_DOMAIN") or "").strip().lower()
+
+
+def _use_dns_wildcard_acme() -> bool:
+    """Use Let's Encrypt DNS wildcard (Cloudflare) for workspace TLS when domain is not sslip-only."""
+    if not _workspace_https_enabled():
+        return False
+    bd = _base_domain()
+    if not bd or "sslip.io" in bd:
+        return False
+    return True
+
+
+def _tls_router_options() -> dict[str, Any]:
+    """TLS block for websecure workspace routers (self-signed vs ACME DNS wildcard)."""
+    if not _workspace_https_enabled():
+        return {}
+    if _use_dns_wildcard_acme():
+        bd = _base_domain()
+        return {
+            "certResolver": "letsencrypt-dns",
+            "domains": [{"main": f"*.{bd}", "sans": [bd]}],
+        }
+    return {}
+
+
+def _wid_from_router_name(rname: str) -> str | None:
+    """Parse workspace id from ``devnest-reg-<id>`` or HTTP mirror ``devnest-reg-<id>-http``."""
+    if not isinstance(rname, str) or not rname.startswith("devnest-reg-"):
+        return None
+    rest = rname[len("devnest-reg-") :]
+    if rest.endswith("-http"):
+        rest = rest[: -len("-http")]
+    if not rest or not _SAFE_WID.match(rest):
+        return None
+    return rest
+
+
 _lock = threading.Lock()
 _routes: dict[str, dict[str, str]] = {}
 
@@ -75,13 +125,22 @@ def _hydrate_routes_from_disk_locked() -> None:
         return
     prefix = "devnest-reg-"
     loaded = 0
-    for rname, rdef in routers.items():
-        if not isinstance(rname, str) or not rname.startswith(prefix):
+    names_by_wid: dict[str, list[str]] = {}
+    for rname in routers:
+        wid = _wid_from_router_name(rname)
+        if wid is None:
             continue
+        names_by_wid.setdefault(wid, []).append(rname)
+
+    for wid, names in names_by_wid.items():
+        primary = f"{prefix}{wid}"
+        if primary in routers:
+            rname = primary
+        else:
+            http_mirror = f"{primary}-http"
+            rname = http_mirror if http_mirror in routers else names[0]
+        rdef = routers[rname]
         if not isinstance(rdef, dict):
-            continue
-        wid = rname[len(prefix) :]
-        if not _SAFE_WID.match(wid):
             continue
         rule = str(rdef.get("rule") or "").strip()
         public_host = ""
@@ -95,7 +154,7 @@ def _hydrate_routes_from_disk_locked() -> None:
             if not m:
                 continue
             public_host = m.group(1).strip()
-        svc_name = f"{rname}-upstream"
+        svc_name = f"{prefix}{wid}-upstream"
         svc = services.get(svc_name)
         if not isinstance(svc, dict):
             continue
@@ -187,7 +246,7 @@ def _persist_locked() -> None:
     routers: dict[str, Any] = {}
     services: dict[str, Any] = {}
     middlewares: dict[str, Any] = {}
-    entrypoint = "websecure" if _TLS_ENABLED else "web"
+    https_on = _workspace_https_enabled()
     for wid, row in sorted(_routes.items(), key=lambda kv: kv[0]):
         rname = _router_name(wid)
         path_prefix = (row.get("path_prefix") or "").strip()
@@ -200,16 +259,29 @@ def _persist_locked() -> None:
             mids.append(strip_name)
         if _GATEWAY_AUTH_ENABLED:
             mids.insert(0, "devnest-workspace-auth@file")
-        router_def: dict[str, Any] = {
-            "rule": rule,
-            "entryPoints": [entrypoint],
-            "service": f"{rname}-upstream",
-        }
-        if mids:
-            router_def["middlewares"] = mids
-        if _TLS_ENABLED:
-            router_def["tls"] = {}
-        routers[rname] = router_def
+
+        def _router_def(entrypoint: str, *, with_tls: bool) -> dict[str, Any]:
+            d: dict[str, Any] = {
+                "rule": rule,
+                "entryPoints": [entrypoint],
+                "service": f"{rname}-upstream",
+            }
+            if mids:
+                d["middlewares"] = mids
+            if with_tls:
+                tls_opts = _tls_router_options()
+                if tls_opts:
+                    d["tls"] = tls_opts
+                else:
+                    d["tls"] = {}
+            return d
+
+        if https_on:
+            routers[rname] = _router_def("websecure", with_tls=True)
+            routers[f"{rname}-http"] = _router_def("web", with_tls=False)
+        else:
+            routers[rname] = _router_def("web", with_tls=False)
+
         services[f"{rname}-upstream"] = {
             "loadBalancer": {"servers": [{"url": row["target"]}]},
         }

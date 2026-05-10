@@ -30,6 +30,7 @@ services:
       # - ./traefik/acme:/etc/traefik/acme
     environment:
       DEVNEST_ACME_EMAIL: ${DEVNEST_ACME_EMAIL:-}
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -53,6 +54,8 @@ services:
       DEVNEST_GATEWAY_AUTH_ENABLED: "${DEVNEST_GATEWAY_AUTH_ENABLED:-false}"
       # TLS: route-admin uses websecure entrypoint for workspace routes when enabled.
       DEVNEST_TLS_ENABLED: "${DEVNEST_TLS_ENABLED:-false}"
+      DEVNEST_GATEWAY_PUBLIC_SCHEME: "${DEVNEST_GATEWAY_PUBLIC_SCHEME:-http}"
+      DEVNEST_BASE_DOMAIN: "${DEVNEST_BASE_DOMAIN:-}"
     networks:
       - devnest-gateway
 

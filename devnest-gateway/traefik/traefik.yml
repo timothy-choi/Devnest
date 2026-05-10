@@ -50,12 +50,10 @@ providers:
 #   - Persist ``/etc/traefik/acme/acme.json`` (named volume; see ``docker-compose.ec2-api-https.yml``).
 #   - Publish host ``443:443`` to Traefik ``websecure`` (and ``80:80`` if you use httpChallenge below).
 #
-# Resolver ``letsencrypt`` uses TLS-ALPN-01 (``tlsChallenge``) on ``websecure`` (:443). Set
-# ``DEVNEST_ACME_EMAIL`` on the Traefik container (see docker-compose). Persist ``acme.json`` via
-# ``docker-compose.ec2-api-https.yml`` (named volume) on EC2.
-#
-# Optional alternatives (comment out ``tlsChallenge`` and use one block): HTTP-01 needs public
-# ``80:80`` to ``web``; DNS-01 (e.g. Cloudflare) needs ``CF_DNS_API_TOKEN`` — see Traefik ACME docs.
+# Resolver ``letsencrypt`` uses TLS-ALPN-01 (``tlsChallenge``) on ``websecure`` (:443) for
+# ``api.<domain>``. Resolver ``letsencrypt-dns`` uses Cloudflare DNS-01 for wildcard workspace
+# certs (``*.<DEVNEST_BASE_DOMAIN>``). Set ``CF_DNS_API_TOKEN`` on the Traefik container.
+# Persist ``/etc/traefik/acme/*.json`` via ``docker-compose.ec2-api-https.yml``.
 
 certificatesResolvers:
   letsencrypt:
@@ -63,6 +61,15 @@ certificatesResolvers:
       email: tchoi720@gmail.com
       storage: /etc/traefik/acme/acme.json
       tlsChallenge: {}
+  letsencrypt-dns:
+    acme:
+      email: tchoi720@gmail.com
+      storage: /etc/traefik/acme/acme-dns.json
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
 
 log:
   level: INFO
