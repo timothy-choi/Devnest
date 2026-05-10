@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Idempotent EC2 deploy: sync repo to a remote branch and rebuild docker-compose.integration.yml stack.
+# Idempotent EC2 deploy: sync repo to a remote branch and rebuild the integration compose stack
+# (default ``COMPOSE_FILE`` merges ``docker-compose.ec2-api-https.yml`` for Traefik 80/443 + ACME).
 # Intended to run ON the instance (via CI SSH). Optional env:
 #   NEXT_PUBLIC_API_BASE_URL — e.g. http://<public-ip>:8000 for the browser UI build
 #   DATABASE_URL — optional external Postgres/RDS DSN; when set, backend/worker use it (via DEVNEST_COMPOSE_DATABASE_URL)
@@ -16,7 +17,9 @@ set -euo pipefail
 BRANCH="${1:-main}"
 REPO_DIR="${DEVNEST_DEPLOY_DIR:-${HOME}/Devnest}"
 REPO_URL="${DEVNEST_DEPLOY_REPO_URL:-https://github.com/timothy-choi/Devnest.git}"
-COMPOSE="${COMPOSE_FILE:-docker-compose.integration.yml}"
+# Default merges ``docker-compose.ec2-api-https.yml`` (public 80/443 + ACME volume). Override with a
+# single file for rollback, e.g. ``export COMPOSE_FILE=docker-compose.integration.yml``.
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.integration.yml:docker-compose.ec2-api-https.yml}"
 INTEGRATION_ENV_FILE="${REPO_DIR}/.env.integration"
 
 _devnest_load_integration_env_file() {
@@ -35,7 +38,17 @@ _devnest_compose() {
     echo "ERROR: ${INTEGRATION_ENV_FILE} is missing; run scripts/setup-env.sh before docker compose." >&2
     exit 1
   fi
-  docker compose --env-file "${INTEGRATION_ENV_FILE}" -f "${COMPOSE}" "$@"
+  local -a compose_cmd=(docker compose --env-file "${INTEGRATION_ENV_FILE}")
+  local _f
+  local _ifs="${IFS}"
+  IFS=':'
+  for _f in ${COMPOSE_FILE}; do
+    IFS="${_ifs}"
+    [[ -z "${_f// }" ]] && continue
+    compose_cmd+=(-f "${_f}")
+  done
+  IFS="${_ifs}"
+  "${compose_cmd[@]}" "$@"
 }
 
 _devnest_deploy_env_presence() {
@@ -59,6 +72,8 @@ _devnest_deploy_env_presence() {
   if [[ -n "${OAUTH_GOOGLE_CLIENT_ID:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_ID: set"; else echo "OAUTH_GOOGLE_CLIENT_ID: missing"; fi
   if [[ -n "${OAUTH_GOOGLE_CLIENT_SECRET:-}" ]]; then echo "OAUTH_GOOGLE_CLIENT_SECRET: set"; else echo "OAUTH_GOOGLE_CLIENT_SECRET: missing"; fi
   if [[ -n "${DEVNEST_BASE_DOMAIN:-}" ]]; then echo "DEVNEST_BASE_DOMAIN: set"; else echo "DEVNEST_BASE_DOMAIN: missing"; fi
+  if [[ -n "${DEVNEST_ACME_EMAIL:-}" ]]; then echo "DEVNEST_ACME_EMAIL: set"; else echo "DEVNEST_ACME_EMAIL: missing (required for Let's Encrypt on api.*)"; fi
+  echo "COMPOSE_FILE: ${COMPOSE_FILE:-<unset>}"
   if [[ -n "${NEXT_PUBLIC_API_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_API_BASE_URL: set"; else echo "NEXT_PUBLIC_API_BASE_URL: missing"; fi
   if [[ -n "${NEXT_PUBLIC_APP_BASE_URL:-}" ]]; then echo "NEXT_PUBLIC_APP_BASE_URL: set"; else echo "NEXT_PUBLIC_APP_BASE_URL: missing"; fi
   if [[ -n "${DEVNEST_WORKSPACE_CONTAINER_IMAGE:-}" ]]; then echo "DEVNEST_WORKSPACE_CONTAINER_IMAGE: ${DEVNEST_WORKSPACE_CONTAINER_IMAGE}"; else echo "DEVNEST_WORKSPACE_CONTAINER_IMAGE: missing"; fi
@@ -249,9 +264,9 @@ if [[ -x "${REPO_DIR}/scripts/verify-workspace-image.sh" ]]; then
 fi
 
 echo "--- gateway (browser IDE URL) ---"
-echo "Compose enables DEVNEST_GATEWAY_ENABLED by default with Traefik on host port \${DEVNEST_GATEWAY_PORT:-9081}."
+echo "Traefik publishes \${DEVNEST_GATEWAY_PORT:-9081}:80 (workspaces) plus 80:80 and 443:443 when docker-compose.ec2-api-https.yml is merged (default in this script)."
 echo "Attach returns gateway_url like http://ws-<id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/"
-echo "On EC2 with Traefik on 80: export DEVNEST_GATEWAY_PORT=80 DEVNEST_GATEWAY_PUBLIC_PORT=0 before compose up."
+echo "For URLs without :9081, set DEVNEST_GATEWAY_PUBLIC_PORT=0 after moving browsers to Traefik on 80."
 echo "Browsers must resolve ws-<id>.<DEVNEST_BASE_DOMAIN> to this host's Traefik IP (sslip.io / real DNS / hosts)."
 echo "--- deploy diagnostics ---"
 git status || true

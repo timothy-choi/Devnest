@@ -24,3 +24,13 @@ def test_dynamic_base_example_routes(gateway_root: Path) -> None:
 
     mock_servers = services["devnest-mock-upstream"]["loadBalancer"]["servers"]
     assert mock_servers[0]["url"] == "http://mock-upstream:80"
+
+
+def test_dynamic_api_https_router(gateway_root: Path) -> None:
+    raw = (gateway_root / "traefik" / "dynamic" / "051-api-https-letsencrypt.yml").read_text(encoding="utf-8")
+    cfg = yaml.safe_load(raw)
+    r = cfg["http"]["routers"]["devnest-api-public-https"]
+    assert r["rule"] == "Host(`api.devnest-app.com`)"
+    assert r["entryPoints"] == ["websecure"]
+    assert r["service"] == "devnest-backend-api"
+    assert r["tls"]["certResolver"] == "letsencrypt"

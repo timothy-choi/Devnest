@@ -1,7 +1,8 @@
 # DevNest gateway — static Traefik configuration.
 #
 # TLS / HTTPS:
-#   - Local/dev:    DEVNEST_TLS_ENABLED=false (default). Only port 80 is active.
+#   - Local/dev:    DEVNEST_TLS_ENABLED=false (default). Published ``web`` (:80) is typical; ``websecure``
+#                   (:443) stays available for routers that request TLS (self-signed or ACME per-router).
 #   - Dev with TLS: DEVNEST_TLS_ENABLED=true, DEVNEST_TLS_RESOLVER=none.
 #                   Traefik generates a self-signed certificate for the websecure entrypoint.
 #   - Production:   DEVNEST_TLS_ENABLED=true, DEVNEST_TLS_RESOLVER=letsencrypt (or cloudflare).
@@ -39,23 +40,29 @@ providers:
   # TODO: Add providers.http pointing at control-plane route registry when implemented.
   # TODO: Add providers.redis or Kubernetes CRD for multi-replica dynamic state.
 
-# ACME / Let's Encrypt certificate resolver (production).
-# Uncomment and configure when DEVNEST_TLS_ENABLED=true with a public domain.
+# ACME / Let's Encrypt (production API HTTPS on api.<domain>).
 #
-# certificatesResolvers:
-#   letsencrypt:
-#     acme:
-#       email: "${DEVNEST_ACME_EMAIL}"
-#       storage: /etc/traefik/acme/acme.json
-#       httpChallenge:
-#         entryPoint: web
-#   # Alternative: DNS challenge via Cloudflare (set CF_API_EMAIL + CF_DNS_API_TOKEN env vars).
-#   # cloudflare:
-#   #   acme:
-#   #     email: "${DEVNEST_ACME_EMAIL}"
-#   #     storage: /etc/traefik/acme/acme.json
-#   #     dnsChallenge:
-#   #       provider: cloudflare
+# Workspace legacy routes can stay HTTP-only on host :9081 → container :80 (DEVNEST_TLS_ENABLED=false for route-admin).
+# API TLS uses ``dynamic/051-api-https-letsencrypt.yml`` (``051-api-https-letsencrypt.yml.example`` is a copy template).
+#
+# Required on the Traefik container / host:
+#   - Set DEVNEST_ACME_EMAIL to a working contact address (Let's Encrypt requirement).
+#   - Persist ``/etc/traefik/acme/acme.json`` (named volume; see ``docker-compose.ec2-api-https.yml``).
+#   - Publish host ``443:443`` to Traefik ``websecure`` (and ``80:80`` if you use httpChallenge below).
+#
+# Resolver ``letsencrypt`` uses TLS-ALPN-01 (``tlsChallenge``) on ``websecure`` (:443). Set
+# ``DEVNEST_ACME_EMAIL`` on the Traefik container (see docker-compose). Persist ``acme.json`` via
+# ``docker-compose.ec2-api-https.yml`` (named volume) on EC2.
+#
+# Optional alternatives (comment out ``tlsChallenge`` and use one block): HTTP-01 needs public
+# ``80:80`` to ``web``; DNS-01 (e.g. Cloudflare) needs ``CF_DNS_API_TOKEN`` — see Traefik ACME docs.
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: tchoi720@gmail.com
+      storage: /etc/traefik/acme/acme.json
+      tlsChallenge: {}
 
 log:
   level: INFO

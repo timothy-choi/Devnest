@@ -27,4 +27,5 @@ def test_compose_referenced_files_exist(gateway_root: Path) -> None:
     assert (gateway_root / "traefik" / "traefik.yml").is_file()
     assert (gateway_root / "traefik" / "dynamic" / "000-base.yml").is_file()
     assert (gateway_root / "traefik" / "dynamic" / "100-workspaces.yml").is_file()
+    assert (gateway_root / "traefik" / "dynamic" / "051-api-https-letsencrypt.yml").is_file()
     assert (gateway_root / "docker-compose.yml").is_file()

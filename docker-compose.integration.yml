@@ -32,6 +32,9 @@
 #   - Optional: ``DEVNEST_AUTH_DIAGNOSTICS=true`` on backend + frontend → ``/internal/devnest-auth-diagnostics`` and ``/api/internal/devnest-diagnostics`` (remove after debugging).
 #   - Do not set ``AUTH_COOKIE_SECURE=true`` unless the UI is served over HTTPS (plain HTTP ignores Secure cookies).
 #
+# Production API HTTPS via Traefik: docs/API_GATEWAY_HTTPS.md — ``scripts/deploy-ec2.sh`` merges
+# ``docker-compose.ec2-api-https.yml`` by default (host ``80``/``443`` + ACME volume alongside ``9081``/``9443``).
+#
 # Workspace browser URL (Traefik + route-admin are included in this compose):
 #   Pattern: ``{DEVNEST_GATEWAY_PUBLIC_SCHEME}://ws-<workspace_id>.<DEVNEST_BASE_DOMAIN>[:<DEVNEST_GATEWAY_PUBLIC_PORT>]/``
 #   Defaults: gateway enabled, ``DEVNEST_BASE_DOMAIN=app.lvh.me``, Traefik HTTP on host port 9081,
@@ -385,6 +388,8 @@ services:
     environment:
       # ForwardAuth inside Traefik dynamic YAML (substituted by Traefik).
       DEVNEST_BACKEND_AUTH_URL: http://backend:8000/internal/gateway/auth
+      # Let's Encrypt contact email (required when routers use certResolver letsencrypt).
+      DEVNEST_ACME_EMAIL: ${DEVNEST_ACME_EMAIL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

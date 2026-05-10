@@ -1,0 +1,15 @@
+# HTTPS for api.devnest-app.com on entrypoint ``websecure`` (Let's Encrypt via tlsChallenge).
+#
+# Prerequisites: ``certificatesResolvers.letsencrypt`` in ``traefik/traefik.yml``, ``DEVNEST_ACME_EMAIL``,
+# host ``443:443`` published to Traefik, and DNS A for api.devnest-app.com → this host.
+# See docs/API_GATEWAY_HTTPS.md.
+
+http:
+  routers:
+    devnest-api-public-https:
+      rule: "Host(`api.devnest-app.com`)"
+      entryPoints:
+        - websecure
+      service: devnest-backend-api
+      tls:
+        certResolver: letsencrypt
