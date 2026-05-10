@@ -34,6 +34,10 @@ code-server is chosen because:
 - Extensions, themes, and keyboard shortcuts are identical to VS Code.
 - It exposes a single HTTP port (`:8080` by default) suitable for reverse-proxy access.
 
+### Browser URL (`?folder=`)
+
+code-server redirects the browser to `/?folder=/home/coder/project` (or `?workspace=`) so the workbench matches the opened directory. The DevNest workspace image **patches** `workbench.html` at build time with a small script that calls `history.replaceState` to remove **only** those keys from the address bar after load, so users can bookmark and share **`https://ws-…/`** without the query string while the IDE stays on the project. Rebuild **`devnest/workspace`** after upgrading the upstream `codercom/code-server` base tag (patch is idempotent). For tests, `DEVNEST_PATCH_CODE_SERVER_ROOT` points the patcher at a synthetic tree.
+
 ---
 
 ## Container Image Requirements
